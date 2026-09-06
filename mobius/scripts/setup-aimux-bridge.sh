@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
+<<<<<<< HEAD
 # Create or refresh mobius/.venv-aimux with aimux==0.1.27 from PyPI.
+=======
+# Create or refresh mobius/.venv-aimux with aimux==0.1.28 from PyPI.
+>>>>>>> gitlab-mobius/main
 # Idempotent: skips install when aimux of the right version is already on disk.
 # Used by start_product.py / Dockerfile.
 set -euo pipefail
 
 MOBIUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${AIMUX_VENV:-$MOBIUS_DIR/.venv-aimux}"
+<<<<<<< HEAD
 AIMUX_VERSION="${AIMUX_VERSION:-0.1.27}"
+=======
+AIMUX_VERSION="${AIMUX_VERSION:-0.1.28}"
+>>>>>>> gitlab-mobius/main
 UV_BIN="${UV_BIN:-uv}"
 
 need_install=1

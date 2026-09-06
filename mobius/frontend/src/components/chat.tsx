@@ -77,11 +77,18 @@ function mergeJsonlEntriesByIdentity(prev: any[], incoming: any[]): any[] {
   })
   if (add.length === 0) return prev
   const merged = prev.concat(add)
+  // ts 候选位与后端 parseTimestampMs 对齐 (codex 条目在 payload.timestamp);
+  // 无 ts 的条目比较视为相等 (稳定排序保持原位), 绝不落到队首.
   const ts = (e: any) => {
-    const ms = Date.parse(e?.timestamp || e?.created_at || '')
-    return Number.isFinite(ms) ? ms : 0
+    const ms = Date.parse(e?.timestamp || e?.created_at || e?.payload?.timestamp || e?.message?.created_at || '')
+    return Number.isFinite(ms) ? ms : NaN
   }
-  merged.sort((a: any, b: any) => ts(a) - ts(b))
+  merged.sort((a: any, b: any) => {
+    const ta = ts(a)
+    const tb = ts(b)
+    if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0
+    return ta - tb
+  })
   return merged
 }
 
@@ -1600,6 +1607,14 @@ export function SessionRow({ session, isSelected, onSelect, onEdit, onDelete, pi
   const modelLabel = sessionModelLabel(session.model, session.model_label)
   const proxyLabel = sessionProxyLabel(session.use_proxy, session.model)
   const nameMuted = isSessionNameMuted(session.agent_status)
+  const actionCount = [onEdit, onDelete, pinnedIds && onTogglePinned].filter(Boolean).length
+  const actionWidthClass = actionCount >= 3
+    ? 'group-hover:w-16 group-focus-within:w-16'
+    : actionCount === 2
+      ? 'group-hover:w-11 group-focus-within:w-11'
+      : actionCount === 1
+        ? 'group-hover:w-6 group-focus-within:w-6'
+        : ''
 
   return (
     <div onClick={() => onSelect(session)}
@@ -1612,21 +1627,10 @@ export function SessionRow({ session, isSelected, onSelect, onEdit, onDelete, pi
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <div className="text-[11px] font-medium leading-[13px] truncate" title={session.name} style={{ color: nameMuted ? textMuted : textPrimary }}>{session.name}</div>
-        <div className="text-[10px] leading-[12px] mt-0.5 truncate" style={{ color: textMuted }}>{session.message_count} 消息 · {timeAgo(session.last_active)}</div>
+        <div className="text-[10px] leading-[12px] mt-0.5 truncate" style={{ color: textMuted }}>{[`${session.message_count} 消息`, timeAgo(session.last_active), modelLabel].filter(Boolean).join(' · ')}</div>
       </div>
-      <div className="relative h-6 w-[88px] flex-shrink-0 overflow-hidden">
+      <div className={`relative h-6 w-0 flex-shrink-0 overflow-hidden transition-[width] duration-150 ${actionWidthClass}`}>
         <div className="absolute inset-0 flex items-center justify-end gap-1 overflow-hidden opacity-100 transition-opacity group-hover:opacity-0">
-          {modelLabel && (
-            <span className="min-w-0 max-w-[82px] truncate rounded px-1.5 py-[1px] text-[9px] leading-4 border"
-              title={`模型: ${modelLabel}`}
-              style={{
-                color: theme !== 'light' ? '#93c5fd' : '#1d4ed8',
-                background: theme !== 'light' ? 'rgba(59,130,246,0.10)' : 'rgba(59,130,246,0.07)',
-                borderColor: theme !== 'light' ? 'rgba(147,197,253,0.22)' : 'rgba(37,99,235,0.16)',
-              }}>
-              {modelLabel}
-            </span>
-          )}
           {session.research_role && (
             <span className="flex-shrink-0 rounded px-1.5 py-[1px] text-[9px] leading-4 border"
               title={`研究角色: ${session.research_role}`}
@@ -3865,6 +3869,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // count-then-tail: "加载全部" = 只拉伴生轨全量骨架 (超长会话按需加载).
   // 骨架 = 每轮一张用户输入卡, 主轨明细等用户展开该轮时再按时间戳切片取 (loadRoundJsonlDetail).
   // 伴生轨为空的旧会话回退旧路径 (拉双轨 merge 头部窗口).
+  const [spineMode, setSpineMode] = useState(false)
   const spineModeRef = useRef(false)
   const handleLoadAllJsonl = useCallback(async () => {
     const sid = currentSession?.session_id || currentTask?.task_id
@@ -3879,11 +3884,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
       if (sid !== activeSid) return
       if (spine.length > 0) {
-        const merged = mergeJsonlEntriesByIdentity(jsonlEntries, spine)
-        setJsonlEntries(merged)
-        spineModeRef.current = true
-        // 骨架已全量在手: total 对齐本地条数, "加载全部" 按钮消失; 主轨明细改按轮加载.
-        setJsonlTotal(merged.length)
+        // 必须函数式更新: 此刻可能有刚 flush 的 SSE 批次还在 setState 队列里,
+        // 用过期闭包整体覆盖会把它们抹掉 (表现为卡片消失). updater 内记录增量供 effect 判定.
+        spineAddedRef.current = null
+        setJsonlEntries(prev => {
+          const merged = mergeJsonlEntriesByIdentity(prev, spine)
+          spineAddedRef.current = merged.length - prev.length
+          return merged
+        })
+        spineEvalPendingRef.current = true
       } else {
         // 回退: 无伴生轨的旧会话走旧 merge 窗口
         const missing = jsonlTotal - jsonlEntries.length
@@ -3913,7 +3922,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       const collected: any[] = []
       let fromByte: number | null = null
       for (let page = 0; page < 10; page++) {
-        const q = new URLSearchParams({ track: 'primary', from_ts: fromTs, limit: '2000' })
+        const q = new URLSearchParams({ track: 'primary', from_ts: fromTs, limit: '4000' })
         if (toTs) q.set('to_ts', toTs)
         if (fromByte != null) q.set('from_byte', String(fromByte))
         const data = await api(`/api/sessions/${sid}/jsonl-history?${q.toString()}`)
@@ -3936,10 +3945,45 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     }
   }, [currentSession?.session_id, currentTask?.task_id])
 
+  // 骨架合并结果判定: updater 在 commit 时执行, 模式/total 决策放到 jsonlEntries 变化后的 effect 里做.
+  const spineAddedRef = useRef<number | null>(null)
+  const spineEvalPendingRef = useRef(false)
+  useEffect(() => {
+    if (!spineEvalPendingRef.current) return
+    spineEvalPendingRef.current = false
+    // total 对齐本地条数, "加载全部" 按钮消失; 主轨明细改按轮加载.
+    setJsonlTotal(jsonlEntries.length)
+    // 只有骨架真的带来了本地没有的条目才进入骨架模式;
+    // 新会话/骨架与本地重合时保持普通模式, 避免"加载明细"误报.
+    if ((spineAddedRef.current ?? 0) > 0) {
+      spineModeRef.current = true
+      setSpineMode(true)
+    }
+    spineAddedRef.current = null
+  }, [jsonlEntries])
+
+  // 骨架自动加载: 首包历史到位后, 若远端还有头部未加载 (total > entries), 后台自动拉伴生轨骨架.
+  // 骨架极小; 拉完后旧轮次立即以"仅问题卡"形态出现, 展开时按需取明细, 无需先点"加载全部".
+  const spineAutoLoadedForRef = useRef<string | null>(null)
+  useEffect(() => {
+    const sid = currentSession?.session_id || currentTask?.task_id
+    if (!sid || jsonlInitialLoading) return
+    if (spineAutoLoadedForRef.current === sid) return
+    if (spineModeRef.current) { spineAutoLoadedForRef.current = sid; return }
+    if (jsonlLoadingMore) return   // 正在加载 (如用户手点): 等结束后本 effect 重跑再试, 不标记
+    if (!(jsonlTotal > jsonlEntries.length)) return
+    spineAutoLoadedForRef.current = sid
+    handleLoadAllJsonl()
+  }, [currentSession?.session_id, currentTask?.task_id, jsonlInitialLoading, jsonlLoadingMore, jsonlTotal, jsonlEntries.length, handleLoadAllJsonl])
+
   useEffect(() => {
     const sid = currentSession?.session_id || currentTask?.task_id
     if (!sid) return
     clearPendingJsonlEntries()
+    spineModeRef.current = false
+    setSpineMode(false)
+    roundDetailLoadedRef.current = new Set()
+    setLoadingRoundUuid(null)
     freshHistoryReceivedRef.current = false
     setStreamContent('')
     setTyping(false)
@@ -4742,7 +4786,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           hasNewMessages={hasNewMessages}
           onLoadAllJsonl={handleLoadAllJsonl}
           onLoadRoundDetail={loadRoundJsonlDetail}
-          roundDetailLoaded={spineModeRef.current ? roundDetailLoadedRef.current : undefined}
+          roundDetailLoaded={roundDetailLoadedRef.current}
+          spineMode={spineMode}
           roundDetailVersion={roundDetailTick}
           loadingRoundUuid={loadingRoundUuid}
           onScrollPositionChange={handleJsonlScrollPositionChange}

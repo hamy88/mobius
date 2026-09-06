@@ -26,10 +26,10 @@ import {
   saveRoundHeaderPaletteIndex,
 } from './round-header-palette'
 
-// 首屏窗口 = 后端 SSE 首包的合并尾部窗口上限: 主轨尾 200 + .mobius.jsonl 轨尾 600
-// (特殊规则: mobius 轨不受 200 限制, 见 backend/services/mobius-jsonl.ts MOBIUS_HISTORY_TAIL)。
+// 首屏窗口 = 后端 SSE 首包的合并尾部窗口上限: 主轨尾 500 + .mobius.jsonl 轨尾 600
+// (特殊规则: mobius 轨不受 500 限制, 见 backend/services/mobius-jsonl.ts MOBIUS_HISTORY_TAIL)。
 // 窗口必须 ≥ 首包大小, 否则后端多回灌的更早用户输入卡会被前端重新裁掉。
-const JSONL_INITIAL_WINDOW_SIZE = 800
+const JSONL_INITIAL_WINDOW_SIZE = 1200
 
 function JsonlInitialSkeleton() {
   return (
@@ -127,6 +127,7 @@ export function JsonlView({
   roundDetailLoaded,
   roundDetailVersion,
   loadingRoundUuid,
+  spineMode,
   scrollToEntryUuid,
   scrollToMatchTs,
   onScrollResolved,
@@ -149,6 +150,8 @@ export function JsonlView({
   roundDetailLoaded?: Set<string>
   roundDetailVersion?: number
   loadingRoundUuid?: string | null
+  // 骨架模式: 伴生轨全量已并入 entries, 视窗自动全开 (不必再点"加载全部"才看见旧轮).
+  spineMode?: boolean
   // Cursor 式工具调用展示开关: true 时工具卡显示状态图标 + 连续探索类聚合; false 回退原始展示.
   cursorStyleTools?: boolean
   // 搜索结果跳转: 把命中条目的 uuid / timestamp 传进来, 解析到所属轮次后滚动到该轮卡片.
@@ -186,7 +189,9 @@ export function JsonlView({
       window.removeEventListener('storage', onStorage)
     }
   }, [roundHeaderPaletteIndex])
-  const recent = useMemo(() => entries.slice(-(showAll ? entries.length : JSONL_INITIAL_WINDOW_SIZE)), [entries, showAll])
+  // 骨架模式下视窗自动全开: 骨架已全量在手, 没必要再裁 800 窗口 (旧轮问题卡要直接可见).
+  const windowAll = showAll || !!spineMode
+  const recent = useMemo(() => entries.slice(-(windowAll ? entries.length : JSONL_INITIAL_WINDOW_SIZE)), [entries, windowAll])
   const windowOffset = entries.length - recent.length
   // 工具调用状态集合: 哪些 tool_use_id 已有结果落地 (供卡片推导 running/success/error).
   // 基于原始 recent 窗口扫描 (含被 merge/过滤隐藏的纯 tool_result entry), 引用随 recent 稳定.
@@ -212,6 +217,17 @@ export function JsonlView({
     [mergedItems, suppressedTaskUuids],
   )
   const { preItems, rounds } = useMemo(() => buildRounds(visibleItems), [visibleItems])
+  // 已加载主轨条目的最早时间戳: opener 早于它的轮, 远端才可能还有未加载的主轨明细;
+  // 不早于它的轮 (尾部窗口内, 主轨本来就全在本地) 一律视为已加载, 不给"加载明细"提示.
+  const oldestPrimaryMs = useMemo(() => {
+    let min = Infinity
+    for (const e of entries) {
+      if (!e || e.entrypoint === 'mobius' || e.mobius) continue
+      const ms = Date.parse(e?.timestamp || e?.created_at || '')
+      if (Number.isFinite(ms) && ms < min) min = ms
+    }
+    return min
+  }, [entries])
   // forgotten-flag 收尾折叠规则: 含 "running.flag" 且往前 8 个条目有 forgotten-flag 用户卡的卡片,
   // 默认折叠 (agent 被 forgotten-flag-scanner 系统提醒触发的机械删 flag 收尾链路, 对浏览对话价值低).
   // 在 visibleItems (已合并/已过滤) 序列上扫描, 命中的 lineNo 集合透传给各卡片渲染入口.
@@ -354,6 +370,11 @@ export function JsonlView({
     const openerTs = openerEntry?.timestamp || openerEntry?.created_at || null
     const nextOpenerEntry = rounds[block.index + 1]?.items[0]?.entry
     const nextTs = nextOpenerEntry?.timestamp || nextOpenerEntry?.created_at || null
+    // 切片窗口向两侧各扩一轮: 排队消息造成的轮界模糊被吸收, 相邻轮顺带预载 (多加载一些总没错).
+    const prevOpenerEntry = block.index > 0 ? rounds[block.index - 1]?.items[0]?.entry : null
+    const sliceFromTs = prevOpenerEntry?.timestamp || prevOpenerEntry?.created_at || openerTs
+    const afterNextEntry = rounds[block.index + 2]?.items[0]?.entry
+    const sliceToTs = afterNextEntry?.timestamp || afterNextEntry?.created_at || nextTs
     return (
       <RoundGroup
         round={block.round}
@@ -361,14 +382,18 @@ export function JsonlView({
         isSecondLast={block.index === rounds.length - 2}
         onlyGroup={onlyGroup}
         detailLoaded={(() => {
-          // 轮内已有非开篇条目 (尾部窗口带来的主轨明细) = 已加载;
-          // 骨架轮 (只有一张用户输入卡) 才看按需加载集合.
+          // 仅骨架模式启用按需明细: 未进骨架模式 (新会话/短会话/未加载) 一律不显示提示,
+          // 否则新会话第一轮 (mobius 卡恒早于原生 wrapped 卡 ~10s) 必然误报.
+          if (!spineMode || !roundDetailLoaded || !openerUuid) return undefined
+          // 轮内已有非开篇条目 = 已加载; opener 不早于已加载主轨最早 ts = 本地已齐, 也视为已加载
+          // (否则空轮/纯噪声轮会被误报"有未加载明细"). 只有更早的骨架轮才可能真的缺主轨.
           if (block.round.items.some((it: any) => it.relIdx > 0)) return true
-          if (!roundDetailLoaded || !openerUuid) return undefined
+          const openerMs = openerTs ? Date.parse(openerTs) : NaN
+          if (!Number.isFinite(openerMs) || !(openerMs < oldestPrimaryMs)) return true
           return roundDetailLoaded.has(openerUuid)
         })()}
         detailLoading={!!openerUuid && loadingRoundUuid === openerUuid}
-        onNeedDetail={openerUuid && openerTs && onLoadRoundDetail ? () => onLoadRoundDetail(openerUuid, openerTs, nextTs) : undefined}
+        onNeedDetail={openerUuid && openerTs && onLoadRoundDetail ? () => onLoadRoundDetail(openerUuid, sliceFromTs, sliceToTs) : undefined}
         forceExpandAll={forceExpandAll}
         forceOpen={block.key === extTarget?.key && extFocusLineNo !== null}
         showMeta={showMeta}
@@ -421,9 +446,9 @@ export function JsonlView({
             onClick={() => {
               if (loadingMore) return
               onLoadMore()
-              // 加载全部后: 打开整窗 (showAll 让头部条目进入视窗) + 强制展开所有组, 一步 "全部可见且展开".
+              // 加载全部后只打开整窗 (showAll 让头部条目进入视窗); 轮次组展开状态保持原样 —
+              // 不强制展开 (骨架模式下全部展开 = 一长串空轮头), 用户已展开/折叠的也不动.
               setShowAll(true)
-              setForceExpandAll(true)
             }}
             disabled={!!loadingMore}
             className="text-[11px] px-2 py-0.5 rounded border border-[var(--border-color)] hover:bg-[var(--bg-hover)] text-[var(--text-muted)] disabled:opacity-50"
@@ -431,7 +456,7 @@ export function JsonlView({
             {loadingMore ? '加载中…' : `加载全部 (共 ${displayTotal} 条)`}
           </button>
         )}
-        {!hasRemoteMore && entries.length > JSONL_INITIAL_WINDOW_SIZE && !showAll && (
+        {!hasRemoteMore && entries.length > JSONL_INITIAL_WINDOW_SIZE && !windowAll && (
           <button onClick={() => setShowAll(true)} className="text-[11px] px-2 py-0.5 rounded border border-[var(--border-color)] hover:bg-[var(--bg-hover)] text-[var(--text-muted)]">
             展开全部 ({entries.length})
           </button>

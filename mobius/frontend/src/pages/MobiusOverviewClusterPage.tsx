@@ -26,6 +26,7 @@ import { api, useStore } from '../store'
 import { TopNav, timeAgoPrecise } from '../components/shell'
 import { ResizablePanel, useIsMobile } from '../components/resizable-panel'
 import { pollRecursive } from '../services/polling'
+import { redactDisplayText } from '../services/text-redaction'
 import { AgentConversationOverlays } from '../components/agent-conversation-overlays'
 
 type TimeRangeKey = '24h' | '48h' | '72h' | '7d' | '30d'
@@ -295,6 +296,17 @@ function sessionColor(session: ClusterSession) {
 function sessionRadius(session: any) {
   const base = session.agent_status === 'running' ? 6.2 : isResearchAgent(session) ? 5.2 : 4.6
   return base * SESSION_RADIUS_SCALE
+}
+
+// 模型 → 执行引擎渠道。镜像后端 model-registry.backendNameForSessionModel 的
+// 前缀兜底规则 (读已有会话场景), 保证左上角统计与后端口径一致。
+function sessionHarness(session: any): 'codex' | 'cc' | 'other' {
+  const key = String(session?.model || '').trim()
+  if (!key) return 'other'
+  if (key.startsWith('deepseek-harness:')) return 'other'
+  if (key.startsWith('codex:') || key === 'codex' || key === 'gpt-5.5') return 'codex'
+  if (key.startsWith('claude-code:') || key.startsWith('claude-') || key === 'opus' || key === 'opus-4.8') return 'cc'
+  return 'codex'
 }
 
 function projectMatchesSearch(project: any, query: string) {
@@ -1475,7 +1487,8 @@ function roundedRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, wi
 function drawClusterLabel(ctx: CanvasRenderingContext2D, label: string, x: number, y: number, maxWidth: number, color: string, font: string) {
   ctx.font = font
   ctx.textBaseline = 'middle'
-  const text = textEllipsis(ctx, label, Math.max(36, maxWidth))
+  // canvas 文字不经过 DOM, 全局文字替换对它不可见; 落笔前用同一套规则替换.
+  const text = textEllipsis(ctx, redactDisplayText(label), Math.max(36, maxWidth))
   const width = Math.min(maxWidth, ctx.measureText(text).width + 14)
   const height = 18
   const left = x - width / 2
@@ -1488,6 +1501,59 @@ function drawClusterLabel(ctx: CanvasRenderingContext2D, label: string, x: numbe
   ctx.stroke()
   ctx.fillStyle = rgba(color, 0.9)
   ctx.fillText(text, x - ctx.measureText(text).width / 2, y + 0.5)
+}
+
+/**
+ * Draw a project name on the inside of the lower semicircle, like an
+ * inscription on a coin. Characters are laid out by their measured width so
+ * mixed CJK/Latin names stay centered and evenly distributed along the arc.
+ */
+function drawCircularClusterLabel(ctx: CanvasRenderingContext2D, label: string, cx: number, cy: number, radius: number, maxArcWidth: number, color: string, font: string) {
+  const text = redactDisplayText(label).trim()
+  if (!text || radius <= 0) return
+  ctx.save()
+  ctx.font = font
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  const textRadius = Math.max(20, radius - 14)
+  const arcLimit = Math.max(36, Math.min(Math.PI * textRadius * 0.84, maxArcWidth))
+  const sourceChars = Array.from(text)
+  const measureChars = (chars: string[]) => chars.reduce((sum, char) => sum + ctx.measureText(char).width, 0)
+  let chars = sourceChars
+  if (measureChars(chars) > arcLimit) {
+    chars = []
+    for (const char of sourceChars) {
+      const candidate = [...chars, char, '…']
+      if (measureChars(candidate) > arcLimit) break
+      chars.push(char)
+    }
+    if (chars.length < sourceChars.length) chars.push('…')
+    while (chars.length > 1 && measureChars(chars) > arcLimit) chars.pop()
+  }
+  if (!chars.length) return
+  const widths = chars.map((char) => ctx.measureText(char).width)
+  const totalWidth = widths.reduce((sum, width) => sum + width, 0)
+  const span = Math.min(Math.PI * 0.84, totalWidth / textRadius)
+  let distance = 0
+  chars.forEach((char, index) => {
+    const angle = Math.PI / 2 + span / 2 - (distance + widths[index] / 2) / textRadius
+    const x = cx + Math.cos(angle) * textRadius
+    const y = cy + Math.sin(angle) * textRadius
+    ctx.save()
+    ctx.translate(x, y)
+    // Angle follows the lower arc from left to right; at the bottom center
+    // the glyphs remain upright instead of appearing upside down.
+    ctx.rotate(angle - Math.PI / 2)
+    ctx.strokeStyle = 'rgba(7, 18, 24, 0.82)'
+    ctx.lineWidth = 2.6 / zoomSafe(ctx)
+    ctx.lineJoin = 'round'
+    ctx.strokeText(char, 0, 0)
+    ctx.fillStyle = rgba(color, 0.94)
+    ctx.fillText(char, 0, 0)
+    ctx.restore()
+    distance += widths[index]
+  })
+  ctx.restore()
 }
 
 function drawDiamondPath(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
@@ -2077,6 +2143,15 @@ export default function MobiusOverviewClusterPage() {
   }, [candidateProjects, graphDataByProject, loadProjectGraph])
 
   const model = useMemo(() => buildClusterModel(candidateProjects, graphDataByProject, cutoffMs, clusterMode), [candidateProjects, graphDataByProject, cutoffMs, clusterMode])
+  const harnessStats = useMemo(() => {
+    const stats = { cc: 0, codex: 0 }
+    model.nodes.forEach((node) => {
+      const harness = sessionHarness(node.source)
+      if (harness === 'cc') stats.cc += 1
+      else if (harness === 'codex') stats.codex += 1
+    })
+    return stats
+  }, [model.nodes])
   const overlaySessions = useMemo(() => model.nodes.map((node) => ({ id: node.id, title: node.title, projectId: node.projectId, projectName: node.projectName, creatorId: node.creatorId, parentId: node.parentId, parentKind: node.parentKind, color: sessionColor(node), x: node.x, y: node.y, active: ['running', 'executing', 'in_progress', 'working'].includes(String(node.status || '').toLowerCase()) || node.source?.agent_status === 'running' || manualOverlayIds.has(node.id) })), [model.nodes, manualOverlayIds])
   const activeProjectIds = useMemo(() => new Set(model.projectClusters.map((project) => project.id)), [model.projectClusters])
   const visibleProjects = useMemo(
@@ -2212,11 +2287,12 @@ export default function MobiusOverviewClusterPage() {
       }
       projectClusters.forEach((cluster) => {
         if (cluster.radius < 64) return
-        drawClusterLabel(
+        drawCircularClusterLabel(
           ctx,
           cluster.title,
           cluster.cx,
-          cluster.cy - cluster.radius + 24,
+          cluster.cy,
+          cluster.radius,
           Math.max(70, cluster.radius * 1.25),
           cluster.color,
           '600 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -2798,6 +2874,7 @@ export default function MobiusOverviewClusterPage() {
               <div className="mt-0.5 flex items-center gap-2 text-[8px]" style={{ color: 'var(--text-muted)' }}>
                 {clusterMode === 'creator' && <span>{model.creatorClusters.length} Creators</span>}
                 <span>{model.projectClusters.length} Projects · {model.parentClusters.length} Issues / Research · {model.nodes.length} Sessions / Agents</span>
+                <span title="按执行引擎统计当前视图内的智能体节点">claude code {harnessStats.cc} · codex {harnessStats.codex}</span>
                 {loadingCount > 0 && <span>{loadingCount} 个项目加载中</span>}
               </div>
             </div>

@@ -1366,14 +1366,15 @@ export function NewIssueModal({ projectId, onClose, onCreated, defaultUseWorktre
   }, [DRAFT_KEY, isGuidedDemo, title, desc, descTouched, useWorktree, createFirstSession, branch, visibility, isPlanning])
   const submit = async () => {
     if (!title.trim()) { setErr('请填写任务标题'); return }
-    if (!effectiveDesc.trim()) { setErr('请填写任务描述'); return }
+    // 描述留空时按 placeholder 承诺「默认同标题」回落, 不再报错.
+    const submittedDesc = effectiveDesc.trim() || title.trim()
     setLoading(true); setErr('')
     try {
       const iss = await api(`/api/projects/${projectId}/issues`, {
         method: 'POST',
         body: JSON.stringify({
           title,
-          description: effectiveDesc,
+          description: submittedDesc,
           use_worktree: isPlanning ? false : useWorktree,
           worktree_branch: (!isPlanning && useWorktree) ? branch.trim() : '',
           visibility,
@@ -4425,7 +4426,11 @@ export function AimuxGuideModal({ onClose }: { onClose: () => void }) {
   // 输入为空时回退到默认值, 避免生成 --identifier 空参数导致命令非法
   const effectiveIdentifier = identifier.trim() || defaultIdentifier
 
+<<<<<<< HEAD
   const installCmd = 'pip install --force-reinstall aimux==0.1.27'
+=======
+  const installCmd = 'pip install --force-reinstall aimux==0.1.28'
+>>>>>>> gitlab-mobius/main
   const connectCmd = `aimux reverse connect ${baseUrl} --identifier ${effectiveIdentifier} --token ${userJwt}`
   // 步骤4 话术: 命名占位用第2步输入的 identifier (实时随输入更新); skill 路径用后端 branding 下发的
   // APP_DIR 绝对路径展开 (用户要求显示绝对路径, agent 无论 cwd 在哪都能直达内置 skill 源目录);
