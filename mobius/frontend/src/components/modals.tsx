@@ -3920,9 +3920,12 @@ function manifestToRows(manifest: DesktopManifest): DesktopDownloadRow[] {
 }
 
 // 移动端构建清单 — 镜像桌面 DESKTOP_BUILDS。
-// size / sha256 由 build.py --build-mobile 从 momo-mobile 拷 APK 后自动回填
-// (按各 ABI 的 file 行匹配更新); iOS 暂留空 (file='' → 显示「未上线」)。
+// Android APK 走公网 CDN (serve.nutshellai.cn, 源站 gptac-zs nginx 静态目录
+// /home/mobius/publish/auto/mobius-mobile/), 任何人无需登录 Mobius 服务器即可下载;
+// 同源 /mobile-builds/ 仍保留兜底。size / sha256 由 build.py --build-mobile 回填。
 const MOBILE_VERSION = '0.1.18'
+// 公网 CDN 前缀; 上传脚本: python3 /tmp/upload_mobile_cdn.py mobius-mobile <apk...> (参考 Issue 999efcd9)
+const MOBILE_CDN_BASE = 'https://serve.nutshellai.cn/publish/auto/mobius-mobile'
 // iOS 走 TestFlight 公开邀请链接: build 上传后在 App Store Connect → TestFlight 开启"公开链接",
 // 把 https://testflight.apple.com/join/<CODE> 里的 <CODE> 填到下面 IOS_TESTFLIGHT_CODE。
 // 仍是占位时, iOS 行显示"未上线"; 填入真实 code 后自动变成 TestFlight 下载按钮。
@@ -4247,7 +4250,7 @@ export function MobileDownloadModal({ onClose }: { onClose: () => void }) {
               <span className="text-[12px] px-3 py-1 rounded-lg font-medium" style={{ background: '#0a84ff', color: '#fff' }}>TestFlight</span>
             </a>
           ) : b.file ? (
-            <a key={b.file} href={`/mobile-builds/${b.file}`} download
+            <a key={b.file} href={`${MOBILE_CDN_BASE}/${b.file}`} download
               title={b.sha256 ? `SHA256: ${b.sha256}` : undefined}
               className="flex items-center justify-between px-4 py-3 rounded-xl transition-colors hover:opacity-90"
               style={{ background: 'var(--bg-card-hover)', border: '1px solid var(--border-color)' }}>
