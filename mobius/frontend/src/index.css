@@ -5493,6 +5493,8 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
 .jsonl-compact-md table { width: 100%; border-collapse: collapse; margin: .45rem 0; font-size: 10.5px; }
 
 .agent-conversation-overlay {
+  --agent-overlay-surface: color-mix(in srgb, var(--modal-bg) 72%, transparent);
+  --agent-overlay-shadow: 0 16px 42px rgba(0, 0, 0, .35), 0 0 0 1px rgba(255, 255, 255, .05) inset;
   --agent-overlay-title-font-size: 11px;
   --agent-overlay-empty-font-size: 11px;
   --agent-overlay-mention-font-size: 10px;
@@ -5511,6 +5513,62 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
 .agent-conversation-overlay__mention { font-size: var(--agent-overlay-mention-font-size); }
 .agent-conversation-overlay__input { font-size: var(--agent-overlay-input-font-size); }
 .agent-conversation-overlay__status { font-size: var(--agent-overlay-status-font-size); }
+
+/* The shared JSONL themes intentionally use luminous dark-mode accents. Keep
+   those cards unchanged elsewhere, but remap them inside light conversation
+   overlays so labels remain readable on the opaque light surface. */
+.light .agent-conversation-overlay {
+  --agent-overlay-surface: rgba(255, 255, 255, .96);
+  --agent-overlay-shadow: 0 16px 42px rgba(15, 23, 42, .18), 0 0 0 1px rgba(15, 23, 42, .10) inset;
+}
+.light .agent-conversation-overlay__header {
+  background: color-mix(in srgb, var(--bg-tertiary) 88%, white) !important;
+}
+.light .agent-conversation-overlay .jsonl-entry-card {
+  background-color: color-mix(in srgb, var(--bg-tertiary) 92%, white) !important;
+  border-color: color-mix(in srgb, var(--text-primary) 16%, transparent) !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+}
+.light .agent-conversation-overlay .agent-conversation-overlay__mention {
+  background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-secondary)) !important;
+  border-color: color-mix(in srgb, var(--accent-primary) 32%, var(--border-color-strong)) !important;
+}
+.light .agent-conversation-overlay .agent-conversation-overlay__send {
+  color: var(--accent-primary) !important;
+  background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-secondary)) !important;
+}
+.light .agent-conversation-overlay .mobius-chat-input {
+  border-color: var(--border-color-strong) !important;
+}
+.light .agent-conversation-overlay__connector {
+  stroke-opacity: .72;
+  stroke-width: 1.4;
+}
+.light .agent-conversation-overlay .text-slate-300 { color: #334155 !important; }
+.light .agent-conversation-overlay .text-blue-300 { color: #1d4ed8 !important; }
+.light .agent-conversation-overlay .text-purple-300 { color: #7e22ce !important; }
+.light .agent-conversation-overlay .text-amber-300 { color: #b45309 !important; }
+.light .agent-conversation-overlay .text-zinc-300 { color: #3f3f46 !important; }
+.light .agent-conversation-overlay .text-zinc-400 { color: #52525b !important; }
+.light .agent-conversation-overlay .text-cyan-300 { color: #0e7490 !important; }
+.light .agent-conversation-overlay .text-pink-300 { color: #be185d !important; }
+.light .agent-conversation-overlay .text-emerald-300 { color: #047857 !important; }
+.light .agent-conversation-overlay .text-red-200,
+.light .agent-conversation-overlay .text-red-300,
+.light .agent-conversation-overlay .text-red-400 { color: #b91c1c !important; }
+.light .agent-conversation-overlay .text-indigo-300 { color: #4338ca !important; }
+.light .agent-conversation-overlay .text-teal-200,
+.light .agent-conversation-overlay .text-teal-300 { color: #0f766e !important; }
+.light .agent-conversation-overlay .text-yellow-300 { color: #a16207 !important; }
+.light .agent-conversation-overlay .text-sky-300,
+.light .agent-conversation-overlay .text-sky-400 { color: #0369a1 !important; }
+.light .agent-conversation-overlay .text-violet-300 { color: #6d28d9 !important; }
+.light .agent-conversation-overlay .text-fuchsia-200 { color: #a21caf !important; }
+.light .agent-conversation-overlay .text-orange-300 { color: #c2410c !important; }
+.light .agent-conversation-overlay .text-gray-400 { color: #4b5563 !important; }
+.light .agent-conversation-overlay .text-amber-400 { color: #b45309 !important; }
+.light .agent-conversation-overlay .text-cyan-400 { color: #0e7490 !important; }
+.light .agent-conversation-overlay .text-blue-400 { color: #2563eb !important; }
 
 /* A quiet, directional signal from the agent node into its conversation window. */
 @keyframes agent-overlay-connector-flow {
