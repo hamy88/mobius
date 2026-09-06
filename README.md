@@ -93,11 +93,19 @@ XiaoMo is the natural-language interface to the entire system. Talk to it: creat
 
 **On your phone.** XiaoMo goes wherever you go — chat with your agents, track progress, and approve decisions from anywhere. The iOS and Android apps are now fully available.
 
+- Android (arm64-v8a): [mobius-mobile-0.1.18-android-arm64.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-arm64.apk)
+- Android (armeabi-v7a): [mobius-mobile-0.1.18-android-armeabi-v7a.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-armeabi-v7a.apk)
+- iOS (TestFlight): [https://testflight.apple.com/join/EgamfnR7](https://testflight.apple.com/join/EgamfnR7)
+
 <p align="center">
   <img src="https://serve.nutshellai.cn/publish/auto/readme/xiaomo-desktop-v2.png" alt="XiaoMo desktop app" width="720" />
 </p>
 
 **On your desktop.** A native app that turns your PC into a Mobius workstation — read and write local project files directly, enroll this machine as a controllable node, and run multi-tab workflows. Available now on Windows, macOS, and Linux.
+
+- Windows x64: [mobius-desktop-0.0.29-win-x64.zip](https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.29/mobius-desktop-0.0.29-win-x64.zip)
+- macOS Apple Silicon: [mobius-desktop-0.0.29-mac-arm64.zip](https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.29/mobius-desktop-0.0.29-mac-arm64.zip)
+- macOS Intel: [mobius-desktop-0.0.29-mac-x64.zip](https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.29/mobius-desktop-0.0.29-mac-x64.zip)
 
 > The demos on this page were produced by XiaoMo itself, recorded with zero human involvement.
 
