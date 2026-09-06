@@ -327,12 +327,19 @@ function startDesktopBuildsSyncer() {
 
   const runSync = async () => {
     try {
-      const { syncDesktopBuilds } = require('./backend/services/sync-desktop-builds');
+      const { syncDesktopBuilds, syncMobileBuilds } = require('./backend/services/sync-desktop-builds');
       const r = await syncDesktopBuilds({
         log: (...args) => console.log('[mobius/desktop-sync]', ...args),
       });
       if (r.downloaded > 0) {
         console.log(`[mobius/desktop-sync] ${r.tag}: ${r.downloaded} downloaded, ${r.skipped} cached → ${r.dest}`);
+      }
+      // 移动端 APK 与桌面端同源同构, 一并同步 (无 mobile Release 时内部静默跳过)
+      const m = await syncMobileBuilds({
+        log: (...args) => console.log('[mobius/mobile-sync]', ...args),
+      });
+      if (m && m.downloaded > 0) {
+        console.log(`[mobius/mobile-sync] ${m.tag}: ${m.downloaded} downloaded, ${m.skipped} cached → ${m.dest}`);
       }
     } catch (e) {
       console.warn('[mobius/desktop-sync] 同步异常(下次重试):', (e && e.message) || e);
