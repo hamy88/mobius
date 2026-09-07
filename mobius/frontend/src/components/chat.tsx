@@ -4922,6 +4922,16 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                   ))}
                 </div>
               )}
+              <div className="relative">
+              {!input && !editingMsg && !isNewConversation && (
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid grid-cols-2 gap-x-3 gap-y-0.5 pb-1 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
+                  <span className="col-span-2">发送指令：</span>
+                  <span>· Shift+Enter 换行</span>
+                  <span>· Ctrl/⌘+V 粘贴文件/截图</span>
+                  <span>· ↑键回溯</span>
+                  <span>· @引用文件/智能体</span>
+                </div>
+              )}
               <textarea ref={inputRef} value={input} onChange={handleChatInputChange}
                 onCompositionStart={() => { composingRef.current = true }}
                 onCompositionEnd={() => { composingRef.current = false }}
@@ -4952,10 +4962,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                   e.preventDefault()
                   send(autoUrgentOnEnter)
                 }}
-                placeholder={inputPlaceholder}
+                placeholder={input && inputPlaceholder}
                 className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[11px] focus:outline-none overflow-y-auto"
                 style={{ height: inputHeight, minHeight: 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
               />
+              </div>
             </div>
             <div className="relative flex items-end gap-2 px-3 pb-3 pt-0">
               {layout === 'easy' && easyProjectControl && (
