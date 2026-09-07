@@ -3285,7 +3285,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     ? '编辑消息后按 Enter 重新发送...'
     : isNewConversation
       ? '今天有什么计划？'
-      : '发送指令：\n· Shift+Enter 换行\n· Ctrl/⌘+V 粘贴文件/截图\n· ↑键回溯\n· @引用文件/智能体）...'
+      : '发送指令：\n· Shift+Enter 换行\n· Ctrl/⌘+V 粘贴文件/截图\n· ↑键回溯\n· @引用文件/智能体'
 
   const handleChatInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const nextValue = event.target.value
@@ -4947,7 +4947,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                   send(autoUrgentOnEnter)
                 }}
                 placeholder={inputPlaceholder}
-                className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[12px] focus:outline-none overflow-y-auto"
+                className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[11px] focus:outline-none overflow-y-auto"
                 style={{ height: inputHeight, minHeight: 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
               />
             </div>
