@@ -32,6 +32,7 @@ import {
 } from '../services/project-session-search'
 import { projectItemOrder } from '../services/project-session-order'
 import { pollRecursive } from '../services/polling'
+import { readListCache, writeListCache } from '../services/list-swr-cache'
 import {
   DEFAULT_FORGOTTEN_FLAG_ISSUE_BACKOFF,
   DEFAULT_FORGOTTEN_FLAG_ISSUE_INTERVAL_MINUTES,
@@ -112,7 +113,8 @@ export default function ProjectPage() {
   const { projects, setProjects, currentProject, setCurrentProject,
           issues, issuesMap, setIssues, setIssuesMap, setCurrentIssue,
           researches, researchesMap, setResearches, setResearchesMap, setCurrentResearch,
-          sessionsMap, setSessionsMap, setSessionsMapBatch, setCurrentSession, setCurrentTask } = useStore()
+          sessionsMap, setSessionsMap, setSessionsMapBatch, setCurrentSession, setCurrentTask,
+          user: viewer } = useStore()
   const userParam = params.user || ''
   const projectId = params.project || ''
 
@@ -230,20 +232,36 @@ export default function ProjectPage() {
     setCurrentResearch(null)
     setCurrentSession(null)
     setCurrentTask(null)
-    if (!projects.length) api('/api/projects').then(setProjects).catch(() => {})
+    if (!projects.length) {
+      // 面包屑 newTab 等场景下本页是新 JS 上下文, projects 内存缓存为空:
+      // 先秒显本地缓存再后台刷新, 项目名/面包屑不用等 /api/projects 回来.
+      const cachedProjects = readListCache<any>("projects-all", viewer?.id)
+      if (cachedProjects) setProjects(cachedProjects.list)
+      api('/api/projects').then((arr: any) => {
+        setProjects(arr)
+        writeListCache("projects-all", viewer?.id, arr || [])
+      }).catch(() => {})
+    }
 
     // Issue 列表: 命中缓存 → 立即展示(秒开) + 后台静默刷新; 未缓存 → 显示 loading 直到拉到.
-    const issuesCached = !!issuesMap[projectId]
+    // 本地缓存 (localStorage) 兜住 newTab/整页刷新场景: 内存 issuesMap 为空也能先秒显.
+    const issuesLocal = readListCache<any>(`issues:${projectId}`, viewer?.id)
+    const issuesCached = !!issuesMap[projectId] || !!issuesLocal?.list?.length
+    if (issuesLocal && !issuesMap[projectId]) setIssuesMap(projectId, issuesLocal.list)
     setIssuesLoading(!issuesCached)
     api(`/api/projects/${projectId}/issues`).then((arr: any) => {
       setIssues(arr); setIssuesMap(projectId, arr)
+      writeListCache(`issues:${projectId}`, viewer?.id, arr || [])
     }).catch(() => {}).finally(() => { if (alive) setIssuesLoading(false) })
 
     // Research 列表: 与 Issue 同款逻辑, 行为保持一致.
-    const researchesCached = !!researchesMap[projectId]
+    const researchesLocal = readListCache<any>(`researches:${projectId}`, viewer?.id)
+    const researchesCached = !!researchesMap[projectId] || !!researchesLocal?.list?.length
+    if (researchesLocal && !researchesMap[projectId]) setResearchesMap(projectId, researchesLocal.list)
     setResearchesLoading(!researchesCached)
     api(`/api/projects/${projectId}/researches`).then((arr: any) => {
       setResearches(arr); setResearchesMap(projectId, arr)
+      writeListCache(`researches:${projectId}`, viewer?.id, arr || [])
     }).catch(() => {}).finally(() => { if (alive) setResearchesLoading(false) })
 
     return () => { alive = false }

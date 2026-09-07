@@ -3655,9 +3655,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const syncHeight = () => {
       const minHeight = 60
       const maxHeight = Math.floor(window.innerHeight * 0.7)
+      // A multiline placeholder contributes to scrollHeight in Chromium even
+      // when the textarea is empty. Measure only the user's value so the
+      // instructional placeholder cannot stretch the input panel.
+      const placeholder = el.getAttribute('placeholder')
+      if (!el.value && placeholder) el.removeAttribute('placeholder')
       el.style.height = 'auto'
       el.style.maxHeight = `${maxHeight}px`
       const nextHeight = Math.max(minHeight, Math.min(el.scrollHeight, maxHeight))
+      if (!el.value && placeholder !== null) el.setAttribute('placeholder', placeholder)
       el.style.height = `${nextHeight}px`
       setInputHeight(prev => prev === nextHeight ? prev : nextHeight)
     }
