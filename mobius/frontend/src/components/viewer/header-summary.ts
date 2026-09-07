@@ -40,7 +40,7 @@ import { extractInitialContext, initialContextSummaryLine } from './initial-cont
 // 阈值=80: 一行 summary 在常规桌面宽度下大概 80~100 字就会被 CSS truncate 截断,
 // 比 JS slice 阈值低更稳, 否则会出现"视觉上 ... 但 JS 判定没截断 → 没精简模式入口"的脱节.
 const HEADER_SHORT_LIMIT = 160
-const HEADER_COMPACT_LIMIT = 40
+const HEADER_COMPACT_LIMIT = 5
 const ENCRYPTED_REASONING_LABEL = 'Reasoning (闭源模型的推理过程被加密，无法解码）'
 
 export function clip(text: string, limit: number = HEADER_SHORT_LIMIT): HeaderSummary {
