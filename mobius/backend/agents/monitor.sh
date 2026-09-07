@@ -3,12 +3,14 @@
 #
 # 用法:
 #   bash mobius/backend/agents/monitor.sh --session=<sessionId> --type=<claude|codex|deepseek>
-#
+#   bash mobius/backend/agents/monitor.sh --session=b89eb46e --type=claude
 # 每轮打印:
 #   isAlive / isWorking / getRecentError / getHistory / getSessionTitle / realTimeInfo
 #
 # 说明: 直接 require 后端 AgentBackend 单例 (与 server 同一套持久化映射文件),
 # 只读查询, 不创建/终止 session. Ctrl-C 退出.
+# 自动加载仓库根 .env / .env.default (已有环境变量优先),
+# 否则 config.js 回落容器默认 DB_PATH=/data 导致 EACCES.
 set -eu
 
 SESSION_ID=""
@@ -44,6 +46,26 @@ export MONITOR_SESSION_ID="$SESSION_ID"
 export MONITOR_AGENT_TYPE="$AGENT_TYPE"
 
 exec node --require "$PWD/../../node_modules/tsx/dist/cjs/index.cjs" - <<'EOF'
+// 先加载仓库根 .env -> .env.default (与 start_product.py 同序; 已有环境变量优先),
+// 必须在 require('./index') 之前: config.js 在模块加载期就读 process.env.
+;(() => {
+  const fs = require('fs')
+  const path = require('path')
+  for (const name of ['.env', '.env.default']) {
+    const file = path.resolve(process.cwd(), '../../..', name)
+    if (!fs.existsSync(file)) continue
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/)
+      if (!m) continue
+      let value = m[2].trim()
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1)
+      }
+      if (!(m[1] in process.env)) process.env[m[1]] = value
+    }
+  }
+})()
+
 const { get } = require('./index')
 
 const sessionId = process.env.MONITOR_SESSION_ID
