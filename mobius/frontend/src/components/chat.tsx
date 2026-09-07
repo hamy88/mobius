@@ -4924,12 +4924,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               )}
               <div className="relative">
               {!input && !editingMsg && !isNewConversation && (
-                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid grid-cols-2 gap-x-3 gap-y-0.5 pb-1 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
-                  <span className="col-span-2">发送指令：</span>
-                  <span>· Shift+Enter 换行</span>
-                  <span>· Ctrl/⌘+V 粘贴文件/截图</span>
-                  <span>· ↑键回溯</span>
-                  <span>· @引用文件/智能体</span>
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid min-w-0 grid-cols-2 gap-x-3 gap-y-0.5 pb-1 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
+                  <span className="col-span-2 min-w-0 truncate">发送指令：</span>
+                  <span className="min-w-0 truncate">· Shift+Enter 换行</span>
+                  <span className="min-w-0 truncate">· Ctrl/⌘+V 粘贴文件/截图</span>
+                  <span className="min-w-0 truncate">· ↑键回溯</span>
+                  <span className="min-w-0 truncate">· @引用文件/智能体</span>
                 </div>
               )}
               <textarea ref={inputRef} value={input} onChange={handleChatInputChange}
