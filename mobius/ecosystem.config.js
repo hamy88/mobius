@@ -130,5 +130,22 @@ module.exports = {
         ...inheritedEnv,
       },
     },
+    {
+      // 局域网 HTTPS 反代: 0.0.0.0:443 → 127.0.0.1:33316 (自签证书, 见 backend/https-proxy-certs/)
+      name: 'mobius-system-https',
+      cwd: mobiusDir,
+      script: path.join(mobiusDir, 'backend', 'https-proxy.js'),
+      exec_mode: 'fork',
+      instances: '1',
+      autorestart: true,
+      kill_timeout: 5000,
+      max_memory_restart: '128M',
+      out_file: path.join(LOG_DIR, 'mobius-https-proxy.log'),
+      error_file: path.join(LOG_DIR, 'mobius-https-proxy-error.log'),
+      merge_logs: true,
+      env: {
+        ...inheritedEnv,
+      },
+    },
   ],
 };
