@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- JVM runtime requires JIT and unsigned executable memory -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Network access for bundled runtime components -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Microphone – the bundled JVM runtime ALSO needs this, otherwise Java Sound
+         (libjsound → CoreAudio) runs without mic permission and captures silence
+         even when the app launcher itself is signed with audio-input. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

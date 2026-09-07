@@ -1,0 +1,93 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- 极光推送（聚合推送）所需：网络状态感知（其余权限由 JPush SDK 自身 manifest 合并注入）。 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <application
+        android:name=".MomoApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="Mobius"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        tools:replace="android:allowBackup,android:label">
+
+        <!-- 极光推送 AppKey / 渠道。值由 androidApp/build.gradle.kts 的 manifestPlaceholders
+             (JPUSH_APPKEY / JPUSH_CHANNEL) 注入；未配置时为空，JPush 不注册，不影响运行。 -->
+        <meta-data
+            android:name="JPUSH_APPKEY"
+            android:value="${JPUSH_APPKEY}" />
+        <meta-data
+            android:name="JPUSH_CHANNEL"
+            android:value="${JPUSH_CHANNEL}" />
+
+        <!-- 华为 HMS Push：agconnect-services.json + 此 appid 让 HMS 识别本应用。
+             JPush 华为厂商通道(PluginHuaweiPlatformsService)据此在华为设备上经 HMS 下发。 -->
+        <meta-data
+            android:name="com.huawei.hms.client.appid"
+            android:value="appid=118222363" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 极光推送自定义消息接收器：透传消息走本地通知、点击通知拉起 App。
+             类在 shared 库(com.mobius.momo.data)，故用全限定名。 -->
+        <receiver
+            android:name="com.mobius.momo.data.MomoJPushReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="cn.jpush.android.intent.RECEIVE_MESSAGE" />
+                <category android:name="${applicationId}" />
+            </intent-filter>
+        </receiver>
+
+        <!-- JPush SDK 4.0.5 自带的两个接收器未声明 android:exported（早于 Android 12 强制要求），
+             targetSdk 35 下 manifest 合并会报错。用 tools:node="merge" 补上属性，保留 SDK 的 intent-filter。
+             exported=false：内部广播（同进程 JPushService 发出、category 限定包名）无需对外暴露。 -->
+        <receiver
+            android:name="cn.jpush.android.service.PushReceiver"
+            android:enabled="true"
+            android:exported="false"
+            tools:node="merge" />
+        <receiver
+            android:name="cn.jpush.android.asus.AsusPushMessageReceiver"
+            android:enabled="true"
+            android:exported="false"
+            tools:node="merge" />
+
+        <!-- 华为 HMS Push 接管: 移除 JPush 4.0.5 自带的 PluginHuaweiPlatformsService
+             (它只 override 旧 onNewToken(String), 漏 onTokenError + Bundle 新签名, 拿不到令牌),
+             改用我们自己的 MomoHmsPushService 捕获 onNewToken/onTokenError 真实结果。 -->
+        <service
+            android:name="cn.jpush.android.service.PluginHuaweiPlatformsService"
+            tools:node="remove" />
+        <service
+            android:name="com.mobius.momo.data.MomoHmsPushService"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.huawei.push.action.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

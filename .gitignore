@@ -168,3 +168,24 @@ skills
 downloads
 skills-lock.json
 logo.png
+
+# 移动端 (momo-mobile 镜像, 真源在 /home/tianyi/momo-mobile + GitLab/GitHub 同步)
+# 构建产物与本地环境不入仓; frontend/dist 由 momo-mobile 侧提交(扩展发布需要), 这里同样保留
+mobius/mobile/.gradle/
+mobius/mobile/.kotlin/
+mobius/mobile/**/build/
+mobius/mobile/data/
+mobius/mobile/local.properties
+mobius/mobile/webPreview/
+mobius/mobile/node_modules/
+mobius/mobile/apple-credentials.sh
+mobius/mobile/android-credentials*.sh
+mobius/mobile/*.jks
+mobius/mobile/*.keystore
+mobius/mobile/keystore/
+mobius/mobile/keystore.properties
+mobius/mobile/backend/jpush_config.json
+mobius/mobile/.env
+mobius/mobile/.env.*
+mobius/mobile/iosApp/Frameworks/
+mobius/mobile/iosApp/*.xcodeproj/
