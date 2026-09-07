@@ -3923,7 +3923,7 @@ function manifestToRows(manifest: DesktopManifest): DesktopDownloadRow[] {
 // Android APK 走公网 CDN (serve.nutshellai.cn, 源站 gptac-zs nginx 静态目录
 // /home/fuqingxu/publish/auto/mobius-mobile/), 任何人无需登录 Mobius 服务器即可下载;
 // 同源 /mobile-builds/ 仍保留兜底。size / sha256 由 build.py --build-mobile 回填。
-const MOBILE_VERSION = '0.1.18'
+const MOBILE_VERSION = '0.1.19'
 // 公网 CDN 前缀; 上传脚本: python3 /tmp/upload_mobile_cdn.py mobius-mobile <apk...> (参考 Issue 999efcd9)
 const MOBILE_CDN_BASE = 'https://serve.nutshellai.cn/publish/auto/mobius-mobile'
 // iOS 走 TestFlight 公开邀请链接: build 上传后在 App Store Connect → TestFlight 开启"公开链接",
@@ -3935,15 +3935,15 @@ const MOBILE_BUILDS: Array<{ label: string; sub: string; file: string; size: num
     label: 'Android',
     sub: 'arm64-v8a · 大多数现代手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-arm64.apk`,
-    size: 4991680,
-    sha256: '73b878c466e4d978680a0268b56cbc7d241b039ffd936e8e3586fbfabfce2592',
+    size: 4992156,
+    sha256: 'fc0cfae8b5260877fce3cadfa9f6cfc8bedb14218701719f6bb7435821bdf055',
   },
   {
     label: 'Android',
     sub: 'armeabi-v7a · 老旧手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-armeabi-v7a.apk`,
-    size: 4999648,
-    sha256: '8344c5ea0513ca4a87eeab8cd63b511e7e5fd37c0701807900d59d76428380e4',
+    size: 5000124,
+    sha256: '409002c6f507f0dc1b0faabc7c6f314b1af5824de415f55dd95ae5f228ff6a43',
   },
   {
     label: 'iOS',
@@ -4429,7 +4429,7 @@ export function AimuxGuideModal({ onClose }: { onClose: () => void }) {
   // 输入为空时回退到默认值, 避免生成 --identifier 空参数导致命令非法
   const effectiveIdentifier = identifier.trim() || defaultIdentifier
 
-  const installCmd = 'pip install --force-reinstall aimux==0.1.28'
+  const installCmd = 'pip install --force-reinstall aimux==0.1.29'
   const connectCmd = `aimux reverse connect ${baseUrl} --identifier ${effectiveIdentifier} --token ${userJwt}`
   // 步骤4 话术: 命名占位用第2步输入的 identifier (实时随输入更新); skill 路径用后端 branding 下发的
   // APP_DIR 绝对路径展开 (用户要求显示绝对路径, agent 无论 cwd 在哪都能直达内置 skill 源目录);

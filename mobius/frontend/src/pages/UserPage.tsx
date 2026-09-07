@@ -42,6 +42,7 @@ import {
   type ProjectHierarchyHit,
   type ProjectHierarchySearchResponse,
 } from '../services/project-hierarchy-search'
+import { readListCache, writeListCache } from '../services/list-swr-cache'
 
 type ProjectFilterKey = 'owned' | 'starred' | 'extension'
 const PROJECT_FILTERS: Array<{ key: ProjectFilterKey; label: string; title: string }> = [
@@ -301,7 +302,12 @@ export default function UserPage() {
     // 让用户拿到自己可见的全部项目. 一旦切到 chip 筛选, 收回范围并尊重个人偏好.
     const showAll = opts.showAll ?? (projectFilters.length === 0)
     const url = showAll ? '/api/projects?all=true' : '/api/projects'
-    return api(url).then((arr: any[]) => setProjects(sortProjectsForDisplay(arr || []))).catch(() => {})
+    return api(url).then((arr: any[]) => {
+      const sorted = sortProjectsForDisplay(arr || [])
+      setProjects(sorted)
+      // 落本地缓存 (stale-while-revalidate): 下次 newTab/刷新打开主页先秒显这份数据。
+      writeListCache(showAll ? 'projects-all' : 'projects', user?.id, sorted)
+    }).catch(() => {})
   }
 
   const refreshMutedProjects = () => {
@@ -317,13 +323,25 @@ export default function UserPage() {
       .finally(() => setMutedProjectsLoading(false))
   }
 
+  // 首次挂载: 先用本地缓存秒显 (newTab 打开新 tab / 整页刷新后 zustand 内存缓存是空的),
+  // 再后台静默刷新。缓存只负责秒显, 数据永远以网络回来为准 (卡片上的进行中会话数等
+  // 实时状态不能靠 TTL 停留旧值)。
   useEffect(() => {
+    const cached = readListCache<any>(projectFilters.length === 0 ? 'projects-all' : 'projects', user?.id)
+    if (cached && !projects.length) {
+      setProjects(cached.list)
+    }
     refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 切换 chip 筛选时, 重新拉取列表 (?all=true 与否随之变化).
+  // 切换 chip 筛选时, 重新拉取列表 (?all=true 与否随之变化)。
+  // 首挂载已处理过一次, 这里跳过首次避免双请求。
+  const filterSkipFirstRef = useRef(true)
   useEffect(() => {
+    if (filterSkipFirstRef.current) { filterSkipFirstRef.current = false; return }
     refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectFilters])
 
   // 持久化 chip 筛选到 localStorage: 关闭/刷新页面后, 进入 /u/<self> 仍能恢复.

@@ -162,8 +162,8 @@ Mobius 把多个 Agent 编排成一条自主科研流水线：读论文、抽取
 
 **在手机上。** 随时和 Agent 对话、追踪进度、审批决策。iOS 与 Android 端现已完全可用。
 
-- 安卓（arm64-v8a，大多数现代手机）: [mobius-mobile-0.1.18-android-arm64.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-arm64.apk)
-- 安卓（armeabi-v7a，老旧手机）: [mobius-mobile-0.1.18-android-armeabi-v7a.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-armeabi-v7a.apk)
+- 安卓（arm64-v8a，大多数现代手机）: [mobius-mobile-0.1.19-android-arm64.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.19-android-arm64.apk)
+- 安卓（armeabi-v7a，老旧手机）: [mobius-mobile-0.1.19-android-armeabi-v7a.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.19-android-armeabi-v7a.apk)
 - iOS（TestFlight 内测）: [https://testflight.apple.com/join/EgamfnR7](https://testflight.apple.com/join/EgamfnR7)
 
 <p align="center">

@@ -1,0 +1,5 @@
+{
+  "_comment": "极光推送服务端凭证示例。真实文件名必须为 jpush_config.json，且放在 Mobius 服务的 ext_data_dir 下（即 APP_DIR/protected_data/extension/momo-mobile/jpush_config.json）。也可改用环境变量 MOMO_JPUSH_APPKEY / MOMO_JPUSH_MASTER_SECRET。Master Secret 是密钥，切勿提交到仓库或打进客户端 APK。",
+  "appkey": "你的AppKey",
+  "master_secret": "你的MasterSecret"
+}

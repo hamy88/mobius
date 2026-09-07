@@ -243,9 +243,6 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
             <Clock3 className="h-3.5 w-3.5 text-sky-400" strokeWidth={1.9} />
             <span>耗时</span>
           </div>
-          <div className="mt-0.5 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-            {data?.updated_at ? `更新于 ${formatClock(data.updated_at)}` : '等待统计数据'}
-          </div>
         </div>
         <div className="flex items-center gap-1.5">
           <button
@@ -327,8 +324,18 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
                   <BarChart3 className="h-3.5 w-3.5 text-sky-400" strokeWidth={1.9} />
                   <span>瀑布</span>
                 </div>
-                <div className="mt-0.5 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                  {data?.start_at ? `起点 ${formatClock(data.start_at)}` : '未设置起点'}
+                <div
+                  className="mt-0.5 truncate text-[10px]"
+                  style={{ color: 'var(--text-muted)' }}
+                  title={
+                    data?.start_at || data?.updated_at
+                      ? `起点 ${formatClock(data.start_at)} · 更新于 ${formatClock(data.updated_at)}`
+                      : '未设置起点'
+                  }
+                >
+                  {data?.start_at || data?.updated_at
+                    ? `起点 ${formatClock(data.start_at)} · 更新于 ${formatClock(data.updated_at)}`
+                    : '未设置起点'}
                 </div>
               </div>
               <div className="mt-1.5 flex items-center gap-3 text-[9.5px]" style={{ color: 'var(--text-muted)' }}>

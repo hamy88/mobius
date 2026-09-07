@@ -63,7 +63,13 @@ export type BashToolResult = {
   imageUrls?: string[]
   noOutputExpected: boolean
   readFile?: ReadFileResult
+  // aimux exec 信封 ({"output":..., "wall_time_seconds":..., "exit_code":...}) 解包后的执行元信息.
+  // 命中信封时 stdout/content 已是解包后的 output 正文, 这里补充耗时/tokens/退出码供结果面板展示.
+  meta?: BashResultMeta[]
 }
+
+// Bash/AIMUX 返回结果面板头部的执行元信息徽章 (label + value, 如 耗时 6.4s / exit 0).
+export type BashResultMeta = { label: string; value: string }
 
 export type ReadToolCall = {
   id?: string

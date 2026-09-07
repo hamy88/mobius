@@ -3285,7 +3285,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     ? '编辑消息后按 Enter 重新发送...'
     : isNewConversation
       ? '今天有什么计划？'
-      : '发送指令（Shift+Enter 换行 · Ctrl/⌘+V 粘贴文件/截图 · ↑键回溯 · @引用文件/智能体）...'
+      : '发送指令：\n· Shift+Enter 换行\n· Ctrl/⌘+V 粘贴文件/截图\n· ↑键回溯\n· @引用文件/智能体'
 
   const handleChatInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const nextValue = event.target.value
@@ -3655,9 +3655,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const syncHeight = () => {
       const minHeight = 60
       const maxHeight = Math.floor(window.innerHeight * 0.7)
+      // A multiline placeholder contributes to scrollHeight in Chromium even
+      // when the textarea is empty. Measure only the user's value so the
+      // instructional placeholder cannot stretch the input panel.
+      const placeholder = el.getAttribute('placeholder')
+      if (!el.value && placeholder) el.removeAttribute('placeholder')
       el.style.height = 'auto'
       el.style.maxHeight = `${maxHeight}px`
       const nextHeight = Math.max(minHeight, Math.min(el.scrollHeight, maxHeight))
+      if (!el.value && placeholder !== null) el.setAttribute('placeholder', placeholder)
       el.style.height = `${nextHeight}px`
       setInputHeight(prev => prev === nextHeight ? prev : nextHeight)
     }
@@ -4916,6 +4922,16 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                   ))}
                 </div>
               )}
+              <div className="relative">
+              {!input && !editingMsg && !isNewConversation && (
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid min-w-0 grid-cols-2 gap-x-3 gap-y-0.5 pb-1 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
+                  <span className="col-span-2 min-w-0 truncate">发送指令：</span>
+                  <span className="min-w-0 truncate">· Shift+Enter 换行</span>
+                  <span className="min-w-0 truncate">· Ctrl/⌘+V 粘贴文件/截图</span>
+                  <span className="min-w-0 truncate">· ↑键回溯</span>
+                  <span className="min-w-0 truncate">· @引用文件/智能体</span>
+                </div>
+              )}
               <textarea ref={inputRef} value={input} onChange={handleChatInputChange}
                 onCompositionStart={() => { composingRef.current = true }}
                 onCompositionEnd={() => { composingRef.current = false }}
@@ -4946,10 +4962,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                   e.preventDefault()
                   send(autoUrgentOnEnter)
                 }}
-                placeholder={inputPlaceholder}
-                className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] focus:outline-none overflow-y-auto"
+                placeholder={input && inputPlaceholder}
+                className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[11px] focus:outline-none overflow-y-auto"
                 style={{ height: inputHeight, minHeight: 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
               />
+              </div>
             </div>
             <div className="relative flex items-end gap-2 px-3 pb-3 pt-0">
               {layout === 'easy' && easyProjectControl && (

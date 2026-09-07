@@ -93,8 +93,8 @@ XiaoMo is the natural-language interface to the entire system. Talk to it: creat
 
 **On your phone.** XiaoMo goes wherever you go — chat with your agents, track progress, and approve decisions from anywhere. The iOS and Android apps are now fully available.
 
-- Android (arm64-v8a): [mobius-mobile-0.1.18-android-arm64.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-arm64.apk)
-- Android (armeabi-v7a): [mobius-mobile-0.1.18-android-armeabi-v7a.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-armeabi-v7a.apk)
+- Android (arm64-v8a): [mobius-mobile-0.1.19-android-arm64.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.19-android-arm64.apk)
+- Android (armeabi-v7a): [mobius-mobile-0.1.19-android-armeabi-v7a.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.19-android-armeabi-v7a.apk)
 - iOS (TestFlight): [https://testflight.apple.com/join/EgamfnR7](https://testflight.apple.com/join/EgamfnR7)
 
 <p align="center">

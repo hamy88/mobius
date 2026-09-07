@@ -1,0 +1,36 @@
+.gradle/
+.gradle-cache/*
+.kotlin/
+.idea/*
+**/build/
+**/.gradle/
+local.properties
+iosApp/Frameworks/
+iosApp/*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+.DS_Store
+
+# Web 调试包由 scripts/build-web-preview.sh 可重复生成。
+# frontend/dist 需要随版本提交，供 Mobius 扩展地址直接发布。
+
+# Build artifacts (downloaded by scripts/sync-build-outputs.sh)
+/data/
+
+# IMAC platform metadata (session logs may contain secrets — never commit)
+.imac/
+
+# Apple 开发者凭证（包含敏感信息，不提交）
+apple-credentials.sh
+
+# 极光推送服务端密钥（Master Secret 是密钥，绝不提交；仅 example 模板入库）
+backend/jpush_config.json
+.env
+.env.*
+
+# Android 签名凭证（包含敏感信息，不提交）
+android-credentials.local.sh
+*.jks
+*.keystore
+keystore/
+keystore.properties
