@@ -145,6 +145,20 @@ function BashResultPanel({ result }: { result: BashToolResult }) {
           返回结果
           <span className="ml-1 text-[var(--text-muted)]">#{result.lineNo}</span>
         </span>
+        {/* aimux exec 信封解包后的执行元信息 (耗时 / tokens / exit), 存在才渲染. */}
+        {result.meta && result.meta.length > 0 && (
+          <span className="flex flex-shrink-0 items-center gap-1 font-mono text-[var(--text-muted)]">
+            {result.meta.map((m) => (
+              <span
+                key={m.label}
+                className={`rounded border px-1 py-0.5 ${m.label === 'exit' && m.value !== '0' ? 'border-red-500/40 text-red-300' : 'border-[var(--border-color)]'}`}
+                title={m.label}
+              >
+                {m.value}
+              </span>
+            ))}
+          </span>
+        )}
         <span className={`flex-shrink-0 font-mono ${stateClass}`}>{stateLabel}</span>
         {displayText && (
           <>

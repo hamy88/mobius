@@ -35,6 +35,7 @@ import type {
   ReadToolCall,
   ReadFileResult,
   BashToolResult,
+  BashResultMeta,
   JsonlViewItem,
   StringCodeEditFile,
   UnifiedCodeEditFile,
@@ -367,6 +368,25 @@ export function extractBashToolResultRecords(entry: AnyEntry, lineNo: number): B
   if (entry?.type === 'response_item' && isFunctionCallOutputPayload(entry?.payload)) {
     const output = functionOutputBody(entry.payload?.output)
     const imageUrls = functionOutputImageUrls(entry.payload?.output)
+    // codex exec 路径同样可能是 aimux 信封 (functionOutputBody 已把数组块摊平成文本):
+    // 命中即解包, 与 claude type:user 路径同一观感.
+    const envelope = parseMcpResultEnvelope(output)
+    if (envelope) {
+      return [{
+        entry,
+        lineNo,
+        toolUseId: stringField(entry.payload?.call_id) || undefined,
+        stdout: envelope.output,
+        stderr: '',
+        content: envelope.output,
+        isError: entry.payload?.status === 'failed' || entry.payload?.is_error === true || (envelope.raw.exit_code !== undefined && envelope.raw.exit_code !== 0),
+        interrupted: false,
+        isImage: imageUrls.length > 0,
+        imageUrls,
+        noOutputExpected: false,
+        meta: mcpEnvelopeMeta(envelope.raw),
+      }]
+    }
     return [{
       entry,
       lineNo,
@@ -402,6 +422,28 @@ export function extractBashToolResultRecords(entry: AnyEntry, lineNo: number): B
 
   return blocks.map((block: any) => {
     const blockContent = toolResultContentText(block?.content)
+    // aimux exec 信封: block 正文是 {"output":..., "wall_time_seconds":..., "exit_code":...} JSON 串.
+    // 直接把信封当 stdout 会渲染成一整行转义 JSON (\n 字面量, 引号全被转义, 换行全部失效 —
+    // 用户报告的问题). 命中信封时解包: stdout/content = output 正文, meta 带执行元信息.
+    const envelope = parseMcpResultEnvelope(blockContent)
+    if (envelope) {
+      return {
+        entry,
+        lineNo,
+        toolUseId: stringField(block?.tool_use_id) || undefined,
+        parentUuid: parentUuid || undefined,
+        sourceAssistantUuid: sourceAssistantUuid || undefined,
+        stdout: envelope.output,
+        stderr: '',
+        content: envelope.output,
+        isError: block?.is_error === true || envelope.raw.exit_code !== undefined && envelope.raw.exit_code !== 0,
+        interrupted,
+        isImage,
+        noOutputExpected,
+        readFile,
+        meta: mcpEnvelopeMeta(envelope.raw),
+      }
+    }
     const fallbackContent = [readFile?.content, stdout, stderr].filter(Boolean).join('\n')
     return {
       entry,
@@ -1087,6 +1129,22 @@ export function parseMcpResultEnvelope(text: unknown): { output: string; raw: Re
   return { output: parsed.output, raw: parsed }
 }
 
+// aimux exec 信封解包后的执行元信息徽章: 耗时 / tokens / 退出码 (exit_code 非 0 标 error).
+// 与 extractMcpToolResult 的 meta 同源逻辑, 供合并进代码模式卡片的返回结果面板展示.
+function mcpEnvelopeMeta(raw: Record<string, any>): BashResultMeta[] {
+  const meta: BashResultMeta[] = []
+  if (typeof raw.wall_time_seconds === 'number') {
+    meta.push({ label: '耗时', value: `${raw.wall_time_seconds}s` })
+  }
+  if (typeof raw.original_token_count === 'number') {
+    meta.push({ label: 'tokens', value: String(raw.original_token_count) })
+  }
+  if (raw.exit_code !== undefined && raw.exit_code !== null && String(raw.exit_code) !== '') {
+    meta.push({ label: 'exit', value: String(raw.exit_code) })
+  }
+  return meta
+}
+
 // 从 type:user 的纯 tool_result entry 抽出 MCP 返回信封 (若有). 命中即返回首个; 不命中返回 null.
 // 读 message.content 里的 tool_result 文本块 (与 extractBashToolResultRecords 同源), 不依赖 toolUseResult.
 export function extractMcpToolResult(entry: AnyEntry): McpToolResult | null {
@@ -1099,13 +1157,7 @@ export function extractMcpToolResult(entry: AnyEntry): McpToolResult | null {
     const text = toolResultContentText(block?.content)
     const env = parseMcpResultEnvelope(text)
     if (!env) continue
-    const meta: McpToolResultMeta[] = []
-    if (typeof env.raw.wall_time_seconds === 'number') {
-      meta.push({ label: '耗时', value: `${env.raw.wall_time_seconds}s` })
-    }
-    if (typeof env.raw.original_token_count === 'number') {
-      meta.push({ label: 'tokens', value: String(env.raw.original_token_count) })
-    }
+    const meta: McpToolResultMeta[] = mcpEnvelopeMeta(env.raw)
     if (env.raw.session_id != null && env.raw.session_id !== '') {
       meta.push({ label: 'session', value: String(env.raw.session_id) })
     }
