@@ -7,7 +7,7 @@
  * 鉴权: X-Webhook-Token 匹配 DESKTOP_WEBHOOK_TOKEN 环境变量。
  */
 
-const { syncDesktopBuilds } = require("../services/sync-desktop-builds");
+const { syncDesktopBuilds, syncMobileBuilds } = require("../services/sync-desktop-builds");
 
 function getWebhookToken() {
   return process.env.DESKTOP_WEBHOOK_TOKEN || null;
@@ -32,6 +32,9 @@ async function handleDesktopSync(req, res) {
   try {
     const result = await syncDesktopBuilds({ log: (...args) => console.log("[desktop-webhook]", ...args) });
     result.elapsed = `${((Date.now() - startTime) / 1000).toFixed(1)}s (webhook)`;
+    // 移动端一并触发 (无 mobile Release 时内部静默跳过, 不报错)
+    const mobile = await syncMobileBuilds({ log: (...args) => console.log("[mobile-webhook]", ...args) });
+    result.mobile = { ok: mobile.ok, tag: mobile.tag, downloaded: mobile.downloaded || 0, skipped: mobile.skipped || 0 };
     res.json(result);
   } catch (err) {
     console.error(`[desktop-webhook] Error: ${err.message}`);

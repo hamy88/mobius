@@ -162,11 +162,19 @@ Mobius 把多个 Agent 编排成一条自主科研流水线：读论文、抽取
 
 **在手机上。** 随时和 Agent 对话、追踪进度、审批决策。iOS 与 Android 端现已完全可用。
 
+- 安卓（arm64-v8a，大多数现代手机）: [mobius-mobile-0.1.18-android-arm64.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-arm64.apk)
+- 安卓（armeabi-v7a，老旧手机）: [mobius-mobile-0.1.18-android-armeabi-v7a.apk](https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.18-android-armeabi-v7a.apk)
+- iOS（TestFlight 内测）: [https://testflight.apple.com/join/EgamfnR7](https://testflight.apple.com/join/EgamfnR7)
+
 <p align="center">
   <img src="https://serve.nutshellai.cn/publish/auto/readme/xiaomo-desktop-v2.png" alt="桌面端小莫" width="720" />
 </p>
 
 **在桌面上。** 原生桌面客户端，把 PC 变成 Mobius 工作站：直接读写本地项目文件、把本机接入为可控节点、多标签工作区。Windows、macOS、Linux 都能用。
+
+- Windows x64: [mobius-desktop-0.0.29-win-x64.zip](https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.29/mobius-desktop-0.0.29-win-x64.zip)
+- macOS Apple Silicon: [mobius-desktop-0.0.29-mac-arm64.zip](https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.29/mobius-desktop-0.0.29-mac-arm64.zip)
+- macOS Intel: [mobius-desktop-0.0.29-mac-x64.zip](https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.29/mobius-desktop-0.0.29-mac-x64.zip)
 
 > 本页的演示素材均由小莫自己制作，录制过程零人工参与。
 

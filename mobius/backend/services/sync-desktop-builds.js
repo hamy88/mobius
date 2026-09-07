@@ -16,6 +16,7 @@ const path = require("node:path");
 const https = require("node:https");
 
 const DESKTOP_BUILDS_DIR = path.join(__dirname, "..", "..", "desktop-builds");
+const MOBILE_BUILDS_DIR = path.join(__dirname, "..", "..", "mobile-builds");
 const GITHUB_API = "https://api.github.com";
 const REPO = "mobius-system/mobius";
 
@@ -102,8 +103,9 @@ async function syncDesktopBuilds(options = {}) {
   const startTime = Date.now();
   log(`[desktop-sync] Checking latest release from ${REPO}...`);
 
-  // 1. 获取最新 Release
-  const release = await fetchLatestRelease(ghToken);
+  // 1. 获取最新 desktop Release (tag 前缀 desktop-v; 不能用 releases/latest —
+  //    mobile-v 等 Release 会抢占全局 latest 位置导致桌面端拉错资产)
+  const release = await fetchLatestReleaseByTagPrefix("desktop-v", ghToken);
   const assets = release.assets || [];
   log(`[desktop-sync] Latest: ${release.tag_name}, ${assets.length} assets`);
 
@@ -198,4 +200,114 @@ async function syncDesktopBuilds(options = {}) {
   };
 }
 
-module.exports = { syncDesktopBuilds, fetchLatestRelease, downloadFile, DESKTOP_BUILDS_DIR };
+/**
+ * 按 tag 前缀查最新 Release (releases/latest 只返回全局最新, mobile 与 desktop 各自独立发版).
+ * 列出全部 releases (per_page=20), 取 tag_name 以 prefix 开头且非 draft/prerelease 的第一个 (列表按创建时间倒序).
+ */
+function fetchLatestReleaseByTagPrefix(prefix, token) {
+  return new Promise((resolve, reject) => {
+    const headers = { "User-Agent": "Mobius-Desktop-Sync/1.0", "Accept": "application/vnd.github+json" };
+    if (token) headers["Authorization"] = `token ${token}`;
+
+    const url = `${GITHUB_API}/repos/${REPO}/releases?per_page=20`;
+    https.get(url, { headers }, (res) => {
+      if (res.statusCode !== 200) {
+        let body = "";
+        res.on("data", (d) => body += d);
+        res.on("end", () => reject(new Error(`GitHub API ${res.statusCode}: ${body.slice(0, 200)}`)));
+        return;
+      }
+      let body = "";
+      res.on("data", (d) => body += d);
+      res.on("end", () => {
+        try {
+          const list = JSON.parse(body);
+          const hit = (Array.isArray(list) ? list : []).find(
+            (r) => !r.draft && !r.prerelease && typeof r.tag_name === "string" && r.tag_name.startsWith(prefix)
+          );
+          if (!hit) return reject(new Error(`No release with tag prefix '${prefix}'`));
+          resolve(hit);
+        } catch (e) { reject(new Error(`Invalid JSON: ${e.message}`)); }
+      });
+    }).on("error", reject);
+  });
+}
+
+/**
+ * 移动端同步: 从 tag 前缀 mobile-v 的 Release 拉取 APK + manifest.json 到 mobius/mobile-builds/.
+ * 与桌面端同构: 幂等 (size 一致跳过), manifest 每次覆盖, 旧 APK 清理仅限 mobius-mobile-* 模式.
+ * Release 不存在时静默跳过 (移动端发版晚于桌面端属正常), 不影响桌面端结果.
+ */
+async function syncMobileBuilds(options = {}) {
+  const {
+    token: ghToken = process.env.GITHUB_TOKEN_DESKTOP || process.env.GITHUB_TOKEN || null,
+    log = console.log,
+  } = options;
+
+  const startTime = Date.now();
+  let release;
+  try {
+    release = await fetchLatestReleaseByTagPrefix("mobile-v", ghToken);
+  } catch (e) {
+    log(`[mobile-sync] skip: ${e.message}`);
+    return { ok: true, skipped: true, reason: e.message };
+  }
+  const assets = release.assets || [];
+  log(`[mobile-sync] Latest: ${release.tag_name}, ${assets.length} assets`);
+
+  const apkAssets = assets.filter((a) => a.name.endsWith(".apk") || a.name === "manifest.json");
+  if (apkAssets.length === 0) {
+    return { ok: true, skipped: true, reason: "No apk/manifest assets in release" };
+  }
+
+  fs.mkdirSync(MOBILE_BUILDS_DIR, { recursive: true });
+  const results = [];
+  for (const asset of apkAssets) {
+    const destPath = path.join(MOBILE_BUILDS_DIR, asset.name);
+    try {
+      const r = await downloadFile(asset.browser_download_url, destPath, asset.size);
+      results.push({ ...r });
+      if (!r.skipped) log(`[mobile-sync]   ↓ ${r.file} (${(r.size / 1024 / 1024).toFixed(1)} MB)`);
+    } catch (err) {
+      log(`[mobile-sync]   ✗ ${asset.name}: ${err.message}`);
+      results.push({ file: asset.name, error: err.message });
+    }
+  }
+
+  // 清理旧版本 APK (mobius-mobile-*.apk 且不在当前 release 中; 备份目录 _backup-* 不动)
+  const currentApkNames = new Set(apkAssets.map((a) => a.name));
+  try {
+    for (const entry of fs.readdirSync(MOBILE_BUILDS_DIR)) {
+      if (entry.startsWith("mobius-mobile-") && entry.endsWith(".apk") && !currentApkNames.has(entry)) {
+        fs.unlinkSync(path.join(MOBILE_BUILDS_DIR, entry));
+        log(`[mobile-sync]   ✕ removed old: ${entry}`);
+      }
+    }
+  } catch (_) { /* 清理失败不影响 */ }
+
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  const downloaded = results.filter((r) => !r.error && !r.skipped).length;
+  const skipped = results.filter((r) => r.skipped).length;
+  const failed = results.filter((r) => r.error).length;
+  log(`[mobile-sync] Done ${elapsed}s: ${downloaded} new, ${skipped} cached, ${failed} failed`);
+
+  return {
+    ok: failed === 0,
+    tag: release.tag_name,
+    version: (release.tag_name || "").replace("mobile-v", ""),
+    downloaded, skipped, failed,
+    elapsed: `${elapsed}s`,
+    dest: MOBILE_BUILDS_DIR,
+    files: results,
+  };
+}
+
+module.exports = {
+  syncDesktopBuilds,
+  syncMobileBuilds,
+  fetchLatestRelease,
+  fetchLatestReleaseByTagPrefix,
+  downloadFile,
+  DESKTOP_BUILDS_DIR,
+  MOBILE_BUILDS_DIR,
+};

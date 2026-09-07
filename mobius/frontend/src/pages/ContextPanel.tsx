@@ -7,8 +7,8 @@ import { useStore, api } from '../store'
 //   - applied=false: 后端按 session 创建时保存的 Skill/Memory 选择快照预览待注入上下文
 // 任何时候用户都不应在此面板里编辑, 编辑入口在 UserPage 的 skill/memory 管理.
 
-interface SnapshotSkill { id: string; name: string; description?: string; scope: string; dirName?: string | null }
-interface SnapshotMemory { id: string; name: string; description?: string; scope: string }
+interface SnapshotSkill { id: string; name: string; description?: string; scope: string; dirName?: string | null; body?: string }
+interface SnapshotMemory { id: string; name: string; description?: string; scope: string; body?: string }
 interface ContextPreview {
   body: string
   sources: {
@@ -22,6 +22,14 @@ interface ContextPreview {
 }
 
 const SCOPE_LABEL: Record<string, string> = { user: '用户级', project: '项目级', builtin: '内置', issue: '任务级' }
+
+function injectionShare(item: { body?: string }, total: number) {
+  const length = typeof item.body === 'string' ? item.body.length : 0
+  const ratio = total > 0 ? length / total : 0
+  // 短文本不制造噪声；较大的新增文本达到约五分之一时以黄色提醒。
+  const highlighted = length >= 4000 && ratio >= 0.2
+  return { length, percent: Math.round(ratio * 100), highlighted }
+}
 
 function formatTime(iso?: string | null) {
   if (!iso) return ''
@@ -59,6 +67,7 @@ export default function ContextPanel({ onClose }: { onClose: () => void }) {
 
   const skills = preview?.sources?.skills || []
   const memories = preview?.sources?.memories || []
+  const fullTextLength = preview?.body?.length || 0
 
   return (
     <>
@@ -176,15 +185,18 @@ export default function ContextPanel({ onClose }: { onClose: () => void }) {
               <div className="rounded-lg p-3 space-y-1.5" style={{ background: bgSecondary, border: `1px solid ${borderColor}` }}>
                 {skills.length === 0 && <p className="text-[10px] italic" style={{ color: textMuted }}>本会话未注入任何 Skill</p>}
                 {skills.map(sk => (
+                  (() => { const share = injectionShare(sk, fullTextLength); return (
                   <div key={sk.id} className="flex items-start justify-between gap-2 text-[11px]">
                     <div className="min-w-0 flex-1">
                       <div style={{ color: textPrimary }} className="truncate">{sk.name}</div>
                       {sk.description && <div className="text-[10px] truncate" style={{ color: textMuted }}>{sk.description}</div>}
                     </div>
-                    <span className="px-1.5 py-0.5 rounded text-[10px] shrink-0" style={{ background: isDark ? 'rgba(168,85,247,0.15)' : 'rgba(168,85,247,0.1)', color: isDark ? '#c084fc' : '#7e22ce' }}>
-                      {SCOPE_LABEL[sk.scope] || sk.scope}
-                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: isDark ? 'rgba(168,85,247,0.15)' : 'rgba(168,85,247,0.1)', color: isDark ? '#c084fc' : '#7e22ce' }}>{SCOPE_LABEL[sk.scope] || sk.scope}</span>
+                      <span title={`${share.length} 字，占完整注入文本 ${share.percent}%`} className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: share.highlighted ? (isDark ? 'rgba(234,179,8,0.2)' : 'rgba(234,179,8,0.15)') : (isDark ? 'rgba(34,197,94,0.18)' : 'rgba(34,197,94,0.12)'), color: share.highlighted ? (isDark ? '#fde68a' : '#a16207') : (isDark ? '#86efac' : '#15803d') }}>{share.percent}%</span>
+                    </div>
                   </div>
+                  ) })()
                 ))}
               </div>
             </section>
@@ -200,15 +212,18 @@ export default function ContextPanel({ onClose }: { onClose: () => void }) {
               <div className="rounded-lg p-3 space-y-1.5" style={{ background: bgSecondary, border: `1px solid ${borderColor}` }}>
                 {memories.length === 0 && <p className="text-[10px] italic" style={{ color: textMuted }}>本会话未注入任何 Memory</p>}
                 {memories.map(m => (
+                  (() => { const share = injectionShare(m, fullTextLength); return (
                   <div key={m.id} className="flex items-start justify-between gap-2 text-[11px]">
                     <div className="min-w-0 flex-1">
                       <div style={{ color: textPrimary }} className="truncate">{m.name}</div>
                       {m.description && <div className="text-[10px] truncate" style={{ color: textMuted }}>{m.description}</div>}
                     </div>
-                    <span className="px-1.5 py-0.5 rounded text-[10px] shrink-0" style={{ background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.1)', color: isDark ? '#86efac' : '#15803d' }}>
-                      {SCOPE_LABEL[m.scope] || m.scope}
-                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.1)', color: isDark ? '#86efac' : '#15803d' }}>{SCOPE_LABEL[m.scope] || m.scope}</span>
+                      <span title={`${share.length} 字，占完整注入文本 ${share.percent}%`} className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: share.highlighted ? (isDark ? 'rgba(234,179,8,0.2)' : 'rgba(234,179,8,0.15)') : (isDark ? 'rgba(34,197,94,0.18)' : 'rgba(34,197,94,0.12)'), color: share.highlighted ? (isDark ? '#fde68a' : '#a16207') : (isDark ? '#86efac' : '#15803d') }}>{share.percent}%</span>
+                    </div>
                   </div>
+                  ) })()
                 ))}
               </div>
             </section>

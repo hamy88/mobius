@@ -10,7 +10,7 @@
 // cron 建议: 每 60 分钟跑一次 (GitHub API rate limit: 未认证 60/h, 认证 5000/h)。
 //    0 * * * * node /app/mobius/tools/sync-desktop-builds.js --cron >> /data/logs/desktop-sync.log 2>&1
 
-const { syncDesktopBuilds } = require("../backend/services/sync-desktop-builds");
+const { syncDesktopBuilds, syncMobileBuilds } = require("../backend/services/sync-desktop-builds");
 
 const isCron = process.argv.includes("--cron");
 
@@ -19,10 +19,19 @@ async function main() {
     log: isCron ? () => {} : console.log,
   });
 
+  // 移动端 APK: 与桌面端同源同构 (tag 前缀 mobile-v 的 Release), 无 mobile Release 时静默跳过
+  const mobile = await syncMobileBuilds({
+    log: isCron ? () => {} : console.log,
+  }).catch((e) => ({ ok: false, error: e.message }));
+
   if (!result.ok) {
     const msg = `[${new Date().toISOString()}] SYNC FAILED: ${result.error || "unknown"}\n`;
     process.stderr.write(msg);
     process.exit(1);
+  }
+
+  if (isCron && mobile && mobile.downloaded > 0) {
+    console.log(`[${new Date().toISOString()}] mobile synced ${mobile.tag}: ${mobile.downloaded} downloaded, ${mobile.skipped} cached → ${mobile.dest}`);
   }
 
   // cron 模式: 只有实际有下载时才输出一行 (避免日志噪音)
