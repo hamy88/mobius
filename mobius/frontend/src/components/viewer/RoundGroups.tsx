@@ -175,7 +175,7 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
   const toggle = () => {
     userToggledRef.current = true
     const next = !open
-    // 骨架模式下用户展开 → 自动拉取该轮主轨明细 (只在"确认未加载"时触发一次)
+    // 用户展开未加载的组 → 自动发起 ② 整组拉取 (已加载/加载中不重复触发)
     if (next && detailLoaded === false && onNeedDetail) onNeedDetail()
     setOpen(next)
   }
@@ -237,7 +237,7 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
                 disabled={!!detailLoading}
                 className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-60"
               >
-                {detailLoading ? '正在加载本轮明细…' : '加载本轮明细 (主轨条目未加载)'}
+                {detailLoading ? '正在加载本轮明细…' : '明细加载失败 · 点击重试'}
               </button>
             </div>
           )}
