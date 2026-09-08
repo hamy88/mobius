@@ -941,6 +941,13 @@ body::after {
    currentColor 渐变接近透明，单独固定到主题主文字色确保可读。 */
 .mobius-status-marquee--readable {
   --mobius-status-color: var(--text-primary);
+  color: var(--text-primary);
+  background: none;
+  background-image: none;
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  -webkit-text-fill-color: var(--text-primary);
+  animation: none;
   font-weight: 600;
   letter-spacing: 0.01em;
 }

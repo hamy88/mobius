@@ -89,11 +89,15 @@ export function loadLegacyBackfill(primaryPath: string): LegacyBackfill | null {
 
   return {
     takeUpTo(nativeTsMs: number | null): PendingRow[] {
+      // 无 ts 的行 (mode/permission-mode/file-history-snapshot 等元数据) 无法定序:
+      // 绝不触发 flush, 否则文件开头的元数据行会把整个迁移队列一次性倒空
+      // (实测: 全部 opener 连开成空组, 原生条目全堆进最后一组).
+      if (nativeTsMs == null) return []
       const out: PendingRow[] = []
       while (cursor < items.length) {
         const head = items[cursor]
         if (head.ts == null) break
-        if (nativeTsMs != null && !(head.ts < nativeTsMs)) break
+        if (!(head.ts < nativeTsMs)) break // 同刻原生优先
         cursor++
         out.push(toRow(head))
       }

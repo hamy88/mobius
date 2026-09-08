@@ -700,6 +700,9 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
   let pendingRows: PendingRow[] = [];
   let batchEnd = bookmark;
   let insertedTotal = 0;
+  // 定序锚: 原生行里 933+ 行无时间戳 (claude-code 元数据行), 用最近一次有效 ts 给它们定序 —
+  // 元数据行写在哪个时刻之后, 就参与哪个时刻的归并.
+  let lastKnownTs: number | null = null;
 
   const commit = () => {
     if (pendingRows.length === 0) return;
@@ -711,8 +714,11 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
   for (const line of iterateNewLines(filePath, bookmark)) {
     const entry = safeParseJson(line.text);
     if (entry) {
-      // [legacy-migration] 归并序: 迁移条目按时间戳插到原生行之前 (同刻原生优先).
-      if (legacy) pendingRows.push(...legacy.takeUpTo(parseTimestampMs(entry)));
+      const lineTs = parseTimestampMs(entry);
+      const anchorTs = lineTs != null ? lineTs : lastKnownTs;
+      if (lineTs != null) lastKnownTs = lineTs;
+      // [legacy-migration] 归并序: 迁移条目按时间戳插到原生行之前 (同刻原生优先; 无锚不 flush).
+      if (legacy) pendingRows.push(...legacy.takeUpTo(anchorTs));
       pendingRows.push({ entry, json: line.text, origin: 'primary', roundOpener: false, ts: parseTimestampMs(entry) });
       // task 快照: 紧跟锚点条目之后落库.
       try {
