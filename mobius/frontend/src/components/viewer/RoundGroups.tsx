@@ -154,31 +154,21 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
   )
 }
 
-export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpandAll = false, forceOpen = false, showMeta = true, resolvedMap, cursorStyleTools = true, collapseLineNos, focusLineNo, headerPalette, taskPlans, detailLoaded, detailLoading, onNeedDetail, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; forceExpandAll?: boolean; forceOpen?: boolean; showMeta?: boolean; resolvedMap?: ResolvedCallMap | null; cursorStyleTools?: boolean; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; detailLoaded?: boolean; detailLoading?: boolean; onNeedDetail?: () => void; headerTitle?: string; headerSummary?: string }) {
-  // 追踪用户是否手动点击过折叠/展开. 一旦手动操作, 后续不再被 autoOpen/forceExpandAll 自动接管.
-  // 实现"最新两轮自动展开, 除非人为折叠": 最新轮和上一轮默认展开, 更早的轮默认折叠;
-  // 某轮升入最新两轮时自动展开, 跌出最新两轮时自动折叠; 用户手动操作过的轮尊重用户, 不再自动改.
-  // (倒数第二轮保持展开, 让刚问完的上一轮不随新轮出现而被折叠掉.)
-  // forceExpandAll (点 "加载全部"): 把所有轮强制展开, 让 "加载全部" 后整段对话一次可见; 仍尊重用户手动折叠.
+// 受控组件: 开合状态来自 store 的组状态机 (closed/open-*), 本组件只发转移意图.
+// 自动规则: 用户没插手过 (sticky=false) 时跟随"末两轮展开"自动开合;
+// 用户点过一次后 sticky=true, 自动规则永不再接管. 展开即加载由 store 状态机保证.
+export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, showMeta = true, resolvedMap, cursorStyleTools = true, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; showMeta?: boolean; resolvedMap?: ResolvedCallMap | null; cursorStyleTools?: boolean; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
   const autoOpen = isLast || isSecondLast
-  const userToggledRef = useRef(false)
-  // 初始值含 forceExpandAll: 避免虚拟列表里新滚入的轮先以折叠态绘制再被 effect 掀开 (闪一下).
-  const [open, setOpen] = useState(forceExpandAll || forceOpen || autoOpen || onlyGroup)
-
-  // onlyGroup 时永远保持展开; 否则跟随 forceExpandAll/autoOpen 自动展开/折叠, 但用户手动操作过则尊重用户.
+  // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
-    if (onlyGroup || forceOpen) { setOpen(true); return }
-    if (userToggledRef.current) return
-    setOpen(forceExpandAll || autoOpen)
-  }, [autoOpen, onlyGroup, forceExpandAll, forceOpen])
+    if (sticky) return
+    if (onlyGroup || forceOpen || autoOpen) { if (!open) onAutoOpen(); return }
+    if (open) onAutoClose()
+  }, [sticky, autoOpen, onlyGroup, forceOpen, open, onAutoOpen, onAutoClose])
+  // 首帧防闪: store 还没来得及转移时, 按"应展开"先行绘制 (视觉态), effect 随后对齐真实态.
+  const openVisual = open || (!sticky && (onlyGroup || forceOpen || autoOpen))
 
-  const toggle = () => {
-    userToggledRef.current = true
-    const next = !open
-    // 用户展开未加载的组 → 自动发起 ② 整组拉取 (已加载/加载中不重复触发)
-    if (next && detailLoaded === false && onNeedDetail) onNeedDetail()
-    setOpen(next)
-  }
+  const toggle = () => onUserToggle()
 
   const userItem = round.items[0]
   const agentCount = round.items.length - 1
@@ -213,32 +203,38 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
         </span>
         <span className="text-[11px] text-[var(--text-secondary)] truncate flex-1 min-w-0">
           {/* 展开后用户问题由下方编号为 roundNum 的卡片完整呈现, header 不再重复摘要 (仅折叠态显示作轮次标识) */}
-          {open ? '' : (userSummary || '(空)')}
+          {openVisual ? '' : (userSummary || '(空)')}
         </span>
-        {!open && agentCount > 0 && (
+        {!openVisual && agentCount > 0 && (
           <span className="text-[10px] text-[var(--text-muted)] flex-shrink-0 font-mono">
             +{agentCount}
           </span>
         )}
         {!onlyGroup && (
           <span className="text-[10px] text-[var(--text-muted)] flex-shrink-0 opacity-50 group-hover:opacity-100 transition-opacity">
-            {open ? '▲' : '▼'}
+            {openVisual ? '▲' : '▼'}
           </span>
         )}
       </button>
 
-      {open && (
+      {openVisual && (
         <div className="mt-2 jsonl-thread">
-          {detailLoaded === false && onNeedDetail && (
+          {!resident && (
             <div className="mb-1 flex justify-center">
-              <button
-                type="button"
-                onClick={onNeedDetail}
-                disabled={!!detailLoading}
-                className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-60"
-              >
-                {detailLoading ? '正在加载本轮明细…' : '明细加载失败 · 点击重试'}
-              </button>
+              {failed ? (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  disabled={loading}
+                  className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-60"
+                >
+                  {loading ? '正在重试…' : '明细加载失败 · 点击重试'}
+                </button>
+              ) : (
+                <span className="text-[10px] px-2 py-0.5 text-[var(--text-muted)]">
+                  正在加载本轮明细…
+                </span>
+              )}
             </div>
           )}
           {renderSeq.map((ri, idx) => {

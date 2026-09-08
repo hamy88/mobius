@@ -27,14 +27,32 @@ export interface HistoryGroupMeta {
   entry_count: number
 }
 
-export type GroupLoadState = 'empty' | 'loading' | 'loaded'
+// ── 组状态机 (展开与加载合一; 展开即背负加载义务) ────────────────────────────
+//
+//   closed --用户展开 or 自动展开--> open-unloaded --自动加载--> open-loading
+//   open-loading --② http / 内存驻留--> open-loaded --用户关闭--> closed
+//
+//   closed       : 折叠. 条目可仍驻留内存 (折叠不清内存, LRU 才逐出).
+//   open-unloaded: 已展开, 数据未驻留. 只存活一瞬 (自动加载立即接手) 或加载失败后停留.
+//   open-loading : 首次加载在途 (② http).
+//   open-loaded  : 至少加载过一次; SSE 增量持续追加.
+//
+//   sticky: 用户手动开/合过 → 自动规则 (末两轮自动展开) 永不再接管.
+//   数据驻留以 entriesByGroup 是否含该组为准, 与开合状态正交.
+export type GroupState = 'closed' | 'open-unloaded' | 'open-loading' | 'open-loaded'
+
+export interface GroupRuntime {
+  state: GroupState
+  sticky: boolean
+  lastError: string | null
+}
 
 export interface HistorySnapshot {
   rev: number
   sessionVersion: number
   groups: HistoryGroupMeta[]
   entriesByGroup: ReadonlyMap<string, any[]>
-  groupStates: ReadonlyMap<string, GroupLoadState>
+  groupRuntime: ReadonlyMap<string, GroupRuntime>
   error: string | null
   negotiated: boolean
 }
@@ -54,6 +72,8 @@ interface CacheRecord {
   updatedAt: number
   groups: HistoryGroupMeta[]
   groupsData: Array<{ gid: string; version: number; entries: any[] }>
+  // 用户手动开/合过的组 (sticky), 跨刷新保留展开偏好.
+  stickies?: Record<string, boolean>
 }
 
 function openCacheDb(): Promise<IDBDatabase | null> {
@@ -149,7 +169,7 @@ async function fetchGroupEntries(sid: string, gid: string): Promise<{ version: n
 
 const EMPTY_SNAPSHOT: HistorySnapshot = {
   rev: 0, sessionVersion: 0, groups: [], entriesByGroup: new Map(),
-  groupStates: new Map(), error: null, negotiated: false,
+  groupRuntime: new Map(), error: null, negotiated: false,
 }
 
 export class SessionHistoryStore {
@@ -168,8 +188,10 @@ export class SessionHistoryStore {
   negotiated = false
   error: string | null = null
   entriesByGroup = new Map<string, any[]>()
-  groupStates = new Map<string, GroupLoadState>()
+  groupRuntime = new Map<string, GroupRuntime>()
   groupVersions = new Map<string, number>()
+  // 在途 ② 请求去重 (开合状态不再承担"在途"语义).
+  private inflight = new Set<string>()
   // ① 完成前到达的 SSE 事件缓冲 (订阅先于协商的生命周期).
   private pendingEvents: Array<() => void> = []
 
@@ -189,7 +211,7 @@ export class SessionHistoryStore {
         sessionVersion: this.sessionVersion,
         groups: this.groups,
         entriesByGroup: this.entriesByGroup,
-        groupStates: this.groupStates,
+        groupRuntime: this.groupRuntime,
         error: this.error,
         negotiated: this.negotiated,
       }
@@ -238,6 +260,70 @@ export class SessionHistoryStore {
     return { loadedCount: loaded, totalCount: total }
   }
 
+  // ── 组状态机: 开合与加载 ────────────────────────────────────────────────
+
+  private runtimeOf(gid: string): GroupRuntime {
+    let rt = this.groupRuntime.get(gid)
+    if (!rt) {
+      rt = { state: 'closed', sticky: false, lastError: null }
+      this.groupRuntime.set(gid, rt)
+    }
+    return rt
+  }
+
+  /** 展开 (用户/自动). closed → open-unloaded, 随即自动加载: 驻留即开, 否则发 ②. */
+  openGroup(gid: string, origin: 'user' | 'auto' = 'user'): void {
+    const rt = this.runtimeOf(gid)
+    if (origin === 'user') rt.sticky = true
+    if (rt.state === 'closed') {
+      rt.state = 'open-unloaded'
+      this.emit()
+      this.loadOpenGroup(gid)
+    } else if (rt.state === 'open-unloaded') {
+      // 加载失败后的重试也走这里.
+      this.loadOpenGroup(gid)
+    }
+  }
+
+  /** 关闭 (用户/自动). 条目保持驻留 (折叠不清内存). */
+  closeGroup(gid: string, origin: 'user' | 'auto' = 'user'): void {
+    const rt = this.runtimeOf(gid)
+    if (origin === 'user') rt.sticky = true
+    if (rt.state !== 'closed') {
+      rt.state = 'closed'
+      this.emit()
+      this.persistSoon()
+    }
+  }
+
+  toggleGroup(gid: string): void {
+    const rt = this.runtimeOf(gid)
+    if (rt.state === 'closed') this.openGroup(gid, 'user')
+    else this.closeGroup(gid, 'user')
+  }
+
+  /** 失败重试: 只对停留在 open-unloaded 的组重新发起加载. */
+  retryGroup(gid: string): void {
+    const rt = this.runtimeOf(gid)
+    if (rt.state === 'open-unloaded') this.loadOpenGroup(gid)
+  }
+
+  private loadOpenGroup(gid: string): void {
+    const rt = this.runtimeOf(gid)
+    // 内存驻留 → 即开 (cache 命中路径).
+    if (this.entriesByGroup.has(gid)) {
+      rt.state = 'open-loaded'
+      rt.lastError = null
+      this.emit()
+      return
+    }
+    if (rt.state === 'open-loading' || this.inflight.has(gid)) return
+    rt.state = 'open-loading'
+    rt.lastError = null
+    this.emit()
+    void this.ensureGroupEntries(gid)
+  }
+
   // ── 缓存水合 (打开会话秒显) ────────────────────────────────────────────
 
   async hydrateFromCache(): Promise<void> {
@@ -253,8 +339,12 @@ export class SessionHistoryStore {
       for (const gd of record.groupsData || []) {
         if (!Array.isArray(gd.entries) || gd.entries.length === 0) continue
         this.entriesByGroup.set(String(gd.gid), gd.entries)
-        this.groupStates.set(String(gd.gid), 'loaded')
         this.groupVersions.set(String(gd.gid), Number(gd.version) || gd.entries.length)
+      }
+      // 展开偏好恢复: sticky 保留, 开合一律从 closed 起步 (末两轮由自动规则重新展开).
+      for (const g of this.groups) {
+        const sticky = !!(record.stickies && record.stickies[g.id])
+        this.groupRuntime.set(g.id, { state: 'closed', sticky, lastError: null })
       }
       this.emit()
     } catch { /* best-effort */ }
@@ -283,7 +373,7 @@ export class SessionHistoryStore {
         for (const gid of [...this.entriesByGroup.keys()]) {
           if (!serverById.has(gid)) {
             this.entriesByGroup.delete(gid)
-            this.groupStates.delete(gid)
+            this.groupRuntime.delete(gid)
             this.groupVersions.delete(gid)
           }
         }
@@ -316,20 +406,25 @@ export class SessionHistoryStore {
 
   // ── ② 按需整组加载 ────────────────────────────────────────────────────
 
+  /**
+   * 背景整组加载 (negotiate 预热 / 搜索定位 / openGroup 的自动加载共用).
+   * 只负责数据驻留, 不改开合状态; open-loading 的组成功后升为 open-loaded,
+   * 失败退回 open-unloaded (never-tried 与 failed 由 lastError 区分).
+   */
   async ensureGroupEntries(gid: string, opts: { force?: boolean } = {}): Promise<void> {
     const key = String(gid)
-    const state = this.groupStates.get(key)
-    if (!opts.force && (state === 'loaded' || state === 'loading')) return
+    if (!opts.force && (this.entriesByGroup.has(key) || this.inflight.has(key))) return
+    if (this.inflight.has(key)) return
+    this.inflight.add(key)
     const meta = this.groups.find((g) => g.id === key)
-    if (meta && state === 'loaded' && !opts.force) return
-    this.groupStates.set(key, 'loading')
-    this.emit()
     try {
       const data = await fetchGroupEntries(this.sid, key)
       const merged = this.mergeEntries(key, data.entries)
       this.entriesByGroup.set(key, merged)
       this.groupVersions.set(key, Math.max(this.groupVersions.get(key) || 0, data.version || merged.length))
-      this.groupStates.set(key, 'loaded')
+      const rt = this.runtimeOf(key)
+      if (rt.state === 'open-loading') rt.state = 'open-loaded'
+      rt.lastError = null
       if (meta) {
         meta.version = Math.max(meta.version || 0, data.version || merged.length)
         meta.entry_count = Math.max(meta.entry_count || 0, merged.length)
@@ -337,10 +432,13 @@ export class SessionHistoryStore {
       this.emit()
       this.persistSoon()
     } catch (e: any) {
-      // 失败回到 empty: 下次展开可重试.
-      this.groupStates.set(key, 'empty')
-      this.error = e?.message || String(e)
+      const rt = this.runtimeOf(key)
+      if (rt.state === 'open-loading') rt.state = 'open-unloaded'
+      rt.lastError = e?.message || String(e)
+      this.error = rt.lastError
       this.emit()
+    } finally {
+      this.inflight.delete(key)
     }
   }
 
@@ -420,11 +518,11 @@ export class SessionHistoryStore {
     const localVersion = this.groupVersions.get(gid) || 0
     if (version <= localVersion) return  // 水位线: 唯一并发法则
     const incoming = Array.isArray(msg.entries) ? msg.entries : []
-    if (this.groupStates.get(gid) === 'loaded') {
-      // 已展开: 追加 (uuid 去重), 写时穿透.
+    if (this.entriesByGroup.has(gid)) {
+      // 数据驻留 (无论开合): 追加 (uuid 去重), 写时穿透.
       this.entriesByGroup.set(gid, this.mergeEntries(gid, incoming))
     }
-    // 未展开: 只更新条数, 条目等展开时 ② 整组取.
+    // 未驻留: 只更新条数, 条目等展开 (自动加载) 或背景预热时 ② 整组取.
     this.groupVersions.set(gid, version)
     meta.version = Math.max(meta.version || 0, version)
     meta.entry_count = Math.max(meta.entry_count || 0, version)
@@ -456,12 +554,17 @@ export class SessionHistoryStore {
       bytes += groupBytes
       groupsData.unshift({ gid: g.id, version: this.groupVersions.get(g.id) || 0, entries })
     }
+    const stickies: Record<string, boolean> = {}
+    for (const [gid, rt] of this.groupRuntime) {
+      if (rt.sticky) stickies[gid] = true
+    }
     void cacheWrite({
       sid: this.sid,
       sessionVersion: this.sessionVersion,
       updatedAt: Date.now(),
       groups: this.groups,
       groupsData,
+      stickies,
     })
   }
 }

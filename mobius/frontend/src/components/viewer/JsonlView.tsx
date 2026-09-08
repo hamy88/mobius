@@ -18,7 +18,7 @@ import { RoundGroup } from './RoundGroups'
 import { isHiddenJsonlNoiseEntry } from './entry-classify'
 import { computeCollapsedByForgottenFlag } from './fold-rules'
 import { buildTaskPlans } from './task-progress'
-import type { HistorySnapshot } from '../../services/agent-history-store'
+import type { HistorySnapshot, SessionHistoryStore } from '../../services/agent-history-store'
 import {
   ROUND_HEADER_PALETTES,
   ROUND_HEADER_PALETTE_STORAGE_KEY,
@@ -128,10 +128,10 @@ function taskPlansFor(entries: AnyEntry[], items: JsonlViewItem[]) {
 
 export function JsonlView({
   snapshot,
+  store,
   title,
   emptyLoadingText,
   initialLoading,
-  onEnsureGroupEntries,
   showMeta = true,
   cursorStyleTools = true,
   scrollToEntryUuid,
@@ -140,11 +140,11 @@ export function JsonlView({
 }: {
   // agent-history-store 的快照 (rev 驱动重渲染).
   snapshot: HistorySnapshot
+  // store 实例: 视图只发状态机转移意图 (开/合/重试), 不直接碰数据.
+  store: SessionHistoryStore | null
   title?: string
   emptyLoadingText?: string
   initialLoading?: boolean
-  // 组条目未加载时走 ② 拉取 (展开/搜索命中).
-  onEnsureGroupEntries: (groupId: string) => void
   // false 时 jsonl 卡片标题里不再显示 "#序号" 和 "MM-DD HH:MM:SS" 时间戳前缀.
   showMeta?: boolean
   // Cursor 式工具调用展示开关.
@@ -188,12 +188,12 @@ export function JsonlView({
       const entries = snapshot.entriesByGroup.get(meta.id) || []
       const round = entries.length > 0 ? buildRoundFromEntries(entries, meta.seq, baseLineNo) : { roundNum: meta.seq, items: [] as any[] }
       baseLineNo += entries.length
-      return { meta, round, state: snapshot.groupStates.get(meta.id) || 'empty', entries }
+      return { meta, round, state: (snapshot.groupRuntime.get(meta.id)?.state) || 'closed', entries }
     })
   }, [snapshot]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const headerTitle = title === undefined ? 'JSONL' : title
-  const loadedGroups = rounds.filter((r) => r.state === 'loaded').length
+  const loadedGroups = rounds.filter((r) => r.entries.length > 0).length
   const totalEntryCount = groups.reduce((sum, g) => sum + (g.entry_count || 0), 0)
   // 末轮摘要: 直接用组元数据 (不再从条目派生).
   const lastRoundUserSummary = groups.length > 0 ? (groups[groups.length - 1].user_summary || '') : ''
@@ -214,8 +214,8 @@ export function JsonlView({
   const extActive = !!(scrollToEntryUuid || scrollToMatchTs)
   const onResolvedRef = useRef(onScrollResolved)
   onResolvedRef.current = onScrollResolved
-  const ensureRef = useRef(onEnsureGroupEntries)
-  ensureRef.current = onEnsureGroupEntries
+  const storeRef = useRef(store)
+  storeRef.current = store
   useEffect(() => {
     if (!extActive) { setExtTarget(null); setExtFocusLineNo(null); return }
     if (initialLoading) { setExtTarget(null); return }
@@ -231,8 +231,8 @@ export function JsonlView({
     const targetMs = ts ? Date.parse(ts) : NaN
     if (!Number.isFinite(targetMs)) {
       // 只有 uuid 没有时间兜底: 从最后一组往前逐组补载直到找到 (有界, 一般一两轮就命中).
-      const firstUnloaded = [...rounds].reverse().find((r) => r.state !== 'loaded')
-      if (firstUnloaded) { ensureRef.current(firstUnloaded.meta.id); return }
+      const firstUnloaded = [...rounds].reverse().find((r) => r.entries.length === 0)
+      if (firstUnloaded) { storeRef.current?.ensureGroupEntries(firstUnloaded.meta.id); return }
       onResolvedRef.current?.()
       return
     }
@@ -244,7 +244,7 @@ export function JsonlView({
     }
     if (!owner) owner = rounds[0]
     if (!owner) { onResolvedRef.current?.(); return }
-    if (owner.state !== 'loaded') { ensureRef.current(owner.meta.id); return }
+    if (owner.entries.length === 0) { storeRef.current?.ensureGroupEntries(owner.meta.id); return }
     // 组已加载但条目里没有 (被噪声过滤/窗口截掉): 至少滚到所属组.
     setExtFocusLineNo(null)
     setExtTarget({ key: roundKeyOf(owner.meta.id), offset: headerRef.current?.offsetHeight ?? 0 })
@@ -267,17 +267,22 @@ export function JsonlView({
     const r = rounds[block.index]
     if (!r) return null
     const entries = r.entries.length > 0 ? r.entries : null
+    const rt = snapshot.groupRuntime.get(r.meta.id)
     return (
       <RoundGroup
         round={r.round}
         isLast={block.index === rounds.length - 1}
         isSecondLast={block.index === rounds.length - 2}
         onlyGroup={onlyGroup}
-        headerTitle={r.meta.seq === 0 ? '上文' : undefined}
-        headerSummary={r.meta.user_summary}
-        detailLoaded={r.state === 'loaded'}
-        detailLoading={r.state === 'loading'}
-        onNeedDetail={r.state === 'loaded' ? undefined : () => onEnsureGroupEntries(r.meta.id)}
+        open={r.state !== 'closed'}
+        sticky={!!rt?.sticky}
+        loading={r.state === 'open-loading'}
+        failed={!!rt?.lastError}
+        resident={!!entries}
+        onUserToggle={() => store?.toggleGroup(r.meta.id)}
+        onAutoOpen={() => store?.openGroup(r.meta.id, 'auto')}
+        onAutoClose={() => store?.closeGroup(r.meta.id, 'auto')}
+        onRetry={() => store?.retryGroup(r.meta.id)}
         forceOpen={block.key === extTarget?.key && extFocusLineNo !== null}
         showMeta={showMeta}
         resolvedMap={entries ? resolvedMapFor(entries, r.round.items, cursorStyleTools) : null}

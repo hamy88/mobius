@@ -9,9 +9,9 @@ type SessionJsonlPanelProps = {
   currentProjectId: string
   chatContainerRef: RefObject<HTMLDivElement>
   endRef: RefObject<HTMLDivElement>
-  // agent-history-store 快照 (普通视图按组渲染) + 组条目按需加载回调 (协议 ②).
+  // agent-history-store 快照 + store 实例 (视图只发状态机转移意图).
   historySnapshot: HistorySnapshot
-  onEnsureGroupEntries: (groupId: string) => void
+  historyStore: import('../services/agent-history-store').SessionHistoryStore | null
   // 简易视图仍吃摊平的已加载条目 (组结构对它是轮次列表, 派生自同一 store).
   visibleJsonl: any[]
   jsonlEmptyLoadingText: string
@@ -40,7 +40,7 @@ function SessionJsonlPanelInner({
   chatContainerRef,
   endRef,
   historySnapshot,
-  onEnsureGroupEntries,
+  historyStore,
   visibleJsonl,
   jsonlEmptyLoadingText,
   jsonlInitialLoading,
@@ -92,10 +92,10 @@ function SessionJsonlPanelInner({
             ) : (
               <JsonlView
                 snapshot={historySnapshot}
+                store={historyStore}
                 title=""
                 emptyLoadingText={jsonlEmptyLoadingText}
                 initialLoading={jsonlInitialLoading}
-                onEnsureGroupEntries={onEnsureGroupEntries}
                 showMeta={showJsonlMeta}
                 cursorStyleTools={cursorStyleTools}
                 scrollToEntryUuid={scrollToEntryUuid}

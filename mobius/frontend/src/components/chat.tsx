@@ -121,7 +121,7 @@ function parseDebugTimestamp(value: unknown): number | null {
 // 无会话时的空快照 (panel 需要 snapshot 形状).
 const EMPTY_HISTORY_SNAPSHOT_FALLBACK: HistorySnapshot = {
   rev: 0, sessionVersion: 0, groups: [], entriesByGroup: new Map(),
-  groupStates: new Map(), error: null, negotiated: false,
+  groupRuntime: new Map(), error: null, negotiated: false,
 }
 
 function findLatestEntryTimestamp(entries: any[]): {
@@ -2684,9 +2684,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyStore, historySnapshot?.rev])
   const jsonlInitialLoading = !historySnapshot?.negotiated && (historySnapshot?.groups.length ?? 0) === 0 && !historySnapshot?.error
-  const handleEnsureGroupEntries = useCallback((groupId: string) => {
-    historyStoreRef.current?.ensureGroupEntries(groupId)
-  }, [])
   const [easyRoundCount, setEasyRoundCount] = useState(0)
   const [easyExpandAllSignal, setEasyExpandAllSignal] = useState(0)
   const [easyLoadingAll, setEasyLoadingAll] = useState(false)
@@ -4753,7 +4750,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           chatContainerRef={chatContainerRef}
           endRef={endRef}
           historySnapshot={historySnapshot || EMPTY_HISTORY_SNAPSHOT_FALLBACK}
-          onEnsureGroupEntries={handleEnsureGroupEntries}
+          historyStore={historyStore}
           visibleJsonl={visibleJsonl}
           jsonlEmptyLoadingText={jsonlEmptyLoadingText}
           jsonlInitialLoading={jsonlInitialLoading}
