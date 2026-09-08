@@ -66,7 +66,7 @@ import {
 } from './entry-classify'
 import { buildHeaderSummary, resolveTaskHeaderSummary } from './header-summary'
 import { deriveToolCallStatus, TOOL_STATUS_META } from './tool-status'
-import type { ResolvedCallMap, ToolStatus } from './tool-status'
+import type { ToolStatusMap, ToolStatus } from './tool-status'
 import { estimateRenderChars, estimateToolResultsChars, clampNodeForRender, clampToolResults } from './oversized'
 import { KeyNode } from './KeyNode'
 import { JsonEntryCodeDiff } from './CodeDiff'
@@ -164,7 +164,7 @@ function resolveDesiredOpen(opts: {
 /**
  * 单条 entry 卡片. type 决定颜色, 摘要行展示关键内容 (供快速扫).
  */
-function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], resolvedMap, taskPlan }: {
+function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], toolStatusMap, taskPlan }: {
   entry: AnyEntry
   lineNo?: number
   // forceOpen: 搜索命中该卡 — 用户显式查看, 优先级最高, 压过 parentOrderedCollapse 与用户曾手动折叠.
@@ -178,7 +178,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   dense?: boolean
   bashResults?: BashToolResult[]
   readResults?: BashToolResult[]
-  resolvedMap?: ResolvedCallMap | null
+  toolStatusMap?: ToolStatusMap | null
   // 任务工具 (TaskCreate/TaskUpdate) 的跨条目累积快照 (JsonlView 顶层扫描产出,
   // anchor uuid → PlanUpdate). 与 update_plan / task_reminder 共用计划卡片视图.
   taskPlan?: PlanUpdate | null
@@ -304,7 +304,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const tourTarget = jsonEntryTourTarget(entry)
 
   // 工具调用状态: 由 "该 tool_use 的结果是否已落地" 推导 (running = 已发起未回结果).
-  const toolStatus = deriveToolCallStatus(entry, resolvedMap)
+  const toolStatus = deriveToolCallStatus(entry, toolStatusMap)
 
   // 系统期望 open — 所有展开/折叠条件集中在上方的 resolveDesiredOpen 判定.
   const desiredOpen = resolveDesiredOpen({
@@ -544,5 +544,5 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
 
 export const JsonEntryCard = memo(
   JsonEntryCardInner,
-  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && prev.bashResults === next.bashResults && prev.readResults === next.readResults && prev.resolvedMap === next.resolvedMap && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && prev.taskPlan === next.taskPlan,
+  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && prev.bashResults === next.bashResults && prev.readResults === next.readResults && prev.toolStatusMap === next.toolStatusMap && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && prev.taskPlan === next.taskPlan,
 )

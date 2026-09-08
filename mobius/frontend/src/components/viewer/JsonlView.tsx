@@ -30,7 +30,7 @@ import {
 
 // 单组条目渲染窗口上限: 巨轮只渲染尾部窗口 (虚拟列表保证视口流畅,
 // 这里限制的是首次进组的流水线成本).
-const GROUP_ENTRY_WINDOW = 1200
+const GROUP_ENTRY_WINDOW = 256
 
 function JsonlInitialSkeleton() {
   return (
@@ -99,14 +99,17 @@ function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo
 
 // ── 逐组派生数据的 WeakMap 缓存 (items 数组在快照 rev 不变时引用稳定) ─────────
 
-const resolvedCache = new WeakMap<AnyEntry[], ReturnType<typeof collectResolvedCallIds> | null>()
-function resolvedMapFor(entries: AnyEntry[], items: JsonlViewItem[], enabled: boolean) {
-  if (!enabled) return null
-  const hit = resolvedCache.get(entries)
+const toolStatusCache = new WeakMap<AnyEntry[], ReturnType<typeof collectResolvedCallIds> | null>()
+// 状态集合必须扫"与渲染相同的窗口切片"的原始条目:
+//  1. 收集器吃 AnyEntry (在元素顶层找 tool_result 字段), 末端 JsonlViewItem 形状不对;
+//  2. merge/过滤会吞掉纯 tool_result 条目, 末端列表里已没有结果载体.
+// 扫原始窗口 (含被 merge/过滤隐藏的条目) 才能配出 tool_use → result 的完成态.
+function toolStatusMapFor(entries: AnyEntry[]) {
+  const hit = toolStatusCache.get(entries)
   if (hit !== undefined) return hit
-  // 状态集合要扫含被过滤的纯 tool_result 条目, 用 merged 前的窗口直接算.
-  const value = collectResolvedCallIds(items)
-  resolvedCache.set(entries, value)
+  const windowed = entries.length > GROUP_ENTRY_WINDOW ? entries.slice(-GROUP_ENTRY_WINDOW) : entries
+  const value = collectResolvedCallIds(windowed)
+  toolStatusCache.set(entries, value)
   return value
 }
 
@@ -135,7 +138,6 @@ export function JsonlView({
   emptyLoadingText,
   initialLoading,
   showMeta = true,
-  cursorStyleTools = true,
   scrollToEntryUuid,
   scrollToMatchTs,
   onScrollResolved,
@@ -149,8 +151,6 @@ export function JsonlView({
   initialLoading?: boolean
   // false 时 jsonl 卡片标题里不再显示 "#序号" 和 "MM-DD HH:MM:SS" 时间戳前缀.
   showMeta?: boolean
-  // Cursor 式工具调用展示开关.
-  cursorStyleTools?: boolean
   // 搜索结果跳转: 命中条目 uuid / timestamp; 未加载的组先 ② 再定位.
   scrollToEntryUuid?: string | null
   scrollToMatchTs?: string | null
@@ -287,8 +287,7 @@ export function JsonlView({
         onRetry={() => store?.retryGroup(r.meta.id)}
         forceOpen={block.key === extTarget?.key && extFocusLineNo !== null}
         showMeta={showMeta}
-        resolvedMap={entries ? resolvedMapFor(entries, r.round.items, cursorStyleTools) : null}
-        cursorStyleTools={cursorStyleTools}
+        toolStatusMap={entries ? toolStatusMapFor(entries) : null}
         collapseLineNos={entries ? collapsedLineNosFor(entries, r.round.items) : undefined}
         focusLineNo={extFocusLineNo}
         headerPalette={roundHeaderPalette}

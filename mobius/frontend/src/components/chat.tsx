@@ -2709,8 +2709,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const voiceTickTimerRef = useRef<number | null>(null)
   // 默认隐藏 jsonl 卡片标题里的"序号 + 时间"前缀; 开启后才显示 #序号 和 MM-DD HH:MM:SS.
   const [showJsonlMeta, setShowJsonlMeta] = useState(false)
-  // Cursor 式工具调用展示: 工具卡显示状态图标 (⏳/✅/❌) + 连续探索类自动聚合为 "已探索 N 个工具". 默认开启.
-  const [cursorStyleTools, setCursorStyleTools] = useState(true)
   // 回车自动加急: 开启后, 输入框按 Enter 发送时自动带 urgent=true (打断当前输出并立即发送). 持久化到 localStorage.
   const [autoUrgentOnEnter, setAutoUrgentOnEnter] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_URGENT_ENTER_STORAGE_KEY) === '1' } catch { return false }
@@ -4739,7 +4737,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           jsonlEmptyLoadingText={jsonlEmptyLoadingText}
           jsonlInitialLoading={jsonlInitialLoading}
           showJsonlMeta={showJsonlMeta}
-          cursorStyleTools={cursorStyleTools}
           backendAlive={backendAlive}
           backendWorking={backendWorking}
           backendPid={backendPid}

@@ -17,7 +17,6 @@ type SessionJsonlPanelProps = {
   jsonlEmptyLoadingText: string
   jsonlInitialLoading: boolean
   showJsonlMeta: boolean
-  cursorStyleTools: boolean
   backendAlive: boolean | null
   backendWorking: boolean | null
   backendPid: number | null
@@ -45,7 +44,6 @@ function SessionJsonlPanelInner({
   jsonlEmptyLoadingText,
   jsonlInitialLoading,
   showJsonlMeta,
-  cursorStyleTools,
   backendAlive,
   backendWorking,
   backendPid,
@@ -97,7 +95,6 @@ function SessionJsonlPanelInner({
                 emptyLoadingText={jsonlEmptyLoadingText}
                 initialLoading={jsonlInitialLoading}
                 showMeta={showJsonlMeta}
-                cursorStyleTools={cursorStyleTools}
                 scrollToEntryUuid={scrollToEntryUuid}
                 scrollToMatchTs={scrollToMatchTs}
                 onScrollResolved={onMatchScrollResolved}
