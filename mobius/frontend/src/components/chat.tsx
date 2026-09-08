@@ -60,6 +60,83 @@ const CHAT_INPUT_MIN_WIDTH = 224
 const CHAT_INPUT_MAX_WIDTH = 720
 const CHAT_HISTORY_MIN_WIDTH = 360
 
+type LiveDebugTailEntry = {
+  type: string | null
+  timestamp: string | null
+  createdAt: string | null
+  payloadTimestamp: string | null
+  messageCreatedAt: string | null
+  topLevelKeys: string[]
+}
+
+type LiveDebugSnapshot = {
+  sessionId: string
+  layout: string
+  variant: 'standard' | 'easy'
+  backendAlive: boolean | null
+  backendWorking: boolean | null
+  parentGate: {
+    standardVariant: boolean
+    alive: boolean
+    working: boolean
+    shouldMount: boolean
+  }
+  jsonlCount: number
+  tail: LiveDebugTailEntry[]
+  lastEntry: LiveDebugTailEntry | null
+  lastTimestampProp: string | number | null
+  parsedLastTimestampMs: number | null
+  hasUsableTimestamp: boolean
+  lastEntryAnyTimestamp: string | null
+  cardWouldReturnNull: boolean
+  reasons: string[]
+  generatedAt: string
+  dom?: {
+    cardCount: number
+    visibleCount: number
+    first: {
+      display: string
+      visibility: string
+      opacity: string
+      width: number
+      height: number
+    } | null
+  }
+}
+
+function safeDebugValue(value: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+  const text = String(value).trim()
+  return text ? text.slice(0, 120) : null
+}
+
+function parseDebugTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const ms = new Date(value as string | number).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+function debugTailEntry(entry: any): LiveDebugTailEntry {
+  const payload = entry?.payload
+  const message = entry?.message
+  return {
+    type: safeDebugValue(entry?.type),
+    timestamp: safeDebugValue(entry?.timestamp),
+    createdAt: safeDebugValue(entry?.created_at),
+    payloadTimestamp: safeDebugValue(payload?.timestamp),
+    messageCreatedAt: safeDebugValue(message?.created_at),
+    topLevelKeys: entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? Object.keys(entry).slice(0, 40)
+      : [],
+  }
+}
+
+declare global {
+  interface Window {
+    mobiusLiveDebug?: () => LiveDebugSnapshot
+  }
+}
+
 // 按 uuid/id 去重合并两个 entries 数组 (骨架/切片与已加载内容可能重叠), 合并后按时间戳归位.
 function mergeJsonlEntriesByIdentity(prev: any[], incoming: any[]): any[] {
   if (!incoming || incoming.length === 0) return prev
@@ -2714,6 +2791,108 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // agent TUI 实时状态行 (如 "✻ Propagating… (7m 44s · ↓ 24.1k tokens)"), 给 LIVE 卡片.
   // 非 claude-code / 非 working 时为 "". 由 /status 轮询返回.
   const [backendRealTimeInfo, setBackendRealTimeInfo] = useState('')
+  const liveDebugSnapshotRef = useRef<LiveDebugSnapshot | null>(null)
+  const liveDebugSnapshot = useMemo<LiveDebugSnapshot>(() => {
+    const variant: 'standard' | 'easy' = layout === 'easy' ? 'easy' : 'standard'
+    const standardVariant = variant === 'standard'
+    const alive = backendAlive === true
+    const working = backendWorking === true
+    const shouldMount = standardVariant && alive && working
+    const tail = jsonlEntries.slice(-5).map(debugTailEntry)
+    const lastEntry = tail[tail.length - 1] || null
+    // 这必须与 ChatArea 传给 SessionJsonlPanel/JsonlLiveTailCard 的值保持一致：
+    // 当前实现只使用最后一条 entry 的顶层 timestamp。
+    const rawLastTimestamp = jsonlEntries[jsonlEntries.length - 1]?.timestamp
+    const lastTimestampProp = typeof rawLastTimestamp === 'string' || typeof rawLastTimestamp === 'number'
+      ? rawLastTimestamp
+      : null
+    const parsedLastTimestampMs = parseDebugTimestamp(lastTimestampProp)
+    const hasUsableTimestamp = !!parsedLastTimestampMs
+    const lastEntryAnyTimestamp = lastEntry
+      ? lastEntry.timestamp || lastEntry.createdAt || lastEntry.payloadTimestamp || lastEntry.messageCreatedAt
+      : null
+    const cardWouldReturnNull = shouldMount && !hasUsableTimestamp
+    const reasons: string[] = []
+
+    if (!standardVariant) reasons.push(`variant=${variant}（当前不是 standard 渲染分支）`)
+    if (!alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
+    if (!working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
+    if (jsonlEntries.length === 0) reasons.push('jsonlEntries 为空')
+    if (jsonlEntries.length > 0 && !lastTimestampProp) reasons.push('最后一条 entry 没有顶层 timestamp')
+    if (lastTimestampProp && !hasUsableTimestamp) reasons.push('最后一条顶层 timestamp 无法解析')
+    if (lastEntryAnyTimestamp && !lastTimestampProp) reasons.push(`最后一条 entry 仍有其他时间字段：${lastEntryAnyTimestamp}`)
+    if (cardWouldReturnNull) reasons.push('父级门槛满足，但 JsonlLiveTailCard 因 silenceSec=null 返回 null')
+    if (shouldMount && hasUsableTimestamp) reasons.push('代码路径应当挂载 LIVE；若页面仍不可见，请检查 DOM/CSS 或渲染层')
+    if (reasons.length === 0) reasons.push('没有发现隐藏原因')
+
+    return {
+      sessionId,
+      layout,
+      variant,
+      backendAlive,
+      backendWorking,
+      parentGate: { standardVariant, alive, working, shouldMount },
+      jsonlCount: jsonlEntries.length,
+      tail,
+      lastEntry,
+      lastTimestampProp,
+      parsedLastTimestampMs,
+      hasUsableTimestamp,
+      lastEntryAnyTimestamp,
+      cardWouldReturnNull,
+      reasons,
+      generatedAt: new Date().toISOString(),
+    }
+  }, [backendAlive, backendWorking, jsonlEntries, layout, sessionId])
+  liveDebugSnapshotRef.current = liveDebugSnapshot
+
+  useEffect(() => {
+    const previous = window.mobiusLiveDebug
+    const debug = () => {
+      const snapshot = liveDebugSnapshotRef.current
+      if (!snapshot) throw new Error('LIVE debug snapshot is not ready')
+      const cards = Array.from(document.querySelectorAll<HTMLElement>('.jsonl-live-sweep'))
+      const firstCard = cards[0]
+      const firstStyle = firstCard ? window.getComputedStyle(firstCard) : null
+      const firstRect = firstCard?.getBoundingClientRect()
+      const visibleCards = cards.filter((card) => {
+        const style = window.getComputedStyle(card)
+        const rect = card.getBoundingClientRect()
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0 && rect.width > 0 && rect.height > 0
+      })
+      const reasons = [...snapshot.reasons]
+      if (snapshot.parentGate.shouldMount && snapshot.hasUsableTimestamp && cards.length === 0) {
+        reasons.push('代码应挂载且时间戳有效，但 DOM 中没有 .jsonl-live-sweep')
+      } else if (snapshot.parentGate.shouldMount && snapshot.hasUsableTimestamp && visibleCards.length === 0) {
+        reasons.push('DOM 中有 LIVE 卡片，但它被 display/visibility/opacity/尺寸隐藏')
+      }
+      const result: LiveDebugSnapshot = {
+        ...snapshot,
+        reasons,
+        dom: {
+          cardCount: cards.length,
+          visibleCount: visibleCards.length,
+          first: firstCard && firstStyle && firstRect ? {
+            display: firstStyle.display,
+            visibility: firstStyle.visibility,
+            opacity: firstStyle.opacity,
+            width: Math.round(firstRect.width),
+            height: Math.round(firstRect.height),
+          } : null,
+        },
+      }
+      console.info('[Mobius LIVE]', result.reasons.join('；'))
+      console.table(snapshot.parentGate)
+      console.table(snapshot.tail)
+      console.table(result.dom)
+      return result
+    }
+    window.mobiusLiveDebug = debug
+    return () => {
+      if (window.mobiusLiveDebug === debug) window.mobiusLiveDebug = previous
+    }
+  }, [])
+
   const [pendingSendAt, setPendingSendAt] = useState<number | null>(null)
   // 本次 pending 发送是否为加急: 加急时 session 本来就在 working, poll 的
   // "working=true ⇒ 清除 pending" 信号无效, 会过早清掉导致发送阶段提示 (正在发送/唤醒中) 不显示.
