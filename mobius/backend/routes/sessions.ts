@@ -826,25 +826,42 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
     // 协议 ③: 前端另行 GET ① 拿组元数据、按需 GET ② 拿组条目; SSE 只推增量事件
     // (group_created / entries). agent 原生 raw 流仅当低延迟触发器: 一条新行 →
     // 触发一次 store 增量 sync (首条立即, 后续 300ms 合批), sync 提交后由 store 广播.
-    const primaryPath = typeof backend._resolveJsonlPath === 'function'
+    //
+    // 新会话陷阱: jsonl 路径要等首条消息 dispatch 绑定 runtime 后才查得到 (codex 的
+    // rollout 绑定就在 dispatch 里; claude-code 是竞态), 而 SSE 打开常更早. 若只在
+    // 连接时解析一次, 开局的 null 会把整段订阅块跳过, 这条连接就永远收不到事件.
+    // 对策: 订阅无条件挂; 路径每次要用时现问, 晚绑定也能自然追上.
+    // resolvePrimary = 现问一次"这个会话的 jsonl 在哪". 适配器内部三级查表:
+    // 内存 runtime Map → 运行时登记 (hub-runtime) → 历史存档 (hub-archive);
+    // 新会话三者皆空 → null; typeof 防御个别后端未实现该方法.
+    const resolvePrimary = () => (typeof backend._resolveJsonlPath === 'function'
       ? backend._resolveJsonlPath(sessionId)
-      : null;
-    if (primaryPath) {
+      : null);
+    {
+      // 开门补齐: 连接建立时把库读到文件末尾; 新会话路径未绑定 → 跳过不报错, 后续 runSync 追上.
+      const initialPath = resolvePrimary();
       let storeSyncError = '';
-      try {
-        const synced = syncHistoryStore(sessionId, primaryPath);
-        if (!synced.ok) storeSyncError = synced.error || 'history store sync failed';
-      } catch (e) {
-        storeSyncError = (e as Error).message || String(e);
+      if (initialPath) {
+        try {
+          const synced = syncHistoryStore(sessionId, initialPath);
+          // 结构化失败 (书签错乱等): 取返回里的 error 文案.
+          if (!synced.ok) storeSyncError = synced.error || 'history store sync failed';
+        } catch (e) {
+          // 抛异常 (非结构化失败): 同样按失败处理.
+          storeSyncError = (e as Error).message || String(e);
+        }
       }
+      // 开门补齐失败 → 告知前端并收线不订阅; error 标记粘性, 重连也一样.
       if (storeSyncError) {
         const sent = await writeSse(res, 'server_error', {
           event: 'error',
           message: storeSyncError,
           category: 'history_store',
         });
+        // 帧没写出去 = 连接已断 → 收线终止.
         if (!sent || closed) { endStream(); return; }
       } else {
+        // 事件源 1 — store 广播: 开组/新条目落库即发, 原样转发.
         const unsubStore = subscribeSessionEvents(sessionId, (ev) => {
           writeSse(res, ev.type, { event: ev.type, session_id: sessionId, ...ev.payload })
             .catch(() => cleanup());
@@ -853,19 +870,28 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
         let lastSyncAt = 0;
         const runSync = () => {
           lastSyncAt = Date.now();
+          // 每次现问路径: 未绑定 → 安静跳过等下一趟; 绑定后开始真正同步.
+          const primaryPath = resolvePrimary();
+          if (!primaryPath) return;
+          // 异常吞掉: 结构化 error 机制兜底.
           try { syncHistoryStore(sessionId, primaryPath); } catch {}
         };
+        // 300ms 合批: agent 高频写文件时, 一条 raw 行最多引起一次 sync.
         const scheduleSync = () => {
           const since = Date.now() - lastSyncAt;
+          // 距上次 sync 已 ≥300ms → 立即跑.
           if (since >= 300) { runSync(); return; }
+          // 否则定时到 300ms 点跑; 已挂定时器不重复挂 (后续行蹭这班车).
           if (!syncTimer) {
             syncTimer = setTimeout(() => { syncTimer = null; runSync(); }, 300 - since);
           }
         };
+        // 事件源 2 — agent 原生 raw 流: 只当低延迟触发器, 不转发内容本身.
         const unsubRaw = backend.getAgentRawThoughtStream(
           sessionId,
           (entry: any) => {
             scheduleSync();
+            // 本轮结束标记: 补发 typing=false 撤"工作中"提示, 并给会话留痕.
             if (isTurnCompleteEntry(entry)) {
               writeSse(res, 'typing', { event: 'typing', active: false }).catch(() => cleanup());
               try {
@@ -876,6 +902,7 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
             }
           },
         );
+        // 连接收线: 摘两个订阅 + 清未触发的定时器.
         unsub = () => {
           try { unsubStore(); } catch {}
           if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
