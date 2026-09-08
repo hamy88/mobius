@@ -419,7 +419,7 @@ export function JsonlView({
               <span className="absolute inset-0 rounded-full border-2 border-amber-300/20" />
               <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-amber-300 animate-spin" />
             </span>
-            <span className="font-medium mobius-status-marquee">{emptyLoadingText}</span>
+            <span className="font-medium mobius-status-marquee mobius-status-marquee--readable">{emptyLoadingText}</span>
           </div>
         </div>
       )

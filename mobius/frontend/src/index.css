@@ -937,6 +937,14 @@ body::after {
   will-change: background-position;
 }
 
+/* 空会话的进程状态必须保持高对比度；其父级颜色在部分主题下会让
+   currentColor 渐变接近透明，单独固定到主题主文字色确保可读。 */
+.mobius-status-marquee--readable {
+  --mobius-status-color: var(--text-primary);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mobius-status-marquee {
     animation: none;
