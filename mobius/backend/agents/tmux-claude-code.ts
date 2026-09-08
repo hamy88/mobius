@@ -622,13 +622,23 @@ class TmuxClaudeCodeBackend extends AgentBackend {
 
   // ── 公开方法 (基类锁包装) ─────────────────────────────
   createNewSession(opts: ClaudeDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._createImpl(opts))
   }
   pauseCurrentAndResumeFromSession(opts: ClaudeDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._pauseImpl(opts))
   }
   noPauseCurrentAndQueueQueryAtSession(opts: ClaudeDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
+  }
+
+  // opener 提前: dispatch 一进来 (进锁/spawn 之前) 就把用户卡写库开轮,
+  // 不然 spawn 期间首趟 sync 抢先入库, 启动前导会落进 "第0轮".
+  _writeMobiusPromptEarly(opts: ClaudeDispatchOpts) {
+    if (!opts?.sessionId || !opts?.mobiusPromptRecord) return
+    try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
   terminateSession(sessionId: string) {
     return this._withLock(sessionId, () => this._terminateImpl(sessionId))
@@ -867,20 +877,17 @@ class TmuxClaudeCodeBackend extends AgentBackend {
   }
 
   // 发送链路写入 user_input/compact 卡 = 开新轮 (写进 agent-history-store, 不再落文件).
-  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined) {
+  // 不要求 runtime 已绑定 jsonl 路径: 调用点已提前到 dispatch 入口, 新会话 spawn 期间路径未知也要先开轮; 路径留 null, 由首次 sync 认领.
+  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined, cwdHint?: string) {
     if (!mobiusPromptRecord) return false
     const entry = this.runtime.get(sessionId)
-    if (!entry?.jsonlPath) {
-      console.warn(`[tmux-claude-code] mobius core entry skipped (${sessionId}): original jsonl path missing`)
-      return false
-    }
     try {
       return writeMobiusCoreEntry({
         sessionId,
-        agentSessionId: entry.agentSessionId || null,
-        cwd: entry.cwd || null,
+        agentSessionId: entry?.agentSessionId || null,
+        cwd: entry?.cwd || cwdHint || null,
         backendName: this.name,
-        primaryPath: entry.jsonlPath,
+        primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
       })
     } catch (e) {
@@ -967,7 +974,6 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         enableGulingMcp,
       })
     }
-    this.harnessWriteMobiusCoreEntry(sessionId, mobiusPromptRecord)
     await this._sendMaybeInitialContextPrompt(sessionId, prompt, isInitialContextPrompt)
     const entry = this.runtime.get(sessionId)
     if (!suppressRunningFlag) markRunning(flagRoot || entry?.flagRoot || entry?.cwd || cwd, sessionId)

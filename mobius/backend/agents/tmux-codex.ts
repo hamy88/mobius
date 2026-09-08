@@ -719,13 +719,23 @@ class TmuxCodexBackend extends AgentBackend {
   }
 
   createNewSession(opts: CodexDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._createImpl(opts))
   }
   pauseCurrentAndResumeFromSession(opts: CodexDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._pauseImpl(opts))
   }
   noPauseCurrentAndQueueQueryAtSession(opts: CodexDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
+  }
+
+  // opener 提前: dispatch 一进来 (进锁/启动 CLI 之前) 就把用户卡写库开轮.
+  // 若等 spawn+绑定路径 (~10s) 再写, 首趟 sync 会抢先把启动前导落进 "第0轮".
+  _writeMobiusPromptEarly(opts: CodexDispatchOpts) {
+    if (!opts?.sessionId || !opts?.mobiusPromptRecord) return
+    try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
   terminateSession(sessionId: string) {
     return this._withLock(sessionId, () => this._terminateImpl(sessionId))
@@ -926,20 +936,18 @@ class TmuxCodexBackend extends AgentBackend {
   }
 
   // 发送链路写入 user_input/compact 卡 = 开新轮 (写进 agent-history-store, 不再落文件).
-  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined) {
+  // 不要求 runtime 已绑定 jsonl 路径: 调用点已提前到 dispatch 入口, 新会话 spawn 期间
+  // 路径未知也要先开轮; 路径留 null, 由首次 sync 认领.
+  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined, cwdHint?: string) {
     if (!mobiusPromptRecord) return false
     const entry = this.runtime.get(sessionId)
-    if (!entry?.jsonlPath) {
-      console.warn(`[tmux-codex] mobius core entry skipped (${sessionId}): original jsonl path missing`)
-      return false
-    }
     try {
       return writeMobiusCoreEntry({
         sessionId,
-        agentSessionId: entry.agentSessionId || null,
-        cwd: entry.cwd || null,
+        agentSessionId: entry?.agentSessionId || null,
+        cwd: entry?.cwd || cwdHint || null,
         backendName: this.name,
-        primaryPath: entry.jsonlPath,
+        primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
       })
     } catch (e) {
@@ -1049,10 +1057,6 @@ class TmuxCodexBackend extends AgentBackend {
     const bindSinceMs = spawnInfo?.startedAt || Date.now()
     const entry = this.runtime.get(sessionId)
     if (entry) entry.working = true
-    let mobiusPromptWritten = false
-    if (entry?.jsonlPath) {
-      mobiusPromptWritten = this.harnessWriteMobiusCoreEntry(sessionId, mobiusPromptRecord)
-    }
     await this._sendPromptToWindow(sessionId, prompt)
     if (!suppressRunningFlag) markRunning(flagRoot || entry?.flagRoot || entry?.cwd || cwd, sessionId)
     if (!this.runtime.get(sessionId)?.agentSessionId) {
@@ -1071,9 +1075,6 @@ class TmuxCodexBackend extends AgentBackend {
         knownThreadIds: bindKnownThreadIds,
         allowUpdatedThreadFallback,
       })
-      if (!mobiusPromptWritten) {
-        mobiusPromptWritten = this.harnessWriteMobiusCoreEntry(sessionId, mobiusPromptRecord)
-      }
     }
   }
 

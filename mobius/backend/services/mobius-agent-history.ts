@@ -559,7 +559,15 @@ function writeMobiusCoreEntry(args: {
 
   // 确保有状态行 (新会话首条消息可能先于任何 sync).
   if (!st.getState.get(sessionId)) {
-    st.insertState.run(sessionId, args.primaryPath || '');
+    // 首触即直写且路径已知: 先完整同步一次 (含旧文件迁移 backfill), 让历史轮次先开组、
+    // 本轮 opener 排在最后 — 组序 = 时间序. (路径未知 = 新会话无迁移源, 直接建行,
+    // 迁移标记保持 0, 由首次 sync 检查.)
+    if (args.primaryPath) {
+      try { syncSession(sessionId, args.primaryPath); } catch {}
+    }
+    if (!st.getState.get(sessionId)) {
+      st.insertState.run(sessionId, args.primaryPath || '');
+    }
   }
   recoverPendingOpeners(sessionId);
 
@@ -685,8 +693,8 @@ function markError(sessionId: string, message: string): SyncResult {
   return { ok: false, error: message };
 }
 
-// [legacy-migration] 第四个参数: 迁移源 (无则纯原生轨扫描). 删除迁移时一并删掉.
-function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'members', legacy: LegacyBackfill | null): SyncResult {
+// [legacy-migration] 第四个参数: 迁移源 (无则纯原生轨扫描); 第五个: 本次调用是否结算迁移标记. 删除迁移时一并删掉.
+function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'members', legacy: LegacyBackfill | null, markLegacyDone: boolean): SyncResult {
   const db = openStore();
   const st = S();
   const state = st.getState.get(sessionId) as any;
@@ -741,10 +749,11 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
   if (legacy) pendingRows.push(...legacy.takeAll());
   commit();
 
-  // [legacy-migration] 消费完迁移源: 书签落在文件尾, 永不再读.
-  if (mode === 'initial') {
+  // [legacy-migration] 本次检查过迁移源: 有源 → 记已消费字节; 无源 → -1 (查过没有).
+  // 0 恒表示 "从未检查", 兼容旧数据 (旧代码无源时也写 0, 下次 sync 重查一次后落 -1).
+  if (markLegacyDone) {
     db.prepare('UPDATE ingest_state SET legacy_read_bytes = ? WHERE session_id = ?')
-      .run(legacy ? legacy.consumedBytes() : 0, sessionId);
+      .run(legacy ? legacy.consumedBytes() : -1, sessionId);
   }
 
   flushSink(sessionId, sink);
@@ -774,7 +783,7 @@ function syncSession(sessionId: string, primaryPath: string | null | undefined):
   if (state.primary_path && state.primary_path !== primaryPath) {
     const oldPath = state.primary_path;
     if (fs.existsSync(oldPath)) {
-      const r = scanPrimary(sessionId, oldPath, 'members', null);
+      const r = scanPrimary(sessionId, oldPath, 'members', null, false);
       if (!r.ok) return r;
       openStore().prepare('UPDATE ingest_state SET primary_path = ?, primary_read_bytes = 0 WHERE session_id = ?')
         .run(primaryPath, sessionId);
@@ -786,10 +795,11 @@ function syncSession(sessionId: string, primaryPath: string | null | undefined):
     openStore().prepare('UPDATE ingest_state SET primary_path = ? WHERE session_id = ?').run(primaryPath, sessionId);
   }
 
-  // [legacy-migration] 首次 = backfill: 冻结的旧 .mobius.jsonl 与原生轨按时间戳归并,
-  // 见开轮卡切组 (origin='legacy'); 之后旧文件永不再读.
-  const legacy = created ? loadLegacyBackfill(primaryPath) : null;
-  return scanPrimary(sessionId, primaryPath, created ? 'initial' : 'members', legacy);
+  // [legacy-migration] backfill 触发条件 = legacy_read_bytes == 0 (从未检查), 不再看 created:
+  // opener 提前写入也会建状态行, 若按 created 判定, 这些会话的旧文件会被永久跳过.
+  const needLegacy = Number(state.legacy_read_bytes) === 0;
+  const legacy = needLegacy ? loadLegacyBackfill(primaryPath) : null;
+  return scanPrimary(sessionId, primaryPath, created ? 'initial' : 'members', legacy, needLegacy);
 }
 
 // ── 对外: 查询 (① ② + 旧 getHistory 兼容) ───────────────────────────────
