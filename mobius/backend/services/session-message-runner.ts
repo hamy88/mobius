@@ -238,7 +238,7 @@ async function runSessionMessage({
   });
 
   try {
-    // mobius 侧 prompt 提交记录: 随 dispatchOpts 下发, agent 后端 harnessWriteMobiusCoreEntry 把它同步写进 <uuid>.mobius.jsonl 文件
+    // mobius 侧 prompt 提交记录: 随 dispatchOpts 下发, agent 后端 harnessWriteMobiusCoreEntry 把它写进 agent-history-store 库 (开新轮)
     const mobiusPromptRecord = {
       source,                                              // 谁发的 (默认 service.session.messages=会话页; 小莫提问=assistant.question; 生命周期催促=assistant.lifecycle-callback)
       kind: mobiusPromptKind(displayContent),

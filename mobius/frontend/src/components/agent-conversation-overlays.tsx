@@ -7,7 +7,7 @@ import { mergeBashToolResultItems } from './viewer/entry-extract'
 import { isHiddenJsonlNoiseEntry } from './viewer/entry-classify'
 import { pollRecursive } from '../services/polling'
 import { clampOverlayToBounds, resolveOverlayCollisions, type OverlayCollisionItem } from '../services/overlay-collision'
-import { readJsonlCacheFromIdb, readJsonlCacheSync, writeJsonlCache } from '../services/session-jsonl-cache'
+import { getHistoryStore } from '../services/agent-history-store'
 import { preloadSessionInputCache, prependSessionInputCache, readSessionInputCache, refreshSessionInputCache, type SessionInputEntry } from '../services/session-input-cache'
 import { RemoteFileMentionDrawer, type AgentMentionMode, type MentionAgentSession } from './chat'
 import type { AnyEntry } from './viewer/types'
@@ -257,12 +257,13 @@ function SessionOverlay({ session, state, compact, setState, onClose, onOpenSess
   useEffect(() => { register(session.id, panelRef.current, lineRef.current); return () => register(session.id, null, null) }, [register, session.id])
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const data: any = await api(`/api/sessions/${encodeURIComponent(session.id)}/jsonl-history?tail_count=80`, signal ? { signal } : undefined)
-      const raw = Array.isArray(data) ? data : (data?.entries || data?.jsonl || [])
+      // 历史存储: 协商 (常态 304) + 已加载组刷新后摊平取尾部. 无 SSE 的悬浮窗靠轮询驱动.
+      const store = getHistoryStore(session.id)
+      await store.negotiate()
       if (signal?.aborted) return
       liveDataRef.current = true
+      const raw = store.flattenEntries().slice(-80)
       const visible = visibleOverlayEntries(raw)
-      writeJsonlCache(session.id, raw, Number(data?.total || raw.length), typeof data?.path === 'string' ? data.path : null)
       setStateRef.current((prev) => ({ ...prev, entries: visible, error: undefined }))
     } catch (e: any) {
       // A timed-out polling request is expected and should not surface as an error or
@@ -273,15 +274,15 @@ function SessionOverlay({ session, state, compact, setState, onClose, onOpenSess
   }, [session.id])
   useEffect(() => {
     liveDataRef.current = false
-    const cached = readJsonlCacheSync(session.id)
-    if (cached?.entries?.length) setStateRef.current((prev) => ({ ...prev, entries: visibleOverlayEntries(cached.entries) }))
-    let cancelled = false
-    void readJsonlCacheFromIdb(session.id).then((cachedIdb) => {
-      if (cancelled || liveDataRef.current || !cachedIdb?.entries?.length) return
-      setStateRef.current((prev) => ({ ...prev, entries: visibleOverlayEntries(cachedIdb.entries) }))
+    // 先渲染本地缓存秒显, 轮询到达后由 ① 协商覆盖.
+    const store = getHistoryStore(session.id)
+    void store.hydrateFromCache().then(() => {
+      if (liveDataRef.current) return
+      const cached = store.flattenEntries().slice(-80)
+      if (cached.length) setStateRef.current((prev) => ({ ...prev, entries: visibleOverlayEntries(cached) }))
     })
     const stop = pollRecursive((signal) => load(signal), 10_000)
-    return () => { cancelled = true; stop() }
+    return () => { stop() }
   }, [load, session.id])
   useLayoutEffect(() => {
     const frame = requestAnimationFrame(() => {

@@ -67,10 +67,12 @@ async function main() {
   await new Promise<void>((resolve) => {
     const url = `${SERVER}/api/sessions/${encodeURIComponent(session.session_id)}/events?token=${encodeURIComponent(lr.token)}`
     const conn = new SseConnection(url, {
-      onEntry: (entry) => {
-        if (!firstEntryMs) firstEntryMs = Date.now() - t0
-        entries.push(entry)
-        if (!isHiddenNoise(entry) && assistantEntryText(entry)) gotAssistant = true
+      onEntries: ({ entries: batch }) => {
+        for (const entry of batch) {
+          if (!firstEntryMs) firstEntryMs = Date.now() - t0
+          entries.push(entry)
+          if (!isHiddenNoise(entry) && assistantEntryText(entry)) gotAssistant = true
+        }
         if (gotAssistant) { setTimeout(resolve, 1500) } // grab trailing entries
       },
       onError: (m) => console.error('  (sse error)', m),
@@ -86,7 +88,7 @@ async function main() {
     }, 1000)
   })
 
-  ok(entries.length > 0, `received ${entries.length} SSE jsonl_entry events`)
+  ok(entries.length > 0, `received ${entries.length} SSE entries (group events)`)
   ok(firstEntryMs > 0, `first entry after ${firstEntryMs}ms`)
   ok(gotAssistant, 'received an assistant text entry')
 

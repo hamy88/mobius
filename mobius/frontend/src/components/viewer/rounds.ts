@@ -1,5 +1,9 @@
 /**
- * viewer/rounds.ts — 对话轮次分组的纯逻辑 (无 React 依赖).
+ * viewer/rounds.ts — 对话轮次分组的纯逻辑 (无 React 依赖). [已弃用]
+ *
+ * ⚠️ 前端不再分组: 组结构来自后端协议 ① (agent-history-store), 普通视图已迁组驱动.
+ * 本文件只剩简易视图 (EasyJsonlView) 在用 — 简易视图迁组后整个文件删除,
+ * jsonl-round-helpers.ts 的排除串常量同步退场 (后端两处副本一并清理).
  *
  * 从 jsonl-view.tsx 拆出. 每条 user entry 开启一个新"轮次"; 其后的 assistant/tool
  * 条目属于该轮的回复. "是否开新轮" 的核心判断复用 jsonl-round-helpers 的 isNewRound,
@@ -59,6 +63,7 @@ function isWrappedVariant(text: string, prevText: string): boolean {
   return text.includes(`${QuestionTitle.zh}\n${prevText}`) || text.includes(`${QuestionTitle.en}\n${prevText}`)
 }
 
+/** @deprecated 读时内容推断分组已被后端"写入即开组"取代; 仅简易视图过渡使用. */
 export function buildRounds(
   visibleItems: JsonlViewItem[],
 ): { preItems: JsonlViewItem[]; rounds: Round[] } {

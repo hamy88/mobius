@@ -1,6 +1,7 @@
 import { lazy, memo, Suspense, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
+import type { HistorySnapshot } from '../services/agent-history-store'
 
 const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
 
@@ -8,12 +9,13 @@ type SessionJsonlPanelProps = {
   currentProjectId: string
   chatContainerRef: RefObject<HTMLDivElement>
   endRef: RefObject<HTMLDivElement>
+  // agent-history-store 快照 (普通视图按组渲染) + 组条目按需加载回调 (协议 ②).
+  historySnapshot: HistorySnapshot
+  onEnsureGroupEntries: (groupId: string) => void
+  // 简易视图仍吃摊平的已加载条目 (组结构对它是轮次列表, 派生自同一 store).
   visibleJsonl: any[]
-  loadedJsonlCount: number
-  jsonlTotal: number
   jsonlEmptyLoadingText: string
   jsonlInitialLoading: boolean
-  jsonlLoadingMore: boolean
   showJsonlMeta: boolean
   cursorStyleTools: boolean
   backendAlive: boolean | null
@@ -22,20 +24,12 @@ type SessionJsonlPanelProps = {
   realTimeInfo?: string
   lastTimestamp?: string | null
   hasNewMessages: boolean
-  onLoadAllJsonl: () => void
-  // 超长会话按需加载: 骨架模式下展开某轮时拉取该轮的主轨明细切片.
-  onLoadRoundDetail?: (openerUuid: string, fromTs: string, toTs: string | null) => void
-  roundDetailLoaded?: Set<string>
-  roundDetailVersion?: number
-  spineMode?: boolean
-  loadingRoundUuid?: string | null
   onScrollPositionChange: (userScrolledUp: boolean) => void
   onJumpToBottom: () => void
-  // 搜索结果跳转: 命中条目 uuid / timestamp, JsonlView 解析到所属轮次卡片后滚动.
+  // 搜索结果跳转: 命中条目 uuid / timestamp, JsonlView 解析到所属组后滚动.
   scrollToEntryUuid?: string | null
   scrollToMatchTs?: string | null
   onMatchScrollResolved?: () => void
-  onMatchScrollUnresolved?: () => void
   onEasyRoundCountChange?: (count: number) => void
   easyExpandAllSignal?: number
   variant?: 'standard' | 'easy'
@@ -45,12 +39,11 @@ function SessionJsonlPanelInner({
   currentProjectId,
   chatContainerRef,
   endRef,
+  historySnapshot,
+  onEnsureGroupEntries,
   visibleJsonl,
-  loadedJsonlCount,
-  jsonlTotal,
   jsonlEmptyLoadingText,
   jsonlInitialLoading,
-  jsonlLoadingMore,
   showJsonlMeta,
   cursorStyleTools,
   backendAlive,
@@ -59,26 +52,15 @@ function SessionJsonlPanelInner({
   realTimeInfo,
   lastTimestamp,
   hasNewMessages,
-  onLoadAllJsonl,
-  onLoadRoundDetail,
-  roundDetailLoaded,
-  roundDetailVersion,
-  spineMode,
-  loadingRoundUuid,
   onScrollPositionChange,
   onJumpToBottom,
   scrollToEntryUuid,
   scrollToMatchTs,
   onMatchScrollResolved,
-  onMatchScrollUnresolved,
   onEasyRoundCountChange,
   easyExpandAllSignal,
   variant = 'standard',
 }: SessionJsonlPanelProps) {
-  const effectiveTotal = jsonlTotal > loadedJsonlCount
-    ? jsonlTotal - (loadedJsonlCount - visibleJsonl.length)
-    : undefined
-
   return (
     <div data-tour="session-jsonl-view" className="mobius-chat-history flex min-w-0 flex-1 flex-col">
       <div
@@ -98,39 +80,27 @@ function SessionJsonlPanelInner({
                   entries={visibleJsonl}
                   emptyLoadingText={jsonlEmptyLoadingText}
                   initialLoading={jsonlInitialLoading}
-                  total={effectiveTotal}
-                  onLoadMore={onLoadAllJsonl}
-                  loadingMore={jsonlLoadingMore}
                   working={!!(backendAlive && backendWorking)}
                   liveText={realTimeInfo}
                   scrollToEntryUuid={scrollToEntryUuid}
                   scrollToMatchTs={scrollToMatchTs}
                   onScrollResolved={onMatchScrollResolved}
-                  onScrollUnresolved={onMatchScrollUnresolved}
                   onRoundCountChange={onEasyRoundCountChange}
                   expandAllSignal={easyExpandAllSignal}
                 />
               </Suspense>
             ) : (
               <JsonlView
-                entries={visibleJsonl}
+                snapshot={historySnapshot}
                 title=""
                 emptyLoadingText={jsonlEmptyLoadingText}
                 initialLoading={jsonlInitialLoading}
-                total={effectiveTotal}
-                onLoadMore={onLoadAllJsonl}
-                loadingMore={jsonlLoadingMore}
+                onEnsureGroupEntries={onEnsureGroupEntries}
                 showMeta={showJsonlMeta}
                 cursorStyleTools={cursorStyleTools}
-                onLoadRoundDetail={onLoadRoundDetail}
-                roundDetailLoaded={roundDetailLoaded}
-                roundDetailVersion={roundDetailVersion}
-                spineMode={spineMode}
-                loadingRoundUuid={loadingRoundUuid}
                 scrollToEntryUuid={scrollToEntryUuid}
                 scrollToMatchTs={scrollToMatchTs}
                 onScrollResolved={onMatchScrollResolved}
-                onScrollUnresolved={onMatchScrollUnresolved}
               />
             )}
             {variant === 'standard' && backendAlive && backendWorking && (

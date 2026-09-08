@@ -7,10 +7,10 @@ import type { HistorySnapshot, QueryOpts } from './base'
 const { HarnessJsonRpcPeer } = require('./deepseek-harness-protocol')
 const { projectHarnessEvent } = require('./deepseek-harness-events')
 const {
-  appendMobiusCoreEntry,
-  watchMergedJsonl,
-  readMergedJsonlHistory,
-} = require('../services/mobius-jsonl')
+  getHistorySnapshot,
+  writeMobiusCoreEntry,
+} = require('../services/mobius-agent-history')
+const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
   timeConsumeWaterfallFromBackend,
   clearTimeConsumeWaterfallForBackend,
@@ -160,10 +160,14 @@ class DeepSeekHarnessBackend extends AgentBackend {
     const entry = this.runtime.get(sessionId)
     if (!entry) return
     entry.watcher?.stop?.()
-    entry.watcher = watchMergedJsonl({
+    let startOffset = Math.max(0, Math.floor(Number(startSentinel) || 0))
+    if (startSentinel == null) {
+      try { startOffset = fs.existsSync(jsonlPath) ? fs.statSync(jsonlPath).size : 0 } catch { startOffset = 0 }
+    }
+    entry.watcher = watchJsonlFile({
       path: jsonlPath,
-      startSentinel,
-      onEntry: (entry: any) => this._emitRaw(sessionId, entry),
+      startOffset,
+      onEntry: (raw: any) => this._emitRaw(sessionId, raw),
       onError: (error: Error) => this._captureError(sessionId, error),
     })
   }
@@ -175,18 +179,18 @@ class DeepSeekHarnessBackend extends AgentBackend {
     entry.recentError = { message: String(err?.message || error), rawLine: String(rawLine || ''), capturedAt: new Date().toISOString() }
   }
 
+  // 发送链路写入 user_input/compact 卡 = 开新轮 (写进 agent-history-store, 不再落文件).
   harnessWriteMobiusCoreEntry(entry: HarnessSessionEntry, mobiusPromptRecord: Record<string, unknown> | null | undefined) {
     if (!entry?.jsonlPath || !mobiusPromptRecord) return false
     try {
-      appendMobiusCoreEntry({
-        jsonlPath: entry.jsonlPath,
+      return writeMobiusCoreEntry({
         sessionId: entry.sessionId,
         agentSessionId: entry.agentSessionId,
         cwd: entry.cwd,
         backendName: this.name,
+        primaryPath: entry.jsonlPath,
         ...mobiusPromptRecord,
       })
-      return true
     } catch (error) {
       this._captureError(entry.sessionId, error)
       return false
@@ -375,9 +379,9 @@ class DeepSeekHarnessBackend extends AgentBackend {
   }
   getPendingRequests(sessionId: string) { return [...(this.runtime.get(sessionId)?.pending || [])] }
   getRecentError(sessionId: string) { return this.runtime.get(sessionId)?.recentError || null }
-  getHistory(sessionId: string, opts: QueryOpts = {}): HistorySnapshot {
-    const jsonlPath = this._resolveJsonlPath(sessionId)
-    return jsonlPath ? readMergedJsonlHistory(jsonlPath, opts) : { entries: [], sentinel: null }
+  // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
+  getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId)) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
@@ -387,15 +391,19 @@ class DeepSeekHarnessBackend extends AgentBackend {
   clear_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
     return clearTimeConsumeWaterfallForBackend(this, sessionId, opts)
   }
-  getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, opts: QueryOpts = {}) {
+  getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, _opts: QueryOpts = {}) {
+    // deepseek 的共享 watcher 可能未起 (会话静止后 runtime 才补), 订阅时起一个
+    // 独立 live tail 保证不丢增量; 历史补齐由 agent-history-store 负责.
     const jsonlPath = this._resolveJsonlPath(sessionId)
-    if (!jsonlPath) return super.getAgentRawThoughtStream(sessionId, listener, opts)
-    const watcher = watchMergedJsonl({
+    if (!jsonlPath) return super.getAgentRawThoughtStream(sessionId, listener, _opts)
+    let startOffset = 0
+    try { startOffset = fs.existsSync(jsonlPath) ? fs.statSync(jsonlPath).size : 0 } catch { startOffset = 0 }
+    const w = watchJsonlFile({
       path: jsonlPath,
-      startSentinel: (opts.fromSentinel as number | null) ?? null,
+      startOffset,
       onEntry: (entry: unknown) => listener(entry),
     })
-    return () => watcher.stop?.()
+    return () => { try { w.stop() } catch {} }
   }
   isJobGoalAccomplished(sessionId: string): boolean {
     const entry = this.runtime.get(sessionId) || this._lookupPersistedEntry(sessionId)

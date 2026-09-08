@@ -1,23 +1,24 @@
 /**
- * viewer/JsonlView.tsx — jsonl 视图顶层组件.
+ * viewer/JsonlView.tsx — jsonl 视图顶层组件 (group 驱动).
  *
- * 从 jsonl-view.tsx 拆出. props.entries 是 jsonl 全部已读 entries; 这里负责:
- *  - 尾部窗口 (默认最近 JSONL_INITIAL_WINDOW_SIZE 条, 可"展开全部"/"加载全部"),
- *  - tool_result 合并回发起方 (mergeBashToolResultItems),
- *  - 对话轮次分组 (buildRounds),
- *  - 把 preItem / round / continuation 三类 block 喂给虚拟列表 (VirtualizedBlockList).
+ * 数据源是 agent-history-store 的快照 (协议 ① 的组元数据 + ② 的按需组条目):
+ *  - 每个组渲染一个 RoundGroup; 未加载的组零条目驻留, 只显示元数据摘要头;
+ *    展开 (或搜索命中) 时通过 onEnsureGroupEntries 走 ② 整组拉取.
+ *  - 组内条目走与旧版相同的流水线: mergeBashToolResultItems → 噪声过滤 → 任务计划,
+ *    每组独立跑 (快照与锚点同组).
+ *  - 前端不再分组: buildRounds 退役, 组结构完全来自后端.
+ *  - lineNo 是跨组唯一的全局序号 (组基址 + 组内序), 搜索跳转/强制展开靠它精确定位.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { VirtualizedBlockList } from '../jsonl-virtual-list'
-import type { AnyEntry, JsonlViewItem, JsonlRenderBlock } from './types'
+import type { AnyEntry, JsonlViewItem, JsonlRenderBlock, Round } from './types'
 import { mergeBashToolResultItems } from './entry-extract'
 import { collectResolvedCallIds } from './tool-status'
-import { buildRounds } from './rounds'
-import { buildHeaderSummary } from './header-summary'
-import { ContinuationGroup, RoundGroup, EntryCardWithImages } from './RoundGroups'
+import { RoundGroup } from './RoundGroups'
 import { isHiddenJsonlNoiseEntry } from './entry-classify'
 import { computeCollapsedByForgottenFlag } from './fold-rules'
 import { buildTaskPlans } from './task-progress'
+import type { HistorySnapshot } from '../../services/agent-history-store'
 import {
   ROUND_HEADER_PALETTES,
   ROUND_HEADER_PALETTE_STORAGE_KEY,
@@ -26,10 +27,9 @@ import {
   saveRoundHeaderPaletteIndex,
 } from './round-header-palette'
 
-// 首屏窗口 = 后端 SSE 首包的合并尾部窗口上限: 主轨尾 500 + .mobius.jsonl 轨尾 600
-// (特殊规则: mobius 轨不受 500 限制, 见 backend/services/mobius-jsonl.ts MOBIUS_HISTORY_TAIL)。
-// 窗口必须 ≥ 首包大小, 否则后端多回灌的更早用户输入卡会被前端重新裁掉。
-const JSONL_INITIAL_WINDOW_SIZE = 1200
+// 单组条目渲染窗口上限: 巨轮只渲染尾部窗口 (虚拟列表保证视口流畅,
+// 这里限制的是首次进组的流水线成本).
+const GROUP_ENTRY_WINDOW = 1200
 
 function JsonlInitialSkeleton() {
   return (
@@ -55,119 +55,109 @@ function JsonlInitialSkeleton() {
 }
 
 // 与 renderBlocks 里 round block 的 key 公式严格一致 (跳转按 data-block-key 查 DOM 必须同口径).
-function roundKeyOf(round: any): string {
-  const first = round?.items?.[0]
-  return `round:${first?.entry?.uuid || first?.lineNo || round?.roundNum}`
+function roundKeyOf(groupId: string): string {
+  return `round:${groupId}`
 }
 
-// 给定搜索命中的 (uuid, timestamp), 在已渲染的 rounds 里定位它所属的那一轮.
-// 1) uuid 精确: 跨所有 round 的所有 item 找 entry.uuid / entry.id (命中可能在轮中非首条).
-// 2) timestamp 区间兜底: 命中条目可能被 hideMinor 过滤 (如 thinking), 此时取 opener.ts <= 命中 ts 的最后一轮.
-// 找不到返回 null (调用方据此触发 "加载全部" 再试, 或放弃).
-function findItemForMatch(items: JsonlViewItem[], uuid: string | null | undefined, ts: string | null | undefined): JsonlViewItem | null {
-  if (uuid) {
-    const found = items.find((it) => it?.entry?.uuid === uuid || it?.entry?.id === uuid)
-    if (found) return found
-  }
-  if (ts) {
-    const exact = items.find((it) => {
-      const value = it?.entry?.timestamp || it?.entry?.created_at
-      return value === ts
-    })
-    if (exact) return exact
-    const targetTime = Date.parse(ts)
-    if (Number.isFinite(targetTime)) {
-      return items.find((it) => Date.parse(it?.entry?.timestamp || it?.entry?.created_at || '') === targetTime) || null
-    }
-  }
-  return null
-}
-
-function findRoundForMatch(rounds: any[], uuid: string | null | undefined, ts: string | null | undefined): any | null {
+// 搜索命中的 (uuid, ts) 在已渲染的组条目里定位条目; 找不到返回 null.
+function findItemInRounds(rounds: Round[], uuid: string | null | undefined, ts: string | null | undefined): JsonlViewItem | null {
   if (uuid) {
     for (const r of rounds) {
       for (const it of r?.items || []) {
-        const e = it?.entry
-        if (e?.uuid === uuid || e?.id === uuid) return r
+        if (it?.entry?.uuid === uuid || it?.entry?.id === uuid) return it
       }
     }
   }
   if (ts) {
-    const mt = Date.parse(ts)
-    if (Number.isFinite(mt)) {
-      let best: any = null
-      for (const r of rounds) {
-        const opener = r?.items?.[0]?.entry
-        const ot = Date.parse(opener?.timestamp || opener?.created_at || '')
-        if (Number.isFinite(ot) && ot <= mt) best = r
-        else if (Number.isFinite(ot) && ot > mt) break // rounds 时序递增
+    for (const r of rounds) {
+      for (const it of r?.items || []) {
+        if ((it?.entry?.timestamp || it?.entry?.created_at) === ts) return it
       }
-      return best
+    }
+    const targetTime = Date.parse(ts)
+    if (Number.isFinite(targetTime)) {
+      for (const r of rounds) {
+        for (const it of r?.items || []) {
+          const value = it?.entry?.timestamp || it?.entry?.created_at || ''
+          if (Date.parse(value) === targetTime) return it
+        }
+      }
     }
   }
   return null
 }
 
-function preItemKeyOf(item: JsonlViewItem): string {
-  const entry = item.entry
-  return `pre:${entry?.uuid || entry?.id || entry?.timestamp || item.lineNo}`
+// 组条目 → 渲染流水线 (与旧版整列表流水线相同, 逐组独立跑; lineNo = 组基址 + 组内序).
+function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo: number): Round {
+  const windowed = entries.length > GROUP_ENTRY_WINDOW ? entries.slice(-GROUP_ENTRY_WINDOW) : entries
+  const merged = mergeBashToolResultItems(windowed, baseLineNo)
+  const visible = merged.filter((item) => !isHiddenJsonlNoiseEntry(item.entry))
+  return { roundNum, items: visible.map((item, index) => ({ ...item, relIdx: index })) }
+}
+
+// ── 逐组派生数据的 WeakMap 缓存 (items 数组在快照 rev 不变时引用稳定) ─────────
+
+const resolvedCache = new WeakMap<AnyEntry[], ReturnType<typeof collectResolvedCallIds> | null>()
+function resolvedMapFor(entries: AnyEntry[], items: JsonlViewItem[], enabled: boolean) {
+  if (!enabled) return null
+  const hit = resolvedCache.get(entries)
+  if (hit !== undefined) return hit
+  // 状态集合要扫含被过滤的纯 tool_result 条目, 用 merged 前的窗口直接算.
+  const value = collectResolvedCallIds(items)
+  resolvedCache.set(entries, value)
+  return value
+}
+
+const collapsedCache = new WeakMap<AnyEntry[], Set<number>>()
+function collapsedLineNosFor(entries: AnyEntry[], items: JsonlViewItem[]) {
+  const hit = collapsedCache.get(entries)
+  if (hit) return hit
+  const next = computeCollapsedByForgottenFlag(items)
+  collapsedCache.set(entries, next)
+  return next
+}
+
+const plansCache = new WeakMap<AnyEntry[], ReturnType<typeof buildTaskPlans>['plans']>()
+function taskPlansFor(entries: AnyEntry[], items: JsonlViewItem[]) {
+  const hit = plansCache.get(entries)
+  if (hit) return hit
+  const { plans } = buildTaskPlans(items)
+  plansCache.set(entries, plans)
+  return plans
 }
 
 export function JsonlView({
-  entries,
+  snapshot,
   title,
   emptyLoadingText,
   initialLoading,
-  total,
-  onLoadMore,
-  loadingMore,
+  onEnsureGroupEntries,
   showMeta = true,
   cursorStyleTools = true,
-  onLoadRoundDetail,
-  roundDetailLoaded,
-  roundDetailVersion,
-  loadingRoundUuid,
-  spineMode,
   scrollToEntryUuid,
   scrollToMatchTs,
   onScrollResolved,
-  onScrollUnresolved,
 }: {
-  entries: AnyEntry[]
+  // agent-history-store 的快照 (rev 驱动重渲染).
+  snapshot: HistorySnapshot
   title?: string
   emptyLoadingText?: string
   initialLoading?: boolean
-  // count-then-tail: 后端先发 cheap total (jsonl_meta), 然后只回灌末尾 JSONL_INITIAL_WINDOW_SIZE 条.
-  // 没传 total 时回退到 entries.length 旧行为, 老页面不破.
-  total?: number
-  // 点 "加载全部" 时调用; 上层负责 REST 拉剩余条目并 set entries.
-  onLoadMore?: () => void
-  loadingMore?: boolean
+  // 组条目未加载时走 ② 拉取 (展开/搜索命中).
+  onEnsureGroupEntries: (groupId: string) => void
   // false 时 jsonl 卡片标题里不再显示 "#序号" 和 "MM-DD HH:MM:SS" 时间戳前缀.
   showMeta?: boolean
-  // 超长会话按需加载: 骨架模式下某轮展开时, 拉取 [本轮 opener ts, 下一轮 opener ts) 的主轨切片.
-  onLoadRoundDetail?: (openerUuid: string, fromTs: string, toTs: string | null) => void
-  roundDetailLoaded?: Set<string>
-  roundDetailVersion?: number
-  loadingRoundUuid?: string | null
-  // 骨架模式: 伴生轨全量已并入 entries, 视窗自动全开 (不必再点"加载全部"才看见旧轮).
-  spineMode?: boolean
-  // Cursor 式工具调用展示开关: true 时工具卡显示状态图标 + 连续探索类聚合; false 回退原始展示.
+  // Cursor 式工具调用展示开关.
   cursorStyleTools?: boolean
-  // 搜索结果跳转: 把命中条目的 uuid / timestamp 传进来, 解析到所属轮次后滚动到该轮卡片.
-  // 命中条目可能不在当前尾部窗口 (旧消息) → onScrollUnresolved 触发上层 "加载全部" 后再解析.
+  // 搜索结果跳转: 命中条目 uuid / timestamp; 未加载的组先 ② 再定位.
   scrollToEntryUuid?: string | null
   scrollToMatchTs?: string | null
   onScrollResolved?: () => void
-  onScrollUnresolved?: () => void
 }) {
-  const [showAll, setShowAll] = useState(false)
+  const groups = snapshot.groups
   const [roundHeaderPaletteIndex, setRoundHeaderPaletteIndex] = useState(readRoundHeaderPaletteIndex)
   const [roundHeaderPaletteAnnouncement, setRoundHeaderPaletteAnnouncement] = useState('')
   const roundHeaderPalette = ROUND_HEADER_PALETTES[roundHeaderPaletteIndex]
-  // 点 "加载全部" 后置 true: 把所有轮次组 / 上文续接组强制展开 (尊重用户已手动折叠的组).
-  // 同时把 showAll 一并打开, 让加载到的头部条目也进入视窗, 真正 "全部可见且展开".
-  const [forceExpandAll, setForceExpandAll] = useState(false)
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -189,227 +179,119 @@ export function JsonlView({
       window.removeEventListener('storage', onStorage)
     }
   }, [roundHeaderPaletteIndex])
-  // 骨架模式下视窗自动全开: 骨架已全量在手, 没必要再裁 800 窗口 (旧轮问题卡要直接可见).
-  const windowAll = showAll || !!spineMode
-  const recent = useMemo(() => entries.slice(-(windowAll ? entries.length : JSONL_INITIAL_WINDOW_SIZE)), [entries, windowAll])
-  const windowOffset = entries.length - recent.length
-  // 工具调用状态集合: 哪些 tool_use_id 已有结果落地 (供卡片推导 running/success/error).
-  // 基于原始 recent 窗口扫描 (含被 merge/过滤隐藏的纯 tool_result entry), 引用随 recent 稳定.
-  // cursorStyleTools 关闭时不构建 (传 null → 卡片无状态图标, 回退原始展示).
-  const resolvedMap = useMemo(() => cursorStyleTools ? collectResolvedCallIds(recent) : null, [recent, cursorStyleTools])
-  const headerTitle = title === undefined ? 'JSONL' : title
-  const mergedItems = useMemo(
-    () => mergeBashToolResultItems(recent, windowOffset),
-    [recent, windowOffset],
-  )
-  // 任务工具 (TaskCreate/TaskUpdate) 跨条目累积: sidecar task_state 快照 (权威) + 原生事件
-  // 兜底回放, 产出 anchor uuid → PlanUpdate, 透传给卡片走计划视图 (与 update_plan 同款).
-  // 必须在 noise 过滤之前的 merged 序列上扫: task_state 载体条目渲染层要隐藏, 但其快照
-  // 数据要先在这里吸收 (过滤后再扫就见不到载体了).
-  // 连续去重: 同一计划状态的重复注入段只保留段尾一张 (suppressed 段内的 task_reminder
-  // 载体也一并隐藏, 避免一串雷同计划卡刷屏).
-  const { plans: taskPlans, suppressed: suppressedTaskUuids } = useMemo(() => buildTaskPlans(mergedItems), [mergedItems])
-  const visibleItems = useMemo(
-    () => mergedItems.filter(
-      (item) => !isHiddenJsonlNoiseEntry(item.entry)
-        && !(suppressedTaskUuids.size > 0 && typeof item.entry?.uuid === 'string' && suppressedTaskUuids.has(item.entry.uuid)),
-    ),
-    [mergedItems, suppressedTaskUuids],
-  )
-  const { preItems, rounds } = useMemo(() => buildRounds(visibleItems), [visibleItems])
-  // 已加载主轨条目的最早时间戳: opener 早于它的轮, 远端才可能还有未加载的主轨明细;
-  // 不早于它的轮 (尾部窗口内, 主轨本来就全在本地) 一律视为已加载, 不给"加载明细"提示.
-  const oldestPrimaryMs = useMemo(() => {
-    let min = Infinity
-    for (const e of entries) {
-      if (!e || e.entrypoint === 'mobius' || e.mobius) continue
-      const ms = Date.parse(e?.timestamp || e?.created_at || '')
-      if (Number.isFinite(ms) && ms < min) min = ms
-    }
-    return min
-  }, [entries])
-  // forgotten-flag 收尾折叠规则: 含 "running.flag" 且往前 8 个条目有 forgotten-flag 用户卡的卡片,
-  // 默认折叠 (agent 被 forgotten-flag-scanner 系统提醒触发的机械删 flag 收尾链路, 对浏览对话价值低).
-  // 在 visibleItems (已合并/已过滤) 序列上扫描, 命中的 lineNo 集合透传给各卡片渲染入口.
-  const collapseLineNos = useMemo(() => computeCollapsedByForgottenFlag(visibleItems), [visibleItems])
-  // 总数显示: 优先用后端给的 total (服务器侧 count, 比前端 entries.length 准)
-  const displayTotal = typeof total === 'number' && total > entries.length ? total : entries.length
-  const hasRemoteMore = typeof total === 'number' && total > entries.length
-  const hasOmittedHead = hasRemoteMore || windowOffset > 0
-  // 当整个 JSONL 视图处于"少组"场景时, 强制展开唯一的组且禁止折叠.
-  // 涵盖:
-  //   - 0 RoundGroup + 1 ContinuationGroup (无新轮, 只有上文接续, totalGroups=1)
-  //   - 1 RoundGroup + 0 ContinuationGroup (1 轮对话, totalGroups=1)
-  //   - 1 RoundGroup + 1 ContinuationGroup (1 轮对话 + 上下文接续, totalGroups=2 但 rounds=1)
-  // 0 轮且无截断, 或 2+ 轮时, 沿用原"上文折叠 / 最新轮展开"默认行为.
-  const hasContinuationGroup = preItems.length > 0 && hasOmittedHead
-  const totalGroups = rounds.length + (hasContinuationGroup ? 1 : 0)
-  const onlyGroup = totalGroups === 1 || rounds.length === 1
-  // 末轮用户摘要: 最后一组 RoundGroup 的用户问题一句话, 展示在 header 右侧, 让用户在
-  // "只显示尾部 / 加载全部" 时无需展开就能知道当前最末一轮在问什么. 与 RoundGroup 内
-  // buildHeaderSummary(userItem.entry).short 同源, 视觉一致.
-  const lastRoundUserSummary = useMemo(() => {
-    if (rounds.length === 0) return ''
-    const userItem = rounds[rounds.length - 1].items[0]
-    return userItem ? buildHeaderSummary(userItem.entry).shortTail : ''
-  }, [rounds])
 
-  // 点击 header "末轮" 摘要 -> 跳转到最后一个 RoundGroup. scrollToKey 必须与 renderBlocks 里
-  // round block 的 key 公式完全一致, 列表才能按 data-block-key 查到目标.
+  // 组 → Round: 条目已加载才建 items; 未加载 = 零条目驻留, 只渲染元数据头.
+  // lineNo 组基址累加, 保证跨组唯一 (搜索跳转按 data-jsonl-line-no 全局查询).
+  const rounds = useMemo(() => {
+    let baseLineNo = 0
+    return groups.map((meta) => {
+      const entries = snapshot.entriesByGroup.get(meta.id) || []
+      const round = entries.length > 0 ? buildRoundFromEntries(entries, meta.seq, baseLineNo) : { roundNum: meta.seq, items: [] as any[] }
+      baseLineNo += entries.length
+      return { meta, round, state: snapshot.groupStates.get(meta.id) || 'empty', entries }
+    })
+  }, [snapshot]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const headerTitle = title === undefined ? 'JSONL' : title
+  const loadedGroups = rounds.filter((r) => r.state === 'loaded').length
+  const totalEntryCount = groups.reduce((sum, g) => sum + (g.entry_count || 0), 0)
+  // 末轮摘要: 直接用组元数据 (不再从条目派生).
+  const lastRoundUserSummary = groups.length > 0 ? (groups[groups.length - 1].user_summary || '') : ''
+  const onlyGroup = groups.length === 1
+
+  // 点击 header "末轮" 摘要 -> 跳转到最后一个组.
   const headerRef = useRef<HTMLDivElement>(null)
-  // 末轮按钮触发的跳转 (内部).
   const [internalTarget, setInternalTarget] = useState<{ key: string; offset: number } | null>(null)
   const jumpToLastRound = () => {
-    if (rounds.length === 0) return
-    const lastRound = rounds[rounds.length - 1]
-    setInternalTarget({ key: roundKeyOf(lastRound), offset: headerRef.current?.offsetHeight ?? 0 })
+    if (groups.length === 0) return
+    setInternalTarget({ key: roundKeyOf(groups[groups.length - 1].id), offset: headerRef.current?.offsetHeight ?? 0 })
   }
 
-  // 搜索结果跳转 (外部): 把 scrollToEntryUuid/scrollToMatchTs 解析成具体 round 的 key.
-  // 命中条目不在当前已渲染 rounds (旧消息被尾部窗口截断, 或被 hideMinor 过滤且无 ts 兜底) 时,
-  // 若还有远端未加载条目 (hasRemoteMore), 调 onScrollUnresolved 让上层 "加载全部" 后再解析.
+  // 搜索结果跳转: 已加载 → 定位; 未加载 → 按 opener_ts 区间找所属组先 ②
+  // (快照 rev 变化后本 effect 重跑, 条目到位再精确定位).
   const [extTarget, setExtTarget] = useState<{ key: string; offset: number } | null>(null)
-  // 轮次定位之外的精确目标：供卡片展开、Explore 组展开和二次滚动使用。
   const [extFocusLineNo, setExtFocusLineNo] = useState<number | null>(null)
   const extActive = !!(scrollToEntryUuid || scrollToMatchTs)
   const onResolvedRef = useRef(onScrollResolved)
   onResolvedRef.current = onScrollResolved
-  const onUnresolvedRef = useRef(onScrollUnresolved)
-  onUnresolvedRef.current = onScrollUnresolved
-  const unresolvedFiredRef = useRef(false)
+  const ensureRef = useRef(onEnsureGroupEntries)
+  ensureRef.current = onEnsureGroupEntries
   useEffect(() => {
-    if (!extActive) { setExtTarget(null); setExtFocusLineNo(null); unresolvedFiredRef.current = false; return }
-    // 首屏历史还在加载 (entries 空 / initialLoading) 时既不放弃也不触发 loadAll:
-    // 此时 hasRemoteMore 因 total 未知而为 false, 直接判 "找不到" 会误清 target, 让跳转失效.
-    if (initialLoading || entries.length === 0) { setExtTarget(null); return }
-    const matchItem = findItemForMatch(visibleItems, scrollToEntryUuid ?? null, scrollToMatchTs ?? null)
+    if (!extActive) { setExtTarget(null); setExtFocusLineNo(null); return }
+    if (initialLoading) { setExtTarget(null); return }
+    const matchItem = findItemInRounds(rounds.map((r) => r.round), scrollToEntryUuid ?? null, scrollToMatchTs ?? null)
     if (matchItem) {
-      const round = rounds.find((candidate) => candidate?.items?.some((it: JsonlViewItem) => it.lineNo === matchItem.lineNo))
-      const isPreItem = preItems.some((item) => item.lineNo === matchItem.lineNo)
-      // 尾部窗口里的“上文续接”并没有单独渲染每张卡片；先展开全部，才能精确定位并展开。
-      if (isPreItem && hasOmittedHead && !showAll) {
-        setExtTarget(null)
-        setExtFocusLineNo(null)
-        setShowAll(true)
-        return
-      }
+      const owner = rounds.find((r) => r.round.items.some((it) => it.lineNo === matchItem.lineNo))
       setExtFocusLineNo(matchItem.lineNo)
-      setExtTarget({ key: round ? roundKeyOf(round) : preItemKeyOf(matchItem), offset: headerRef.current?.offsetHeight ?? 0 })
-    } else if (hasRemoteMore || (hasOmittedHead && !showAll)) {
-      // 命中尚未进入当前窗口：先显出完整历史；若远端还有头部，再触发一次真正的全量加载。
-      setExtTarget(null)
-      setExtFocusLineNo(null)
-      if (!showAll) setShowAll(true)
-      if (hasRemoteMore && !unresolvedFiredRef.current) {
-        unresolvedFiredRef.current = true
-        onUnresolvedRef.current?.()
-      }
-    } else {
-      // uuid 缺失时保留时间区间兜底，至少可进入正确轮次；有 uuid 的正常搜索结果不会走这里。
-      const fallbackRound = findRoundForMatch(rounds, null, scrollToMatchTs ?? null)
-      setExtFocusLineNo(null)
-      if (fallbackRound) {
-        setExtTarget({ key: roundKeyOf(fallbackRound), offset: headerRef.current?.offsetHeight ?? 0 })
-      } else {
-        setExtTarget(null)
-        onResolvedRef.current?.()
-      }
+      setExtTarget({ key: owner ? roundKeyOf(owner.meta.id) : roundKeyOf(groups[0]?.id || ''), offset: headerRef.current?.offsetHeight ?? 0 })
+      return
     }
+    // 未命中: 时间戳区间定位所属组 (元数据里有每组的 opener_ts), 触发该组加载.
+    const ts = scrollToMatchTs ?? null
+    const targetMs = ts ? Date.parse(ts) : NaN
+    if (!Number.isFinite(targetMs)) {
+      // 只有 uuid 没有时间兜底: 从最后一组往前逐组补载直到找到 (有界, 一般一两轮就命中).
+      const firstUnloaded = [...rounds].reverse().find((r) => r.state !== 'loaded')
+      if (firstUnloaded) { ensureRef.current(firstUnloaded.meta.id); return }
+      onResolvedRef.current?.()
+      return
+    }
+    let owner: (typeof rounds)[number] | undefined
+    for (const r of rounds) {
+      const openerMs = Date.parse(r.meta.opener_ts || '')
+      if (Number.isFinite(openerMs) && openerMs <= targetMs) owner = r
+      else if (Number.isFinite(openerMs) && openerMs > targetMs) break
+    }
+    if (!owner) owner = rounds[0]
+    if (!owner) { onResolvedRef.current?.(); return }
+    if (owner.state !== 'loaded') { ensureRef.current(owner.meta.id); return }
+    // 组已加载但条目里没有 (被噪声过滤/窗口截掉): 至少滚到所属组.
+    setExtFocusLineNo(null)
+    setExtTarget({ key: roundKeyOf(owner.meta.id), offset: headerRef.current?.offsetHeight ?? 0 })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extActive, scrollToEntryUuid, scrollToMatchTs, visibleItems, preItems, rounds, hasRemoteMore, hasOmittedHead, showAll, initialLoading, entries.length])
+  }, [extActive, scrollToEntryUuid, scrollToMatchTs, initialLoading, snapshot.rev])
 
-  // 外部跳转优先; 内部末轮跳转作 fallback. 两者都为 null 时不滚.
   const activeTarget = extTarget ?? internalTarget
 
   const renderBlocks = useMemo<JsonlRenderBlock[]>(() => {
-    const blocks: JsonlRenderBlock[] = []
-    if (preItems.length > 0 && hasOmittedHead) {
-      blocks.push({ key: 'continuation', kind: 'continuation', items: preItems })
-    } else {
-      preItems.forEach((item) => {
-        blocks.push({
-          key: `pre:${item.entry?.uuid || item.entry?.id || item.entry?.timestamp || item.lineNo}`,
-          kind: 'preItem',
-          item,
-        })
-      })
-    }
-    rounds.forEach((round, index) => {
-      blocks.push({
-        key: `round:${round.items[0]?.entry?.uuid || round.items[0]?.lineNo || round.roundNum}`,
-        kind: 'round',
-        round,
-        index,
-      })
-    })
-    return blocks
-  }, [hasOmittedHead, preItems, rounds])
+    return rounds.map((r, index) => ({
+      key: roundKeyOf(r.meta.id),
+      kind: 'round' as const,
+      round: r.round,
+      index,
+    }))
+  }, [rounds])
 
   const renderBlock = (block: JsonlRenderBlock) => {
-    if (block.kind === 'continuation') {
-      return <ContinuationGroup items={block.items} onlyGroup={onlyGroup} forceExpandAll={forceExpandAll} showMeta={showMeta} resolvedMap={resolvedMap} collapseLineNos={collapseLineNos} focusLineNo={extFocusLineNo} taskPlans={taskPlans} />
-    }
-    if (block.kind === 'preItem') {
-      const { entry, lineNo, bashResults, readResults } = block.item
-      return (
-        <EntryCardWithImages
-          entry={entry}
-          lineNo={lineNo}
-          bashResults={bashResults}
-          readResults={readResults}
-          showMeta={showMeta}
-          resolvedMap={resolvedMap}
-          forceOpen={lineNo === extFocusLineNo}
-          parentOrderedCollapse={collapseLineNos.has(lineNo)}
-          taskPlans={taskPlans}
-        />
-      )
-    }
-    const openerEntry = block.round.items[0]?.entry
-    const openerUuid = openerEntry?.uuid || openerEntry?.id || null
-    const openerTs = openerEntry?.timestamp || openerEntry?.created_at || null
-    const nextOpenerEntry = rounds[block.index + 1]?.items[0]?.entry
-    const nextTs = nextOpenerEntry?.timestamp || nextOpenerEntry?.created_at || null
-    // 切片窗口向两侧各扩一轮: 排队消息造成的轮界模糊被吸收, 相邻轮顺带预载 (多加载一些总没错).
-    const prevOpenerEntry = block.index > 0 ? rounds[block.index - 1]?.items[0]?.entry : null
-    const sliceFromTs = prevOpenerEntry?.timestamp || prevOpenerEntry?.created_at || openerTs
-    const afterNextEntry = rounds[block.index + 2]?.items[0]?.entry
-    const sliceToTs = afterNextEntry?.timestamp || afterNextEntry?.created_at || nextTs
+    if (block.kind !== 'round') return null
+    const r = rounds[block.index]
+    if (!r) return null
+    const entries = r.entries.length > 0 ? r.entries : null
     return (
       <RoundGroup
-        round={block.round}
+        round={r.round}
         isLast={block.index === rounds.length - 1}
         isSecondLast={block.index === rounds.length - 2}
         onlyGroup={onlyGroup}
-        detailLoaded={(() => {
-          // 仅骨架模式启用按需明细: 未进骨架模式 (新会话/短会话/未加载) 一律不显示提示,
-          // 否则新会话第一轮 (mobius 卡恒早于原生 wrapped 卡 ~10s) 必然误报.
-          if (!spineMode || !roundDetailLoaded || !openerUuid) return undefined
-          // 轮内已有非开篇条目 = 已加载; opener 不早于已加载主轨最早 ts = 本地已齐, 也视为已加载
-          // (否则空轮/纯噪声轮会被误报"有未加载明细"). 只有更早的骨架轮才可能真的缺主轨.
-          if (block.round.items.some((it: any) => it.relIdx > 0)) return true
-          const openerMs = openerTs ? Date.parse(openerTs) : NaN
-          if (!Number.isFinite(openerMs) || !(openerMs < oldestPrimaryMs)) return true
-          return roundDetailLoaded.has(openerUuid)
-        })()}
-        detailLoading={!!openerUuid && loadingRoundUuid === openerUuid}
-        onNeedDetail={openerUuid && openerTs && onLoadRoundDetail ? () => onLoadRoundDetail(openerUuid, sliceFromTs, sliceToTs) : undefined}
-        forceExpandAll={forceExpandAll}
+        headerTitle={r.meta.seq === 0 ? '上文' : undefined}
+        headerSummary={r.meta.user_summary}
+        detailLoaded={r.state === 'loaded'}
+        detailLoading={r.state === 'loading'}
+        onNeedDetail={r.state === 'loaded' ? undefined : () => onEnsureGroupEntries(r.meta.id)}
         forceOpen={block.key === extTarget?.key && extFocusLineNo !== null}
         showMeta={showMeta}
-        resolvedMap={resolvedMap}
+        resolvedMap={entries ? resolvedMapFor(entries, r.round.items, cursorStyleTools) : null}
         cursorStyleTools={cursorStyleTools}
-        collapseLineNos={collapseLineNos}
+        collapseLineNos={entries ? collapsedLineNosFor(entries, r.round.items) : undefined}
         focusLineNo={extFocusLineNo}
         headerPalette={roundHeaderPalette}
-        taskPlans={taskPlans}
+        taskPlans={entries ? taskPlansFor(entries, r.round.items) : null}
       />
     )
   }
 
-
   // 空
-  if (entries.length === 0) {
+  if (groups.length === 0) {
     if (initialLoading) return <JsonlInitialSkeleton />
     if (emptyLoadingText) {
       return (
@@ -419,13 +301,11 @@ export function JsonlView({
               <span className="absolute inset-0 rounded-full border-2 border-amber-300/20" />
               <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-amber-300 animate-spin" />
             </span>
-            <span className="font-medium mobius-status-marquee mobius-status-marquee--readable">{emptyLoadingText}</span>
+            <span className="font-medium mobius-status-marquee">{emptyLoadingText}</span>
           </div>
         </div>
       )
     }
-    // 终态空 (加载完毕且非 pending/running): 不再用带 spinner 的"请稍等"承诺一个不会到来的"稍等就有数据",
-    // 改静态空提示. pending/running 的等待态由上层 emptyLoadingText 覆盖 (spinner 文案).
     return (
       <div className="text-[12px] text-center py-8 text-[var(--text-muted)]" aria-live="polite" role="status">
         暂无对话内容
@@ -439,27 +319,9 @@ export function JsonlView({
       <span className="sr-only" aria-live="polite" aria-atomic="true">{roundHeaderPaletteAnnouncement}</span>
       <div ref={headerRef} className="flex items-center gap-2 px-1 py-1 sticky top-0 z-10 backdrop-blur-lg bg-[var(--bg-page)]/80">
         {headerTitle && <span className="min-w-0 truncate text-[var(--text-secondary)] font-semibold" title={headerTitle}>{headerTitle}</span>}
-        {rounds.length > 0 && <span className="text-[var(--text-muted)] text-[11px]">{rounds.length} 轮</span>}
-        {/* {hasOmittedHead && <span className="text-[var(--text-muted)] text-[11px]">· 已显示尾部</span>} */}
-        {hasRemoteMore && !!onLoadMore && (
-          <button
-            onClick={() => {
-              if (loadingMore) return
-              onLoadMore()
-              // 加载全部后只打开整窗 (showAll 让头部条目进入视窗); 轮次组展开状态保持原样 —
-              // 不强制展开 (骨架模式下全部展开 = 一长串空轮头), 用户已展开/折叠的也不动.
-              setShowAll(true)
-            }}
-            disabled={!!loadingMore}
-            className="text-[11px] px-2 py-0.5 rounded border border-[var(--border-color)] hover:bg-[var(--bg-hover)] text-[var(--text-muted)] disabled:opacity-50"
-          >
-            {loadingMore ? '加载中…' : `加载全部 (共 ${displayTotal} 条)`}
-          </button>
-        )}
-        {!hasRemoteMore && entries.length > JSONL_INITIAL_WINDOW_SIZE && !windowAll && (
-          <button onClick={() => setShowAll(true)} className="text-[11px] px-2 py-0.5 rounded border border-[var(--border-color)] hover:bg-[var(--bg-hover)] text-[var(--text-muted)]">
-            展开全部 ({entries.length})
-          </button>
+        {groups.length > 0 && <span className="text-[var(--text-muted)] text-[11px]">{groups.length} 轮</span>}
+        {loadedGroups < groups.length && (
+          <span className="text-[var(--text-muted)] text-[11px]" title="展开对应轮次时按需加载明细">已载 {loadedGroups}/{groups.length} 轮 · 共 {totalEntryCount} 条</span>
         )}
         {lastRoundUserSummary && (
           <button
@@ -479,9 +341,7 @@ export function JsonlView({
         scrollToEntryLineNo={extFocusLineNo}
         scrollOffset={activeTarget?.offset ?? 0}
         onScrollToKeyDone={() => {
-          // 搜索有精确条目目标时，不能仅因“轮次已到位”就清参数：目标卡片可能还在随轮次/Explore 组展开而挂载，必须等 onScrollToEntryDone 真的滚到卡片后再结束。
           if (extTarget && extFocusLineNo !== null) return
-          // 到位 (或超时兜底) 后清除当前活跃跳转. 外部跳转还要通知上层清 URL 参数.
           if (extTarget) onResolvedRef.current?.()
           setExtTarget(null)
           setInternalTarget(null)

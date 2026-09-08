@@ -49,6 +49,12 @@ function emit(eventName: string, data: Record<string, unknown>) {
   const payload = JSON.stringify({ event: eventName, ...data })
   sseController?.enqueue(enc.encode(`event: ${eventName}\ndata: ${payload}\n\n`))
 }
+// SSE live 批次计数 — group_id_version 必须严格递增 (水位线).
+let uiLiveVersion = 0
+function emitEntries(entries: any[]) {
+  uiLiveVersion += 1
+  emit('entries', { session_id: 's1', group_id: 'g1', group_id_version: uiLiveVersion, entries })
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -145,8 +151,7 @@ async function testChat() {
       // emit a scripted reply shortly after the message is posted
       setTimeout(() => {
         emit('typing', { active: true })
-        emit('jsonl_entry', { session_id: 's1', entry: { type: 'user', message: { role: 'user', content: '你好' } } })
-        emit('jsonl_entry', { session_id: 's1', entry: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '成功！\n\n```typescript\nconst answer = 42\nconsole.log(answer)\n```' }] } } })
+        emitEntries([{ type: 'user', message: { role: 'user', content: '你好' } }, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '成功！\n\n```typescript\nconst answer = 42\nconsole.log(answer)\n```' }] } }])
         emit('typing', { active: false })
       }, 250)
       return jsonResponse({ ok: true, session_id: 's1', turn_number: 1 })
@@ -884,26 +889,37 @@ async function testChatSseReconnects() {
     `event: ${event}\ndata: ${JSON.stringify({ event, ...payload })}\n\n`
   const assistantText = (text: string) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } })
   let sseCall = 0
+  // agent-history mock 状态: 断线前库里只有第一条; 重连时第二条已落库 (version 抬升),
+  // 重连的 stateless 对账 (① → ② 整组重拉) 把缺口补进 transcript.
+  let storeEntries: any[] = [assistantText('第一条')]
+  let storeVersion = 1
   installMock((url, init) => {
     if (url.includes('/events')) {
       sseCall++
       if (sseCall === 1) {
-        // first connection: one entry, then the stream drops ("terminated")
+        // first connection: one live batch, then the stream drops ("terminated")
         return new Response(new RS({
           start(c: any) {
             c.enqueue(enc.encode(frame('subscribed', { session: {} })))
-            c.enqueue(enc.encode(frame('jsonl_entry', { session_id: 's1', entry: assistantText('第一条') })))
+            c.enqueue(enc.encode(frame('entries', { session_id: 's1', group_id: 'g1', group_id_version: 1, entries: [assistantText('第一条')] })))
             setTimeout(() => { try { c.error(new Error('terminated')) } catch { /* already closed */ } }, 30)
           },
         }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
       }
-      // reconnect: server replays history including a NEW second entry
+      // reconnect: the second entry has since been persisted server-side
       return new Response(new RS({
         start(c: any) {
+          storeEntries = [assistantText('第一条'), assistantText('第二条')]
+          storeVersion = 2
           c.enqueue(enc.encode(frame('subscribed', { session: {} })))
-          c.enqueue(enc.encode(frame('jsonl_history', { entries: [assistantText('第一条'), assistantText('第二条')], done: true })))
         },
       }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    if (url.endsWith('/api/sessions/s1/groups')) {
+      return jsonResponse({ session_version: storeVersion, groups: storeEntries.length ? [{ id: 'g1', seq: 1, opener_ts: null, user_summary: '', version: storeVersion, entry_count: storeEntries.length }] : [] })
+    }
+    if (url.includes('/api/sessions/s1/groups/')) {
+      return jsonResponse({ group_id: 'g1', version: storeVersion, entries: storeEntries })
     }
     if (url.endsWith('/messages') && init?.method === 'POST') return jsonResponse({ ok: true, session_id: 's1', turn_number: 1 })
     if (url.endsWith('/api/sessions/s1/status')) return jsonResponse({ session_id: 's1', alive: true, working: false })
@@ -966,13 +982,14 @@ async function testIdleCompletedSessionReopensSseOnSend() {
     }
     if (url.endsWith('/messages') && init?.method === 'POST') {
       setTimeout(() => {
-        liveController?.enqueue(enc.encode(frame('jsonl_entry', {
+        liveController?.enqueue(enc.encode(frame('entries', {
           session_id: 's1',
-          entry: { type: 'user', uuid: 'idle-user-1', message: { role: 'user', content: 'q' } },
-        })))
-        liveController?.enqueue(enc.encode(frame('jsonl_entry', {
-          session_id: 's1',
-          entry: { type: 'assistant', uuid: 'idle-assistant-1', message: { role: 'assistant', content: [{ type: 'text', text: 'TUI 已恢复接收' }] } },
+          group_id: 'g1',
+          group_id_version: ++uiLiveVersion,
+          entries: [
+            { type: 'user', uuid: 'idle-user-1', message: { role: 'user', content: 'q' } },
+            { type: 'assistant', uuid: 'idle-assistant-1', message: { role: 'assistant', content: [{ type: 'text', text: 'TUI 已恢复接收' }] } },
+          ],
         })))
       }, 30)
       return jsonResponse({ ok: true, session_id: 's1', turn_number: 2 })
@@ -1102,8 +1119,10 @@ async function testCompactSlash() {
       posted = JSON.parse(String(init.body || '{}'))
       setTimeout(() => {
         emit('typing', { active: true })
-        emit('jsonl_entry', { session_id: 's1', entry: { type: 'user', uuid: 'cmd-echo', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args><local-command-caveat>caveat</local-command-caveat>' } } })
-        emit('jsonl_entry', { session_id: 's1', entry: { type: 'user', uuid: 'cmd-done', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>Compacted. Your new context length is 8,840 tokens</local-command-stdout>' }] } } })
+        emitEntries([
+          { type: 'user', uuid: 'cmd-echo', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args><local-command-caveat>caveat</local-command-caveat>' } },
+          { type: 'user', uuid: 'cmd-done', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>Compacted. Your new context length is 8,840 tokens</local-command-stdout>' }] } },
+        ])
         emit('typing', { active: false })
       }, 120)
       return jsonResponse({ ok: true, session_id: 's1', turn_number: 2 })

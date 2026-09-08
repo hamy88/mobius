@@ -6,7 +6,9 @@
  * bearer token (header `Authorization: Bearer <jwt>`); there is no cookie auth.
  */
 import type {
+  AnyEntry,
   AuthConfig,
+  HistoryGroup,
   Issue,
   LoginResponse,
   Memory,
@@ -158,6 +160,17 @@ export class MobiusClient {
   /** The backend source of truth for the live agent process and work state. */
   async sessionStatus(sessionId: string, signal?: AbortSignal): Promise<SessionRuntimeStatus> {
     return this.request<SessionRuntimeStatus>(`/api/sessions/${encodeURIComponent(sessionId)}/status`, { signal })
+  }
+
+  // ── agent-history (协议 ①②: 组元数据 + 整组条目) ──────────────────────────
+  /** ① 全部组元数据, 一次给全. */
+  async listHistoryGroups(sessionId: string): Promise<{ session_version: number; groups: HistoryGroup[] }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/groups`)
+  }
+
+  /** ② 某组全部条目 (全量, 无分页, 条目不可变). */
+  async listHistoryGroupEntries(sessionId: string, groupId: string): Promise<{ group_id: string; version: number; entries: AnyEntry[] }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/groups/${encodeURIComponent(groupId)}/entries`)
   }
 
   // ── preference lookups ────────────────────────────────────────────────────

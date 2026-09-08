@@ -18,7 +18,7 @@ import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
 import { AnnouncePcButton } from './announce-pc-button'
 import { isGuidedDemoSession, patchGuidedDemoSessionCompleted } from '../services/guided-demo'
-import { readJsonlCacheSync, readJsonlCacheFromIdb, writeJsonlCache } from '../services/session-jsonl-cache'
+import { useAgentHistory, type HistorySnapshot } from '../services/agent-history-store'
 import {
   preloadSessionInputCache,
   prependSessionInputCache,
@@ -118,6 +118,12 @@ function parseDebugTimestamp(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null
 }
 
+// 无会话时的空快照 (panel 需要 snapshot 形状).
+const EMPTY_HISTORY_SNAPSHOT_FALLBACK: HistorySnapshot = {
+  rev: 0, sessionVersion: 0, groups: [], entriesByGroup: new Map(),
+  groupStates: new Map(), error: null, negotiated: false,
+}
+
 function findLatestEntryTimestamp(entries: any[]): {
   value: string | null
   index: number | null
@@ -160,38 +166,6 @@ declare global {
   interface Window {
     mobiusLiveDebug?: () => LiveDebugSnapshot
   }
-}
-
-// 按 uuid/id 去重合并两个 entries 数组 (骨架/切片与已加载内容可能重叠), 合并后按时间戳归位.
-function mergeJsonlEntriesByIdentity(prev: any[], incoming: any[]): any[] {
-  if (!incoming || incoming.length === 0) return prev
-  const seen = new Set<string>()
-  for (const e of prev) {
-    const k = e?.uuid || e?.id
-    if (k) seen.add(k)
-  }
-  const add = incoming.filter((e: any) => {
-    const k = e?.uuid || e?.id
-    if (!k) return true
-    if (seen.has(k)) return false
-    seen.add(k)
-    return true
-  })
-  if (add.length === 0) return prev
-  const merged = prev.concat(add)
-  // ts 候选位与后端 parseTimestampMs 对齐 (codex 条目在 payload.timestamp);
-  // 无 ts 的条目比较视为相等 (稳定排序保持原位), 绝不落到队首.
-  const ts = (e: any) => {
-    const ms = Date.parse(e?.timestamp || e?.created_at || e?.payload?.timestamp || e?.message?.created_at || '')
-    return Number.isFinite(ms) ? ms : NaN
-  }
-  merged.sort((a: any, b: any) => {
-    const ta = ts(a)
-    const tb = ts(b)
-    if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0
-    return ta - tb
-  })
-  return merged
 }
 
 function clampChatInputRatio(value: number) {
@@ -2692,32 +2666,30 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  // JSONL 视图: 直接展示当前 backend 的原始 entries (Claude 或 Codex).
-  // jsonl_history 覆盖, jsonl_entry 追加. 切 session 时 clear.
-  const [jsonlEntries, setJsonlEntries] = useState<any[]>([])
-  // count-then-tail: 后端先发 jsonl_meta {total}, 再回灌末尾窗口. 这里存服务端 total,
-  // 用作 "加载全部" 按钮的判断和标题显示, 不依赖 entries.length.
-  const [jsonlTotal, setJsonlTotal] = useState<number>(0)
-  // 后端在 jsonl_meta 里附带的真实 jsonl 文件绝对路径, 用于原始数据弹窗标题展示.
-  const [jsonlPath, setJsonlPath] = useState<string | null>(null)
-  const [jsonlInitialLoading, setJsonlInitialLoading] = useState(false)
-  const [jsonlLoadingMore, setJsonlLoadingMore] = useState<boolean>(false)
+  // ── 历史存储 (协议 ①②③): 组元数据 + 按需组条目, agent-history-store 是唯一数据源 ──
+  const sessionId = currentSession?.session_id || currentTask?.task_id || ''
+  const historyStore = useAgentHistory(sessionId)
+  const historyStoreRef = useRef(historyStore)
+  historyStoreRef.current = historyStore
+  const historySnapshot = historyStore ? historyStore.getSnapshot() : null
+  // 摊平的已加载条目: 简易视图 / 次要过滤 / live 时间戳等派生消费 (未加载的组零条目驻留, 不参与).
+  const jsonlEntries = useMemo(
+    () => (historyStore && historySnapshot ? historyStore.flattenEntries() : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [historyStore, historySnapshot?.rev],
+  )
+  const historyStats = useMemo(() => {
+    void historySnapshot?.rev
+    return historyStore ? historyStore.stats() : { loadedCount: 0, totalCount: 0 }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyStore, historySnapshot?.rev])
+  const jsonlInitialLoading = !historySnapshot?.negotiated && (historySnapshot?.groups.length ?? 0) === 0 && !historySnapshot?.error
+  const handleEnsureGroupEntries = useCallback((groupId: string) => {
+    historyStoreRef.current?.ensureGroupEntries(groupId)
+  }, [])
   const [easyRoundCount, setEasyRoundCount] = useState(0)
   const [easyExpandAllSignal, setEasyExpandAllSignal] = useState(0)
-  const pendingJsonlEntriesRef = useRef<any[]>([])
-  const pendingJsonlTotalIncrementRef = useRef(0)
-  const pendingJsonlFlushTimerRef = useRef<number | null>(null)
-  // JSONL 浏览器缓存 (stale-while-revalidate): 切 session 时先秒开缓存里的尾部.
-  // 最新值镜像 ref: switch effect 的 cleanup 在离开 session 时写回缓存, 但 cleanup 闭包
-  // 捕获的是进入时的旧值, 必须从 ref 取最新. 每次渲染同步刷新.
-  const jsonlEntriesRef = useRef<any[]>([])
-  jsonlEntriesRef.current = jsonlEntries
-  const jsonlTotalRef = useRef(0)
-  jsonlTotalRef.current = jsonlTotal
-  const jsonlPathRef = useRef<string | null>(null)
-  jsonlPathRef.current = jsonlPath
-  // 当前 session 是否已收到 SSE 权威 jsonl_history (reset). true 后缓存兜底不再覆盖, 避免用旧值盖掉新值.
-  const freshHistoryReceivedRef = useRef(false)
+  const [easyLoadingAll, setEasyLoadingAll] = useState(false)
   const [showRaw, setShowRaw] = useState(false)
   const [rawJsonlCopied, setRawJsonlCopied] = useState(false)
   const [inputReplayOpen, setInputReplayOpen] = useState(false)
@@ -2764,7 +2736,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       return next
     })
   }, [])
-  const sessionId = currentSession?.session_id || currentTask?.task_id || ''
   useEffect(() => {
     setEasyToolsOpen(false)
     setEasyRoundCount(0)
@@ -3916,36 +3887,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     }
   })
 
-  const flushPendingJsonlEntries = useCallback(() => {
-    if (pendingJsonlFlushTimerRef.current !== null) {
-      window.clearTimeout(pendingJsonlFlushTimerRef.current)
-      pendingJsonlFlushTimerRef.current = null
-    }
-    if (pendingJsonlEntriesRef.current.length === 0) return
-    const batch = pendingJsonlEntriesRef.current
-    const totalIncrement = pendingJsonlTotalIncrementRef.current
-    pendingJsonlEntriesRef.current = []
-    pendingJsonlTotalIncrementRef.current = 0
-    setJsonlEntries(prev => prev.concat(batch))
-    if (totalIncrement > 0) setJsonlTotal(prev => prev + totalIncrement)
-  }, [])
-
-  const clearPendingJsonlEntries = useCallback(() => {
-    if (pendingJsonlFlushTimerRef.current !== null) {
-      window.clearTimeout(pendingJsonlFlushTimerRef.current)
-      pendingJsonlFlushTimerRef.current = null
-    }
-    pendingJsonlEntriesRef.current = []
-    pendingJsonlTotalIncrementRef.current = 0
-  }, [])
-
-  const enqueueJsonlEntry = useCallback((entry: any) => {
-    pendingJsonlEntriesRef.current.push(entry)
-    pendingJsonlTotalIncrementRef.current += 1
-    if (pendingJsonlFlushTimerRef.current !== null) return
-    pendingJsonlFlushTimerRef.current = window.setTimeout(flushPendingJsonlEntries, 50)
-  }, [flushPendingJsonlEntries])
-
   const connectEventStream = useCallback((sid: string) => {
     // sid 必须有效: 防止 subscribe {task_id: undefined} 触发后端 "session undefined 不存在或不属于你".
     if (!sid) return
@@ -3960,6 +3901,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       // 期间已被切到别的 session → 这条 socket 作废, 不再 subscribe.
       if (source !== eventSourceRef.current) { try { source.close() } catch {} ; return }
       setConnectionStatus('connected')
+      // 重连 = stateless 对账: ① 重新协商 (If-None-Match 常态 304), 断线期间的差额由
+      // 变了 version 的已加载组整组重拉补齐, 不猜缺口.
+      historyStoreRef.current?.negotiate()
     }
 
     const handleStreamMessage = (e: MessageEvent) => {
@@ -3986,61 +3930,13 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           loadHistoryRef.current()
         }
         else if (msg.event === 'stopped') { setTyping(false); setStreamContent(''); loadHistoryRef.current() }
-        else if (msg.event === 'jsonl_meta') {
-          // count-then-tail: 后端 cheap count, 优先显示这个 total.
+        else if (msg.event === 'group_created' || msg.event === 'entries') {
+          // 历史存储事件 (落库结果的投影): group_created / {entries, group_id, group_id_version}.
+          // store 内部按水位线 + uuid 对账 (① 协商前到达的事件先缓冲).
           if (msg.session_id && msg.session_id !== sid) return
-          const total = Number(msg.total)
-          // 骨架模式下不用服务端计数覆盖 total: 否则每次 SSE 重连重发 jsonl_meta,
-          // "加载全部" 按钮就会复活 (骨架模式下全部内容按需可取, 不需要该按钮).
-          if (Number.isFinite(total) && !spineModeRef.current) setJsonlTotal(total)
-          if (typeof msg.jsonl_path === 'string') setJsonlPath(msg.jsonl_path)
-        }
-        else if (msg.event === 'jsonl_history') {
-          // SSE 建连时分块回灌 jsonl 历史: reset=true 的第一块覆盖, 后续块追加.
-          // 兼容旧后端: 没有 reset/chunk_index 时仍按一次性回灌覆盖处理.
-          if (msg.session_id && msg.session_id !== sid) return
-          const entries = Array.isArray(msg.entries) ? msg.entries : []
-          const isChunked = typeof msg.chunk_index === 'number' || typeof msg.done === 'boolean'
-          if (!isChunked) {
-            clearPendingJsonlEntries()
-            setJsonlEntries(entries)
-            setJsonlInitialLoading(false)
-            freshHistoryReceivedRef.current = true
-          } else if (msg.reset) {
-            clearPendingJsonlEntries()
-            setJsonlEntries(entries)
-            setJsonlInitialLoading(false)
-            freshHistoryReceivedRef.current = true
-            // SSE 重连 reset 把 entries 重置回尾部窗口: 之前并入的骨架和已加载轮明细都丢了。
-            // 重置骨架相关状态, 让"自动拉骨架"effect 重新执行 (服务端有 LRU 缓存, 代价极小);
-            // 已加载轮明细集合也清空 (那些主轨条目已不在本地, 展开时需重取)。
-            if (spineModeRef.current) {
-              spineModeRef.current = false
-              setSpineMode(false)
-              spineAutoLoadedForRef.current = null
-              roundDetailLoadedRef.current = new Set()
-              setRoundDetailTick(t => t + 1)
-            }
-          } else if (entries.length > 0) {
-            setJsonlEntries(prev => prev.concat(entries))
-            setJsonlInitialLoading(false)
-          }
-          // 兼容老后端: 没有先发 jsonl_meta 时, 用 msg.total / entries.length 回退.
-          const fallbackTotal = Number(msg.total)
-          if (Number.isFinite(fallbackTotal) && fallbackTotal > 0 && !spineModeRef.current) {
-            setJsonlTotal(prev => (fallbackTotal > prev ? fallbackTotal : prev))
-          }
-        }
-        else if (msg.event === 'jsonl_entry') {
-          // backend 写入新 entry, 追加. 后端带 session_id, 与本 stream 订阅的 sid 不符则丢弃 (双保险).
-          if (msg.session_id && msg.session_id !== sid) return
-          if (typeof msg.entry === 'undefined') return
-          setJsonlInitialLoading(false)
-          // live 增量合批写入 state: 高频工具输出时避免一条 entry 触发一次 React render.
-          enqueueJsonlEntry(msg.entry)
+          historyStoreRef.current?.applySseEvent(msg)
         }
         else if (msg.event === 'error') {
-          setJsonlInitialLoading(false)
           const text = formatSendError(msg)
           setLastSendError(text)
           addMessage({ role: 'system', content: `❌ ${text}` })
@@ -4048,16 +3944,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       } catch {}
     }
 
-    ;['subscribed', 'history', 'stream', 'buttons', 'stopped', 'jsonl_meta', 'jsonl_history', 'jsonl_entry', 'typing', 'server_error']
+    ;['subscribed', 'history', 'stream', 'buttons', 'stopped', 'group_created', 'entries', 'typing', 'server_error']
       .forEach(eventName => source.addEventListener(eventName, handleStreamMessage as EventListener))
 
     source.onerror = () => {
       if (source !== eventSourceRef.current) return
       setTyping(false)
-      setJsonlInitialLoading(false)
       setConnectionStatus('disconnected')
     }
-  }, [addMessage, clearPendingJsonlEntries, enqueueJsonlEntry])
+  }, [addMessage])
 
   // 标记当前 session 的历史消息是否已成功从后端取回过 (至少一次).
   // 用来防止 SessionStartModal 在切换 session / 首次进入的清空-加载窗口期
@@ -4089,167 +3984,34 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
 
   useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
 
-  // count-then-tail: "加载全部" = 只拉伴生轨全量骨架 (超长会话按需加载).
-  // 骨架 = 每轮一张用户输入卡, 主轨明细等用户展开该轮时再按时间戳切片取 (loadRoundJsonlDetail).
-  // 伴生轨为空的旧会话回退旧路径 (拉双轨 merge 头部窗口).
-  const [spineMode, setSpineMode] = useState(false)
-  const spineModeRef = useRef(false)
-  const handleLoadAllJsonl = useCallback(async () => {
-    const sid = currentSession?.session_id || currentTask?.task_id
-    if (!sid) return
-    flushPendingJsonlEntries()
-    if (jsonlLoadingMore) return
-    if (jsonlTotal <= jsonlEntries.length) return
-    setJsonlLoadingMore(true)
+  // 简易模式 "加载全部": 把所有未加载组的条目按 ② 逐组补齐 (用户显式动作, 不设上限).
+  const handleEasyLoadAll = useCallback(async () => {
+    const store = historyStoreRef.current
+    if (!store || easyLoadingAll) return
+    setEasyLoadingAll(true)
     try {
-      const data = await api(`/api/sessions/${sid}/jsonl-history?track=mobius`)
-      const spine = Array.isArray(data?.entries) ? data.entries : []
-      const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
-      if (sid !== activeSid) return
-      if (spine.length > 0) {
-        // 必须函数式更新: 此刻可能有刚 flush 的 SSE 批次还在 setState 队列里,
-        // 用过期闭包整体覆盖会把它们抹掉 (表现为卡片消失). updater 内记录增量供 effect 判定.
-        spineAddedRef.current = null
-        setJsonlEntries(prev => {
-          const merged = mergeJsonlEntriesByIdentity(prev, spine)
-          spineAddedRef.current = merged.length - prev.length
-          return merged
-        })
-        spineEvalPendingRef.current = true
-      } else {
-        // 回退: 无伴生轨的旧会话走旧 merge 窗口
-        const missing = jsonlTotal - jsonlEntries.length
-        const legacy = await api(`/api/sessions/${sid}/jsonl-history?from=0&limit=${Math.max(missing, 1)}`)
-        const head = Array.isArray(legacy?.entries) ? legacy.entries : []
-        if (!head.length) return
-        setJsonlEntries(prev => head.concat(prev))
-        if (Number.isFinite(Number(legacy?.total))) setJsonlTotal(Number(legacy.total))
+      for (const group of store.groups) {
+        await store.ensureGroupEntries(group.id)
       }
-    } catch (e) {
-      console.warn('[jsonl] load all failed:', e)
+      setEasyExpandAllSignal(value => value + 1)
     } finally {
-      setJsonlLoadingMore(false)
+      setEasyLoadingAll(false)
     }
-  }, [currentSession?.session_id, currentTask?.task_id, flushPendingJsonlEntries, jsonlLoadingMore, jsonlTotal, jsonlEntries.length])
-
-  // 按轮加载主轨明细: [openerTs, nextOpenerTs) 时间戳切片, 游标自动续页; 已加载轮去重.
-  const roundDetailLoadedRef = useRef<Set<string>>(new Set())
-  const [roundDetailTick, setRoundDetailTick] = useState(0)
-  const [loadingRoundUuid, setLoadingRoundUuid] = useState<string | null>(null)
-  const loadRoundJsonlDetail = useCallback(async (openerUuid: string, fromTs: string, toTs: string | null) => {
-    const sid = currentSession?.session_id || currentTask?.task_id
-    if (!sid || !fromTs) return
-    if (roundDetailLoadedRef.current.has(openerUuid)) return
-    setLoadingRoundUuid(openerUuid)
-    try {
-      const collected: any[] = []
-      let fromByte: number | null = null
-      for (let page = 0; page < 10; page++) {
-        const q = new URLSearchParams({ track: 'primary', from_ts: fromTs, limit: '4000' })
-        if (toTs) q.set('to_ts', toTs)
-        if (fromByte != null) q.set('from_byte', String(fromByte))
-        const data = await api(`/api/sessions/${sid}/jsonl-history?${q.toString()}`)
-        const part = Array.isArray(data?.entries) ? data.entries : []
-        collected.push(...part)
-        if (!data?.has_more || !data?.next_from_byte) break
-        fromByte = Number(data.next_from_byte)
-      }
-      const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
-      if (sid !== activeSid) return
-      if (collected.length > 0) {
-        setJsonlEntries(prev => mergeJsonlEntriesByIdentity(prev, collected))
-      }
-      roundDetailLoadedRef.current.add(openerUuid)
-      setRoundDetailTick(t => t + 1)
-    } catch (e) {
-      console.warn('[jsonl] load round detail failed:', e)
-    } finally {
-      setLoadingRoundUuid(null)
-    }
-  }, [currentSession?.session_id, currentTask?.task_id])
-
-  // 骨架合并结果判定: updater 在 commit 时执行, 模式/total 决策放到 jsonlEntries 变化后的 effect 里做.
-  const spineAddedRef = useRef<number | null>(null)
-  const spineEvalPendingRef = useRef(false)
-  useEffect(() => {
-    if (!spineEvalPendingRef.current) return
-    spineEvalPendingRef.current = false
-    // total 对齐本地条数, "加载全部" 按钮消失; 主轨明细改按轮加载.
-    setJsonlTotal(jsonlEntries.length)
-    // 只有骨架真的带来了本地没有的条目才进入骨架模式;
-    // 新会话/骨架与本地重合时保持普通模式, 避免"加载明细"误报.
-    if ((spineAddedRef.current ?? 0) > 0) {
-      spineModeRef.current = true
-      setSpineMode(true)
-    }
-    spineAddedRef.current = null
-  }, [jsonlEntries])
-
-  // 骨架自动加载: 首包历史到位后, 若远端还有头部未加载 (total > entries), 后台自动拉伴生轨骨架.
-  // 骨架极小; 拉完后旧轮次立即以"仅问题卡"形态出现, 展开时按需取明细, 无需先点"加载全部".
-  const spineAutoLoadedForRef = useRef<string | null>(null)
-  useEffect(() => {
-    const sid = currentSession?.session_id || currentTask?.task_id
-    if (!sid || jsonlInitialLoading) return
-    if (spineAutoLoadedForRef.current === sid) return
-    if (spineModeRef.current) { spineAutoLoadedForRef.current = sid; return }
-    if (jsonlLoadingMore) return   // 正在加载 (如用户手点): 等结束后本 effect 重跑再试, 不标记
-    if (!(jsonlTotal > jsonlEntries.length)) return
-    spineAutoLoadedForRef.current = sid
-    handleLoadAllJsonl()
-  }, [currentSession?.session_id, currentTask?.task_id, jsonlInitialLoading, jsonlLoadingMore, jsonlTotal, jsonlEntries.length, handleLoadAllJsonl])
+  }, [easyLoadingAll])
 
   useEffect(() => {
     const sid = currentSession?.session_id || currentTask?.task_id
     if (!sid) return
-    clearPendingJsonlEntries()
-    spineModeRef.current = false
-    setSpineMode(false)
-    roundDetailLoadedRef.current = new Set()
-    setLoadingRoundUuid(null)
-    freshHistoryReceivedRef.current = false
     setStreamContent('')
     setTyping(false)
     setMessages([])
-    setJsonlInitialLoading(true)
-    // stale-while-revalidate: 先同步读内存缓存, 命中则立刻展示上次尾部 (零延迟秒开);
-    // 未命中再异步兜底 IndexedDB (跨刷新), 仍命中则在 SSE 权威数据到达前补上.
-    // SSE jsonl_history (reset) 到达后会覆盖, 是唯一真相源.
-    const cachedSync = readJsonlCacheSync(sid)
-    if (cachedSync && cachedSync.entries.length > 0) {
-      setJsonlEntries(cachedSync.entries)
-      setJsonlTotal(cachedSync.total || cachedSync.entries.length)
-      setJsonlPath(cachedSync.path)
-    } else {
-      setJsonlEntries([])
-      setJsonlTotal(0)
-      setJsonlPath(null)
-      readJsonlCacheFromIdb(sid).then((snap) => {
-        // 仍停留在同一个 session, 且 SSE 权威历史还没到, 才用缓存兜底, 避免旧值盖新值.
-        const stillActive = useStore.getState().currentSession?.session_id === sid
-          || useStore.getState().currentTask?.task_id === sid
-        if (!snap || !stillActive || freshHistoryReceivedRef.current) return
-        if (snap.entries.length === 0) return
-        setJsonlEntries(snap.entries)
-        setJsonlTotal(snap.total || snap.entries.length)
-        setJsonlPath(snap.path)
-      }).catch(() => {})
-    }
-    setJsonlLoadingMore(false)
     setHistoryLoaded(false)
     loadHistory()
     connectEventStream(sid)
     return () => {
-      clearPendingJsonlEntries()
-      // 离开当前 session: 把最新尾部写回浏览器缓存, 下次切回秒开 (只缓存尾部窗口).
-      const leavingSid = sid
-      const latest = jsonlEntriesRef.current
-      if (leavingSid && latest.length > 0) {
-        writeJsonlCache(leavingSid, latest, jsonlTotalRef.current, jsonlPathRef.current)
-      }
       eventSourceRef.current?.close(); eventSourceRef.current = null; setConnectionStatus('disconnected')
     }
-  }, [currentSession?.session_id, currentTask?.task_id, clearPendingJsonlEntries, loadHistory, connectEventStream])
+  }, [currentSession?.session_id, currentTask?.task_id, loadHistory, connectEventStream])
 
   // 卡片数量变化 (jsonlEntries.length) 时自动滚到末尾, 同时也覆盖原有 messages/stream/typing 触发.
   // userScrolledUp=true 时不抢滚条, 改在顶部显示"新消息"按钮.
@@ -4766,18 +4528,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               <Sparkles className="easy-session-summary__icon" aria-hidden="true" />
               <span className="easy-session-summary__label">简易对话</span>
               <small>{easyRoundCount} 轮</small>
-              {(jsonlTotal > jsonlEntries.length || (jsonlEntries.length > 200 && easyExpandAllSignal === 0)) && (
+              {(historyStats.totalCount > jsonlEntries.length || (jsonlEntries.length > 200 && easyExpandAllSignal === 0)) && (
                 <button
                   type="button"
                   className="easy-session-summary__action"
-                  disabled={jsonlLoadingMore}
-                  onClick={() => {
-                    setEasyExpandAllSignal(value => value + 1)
-                    if (jsonlTotal > jsonlEntries.length) handleLoadAllJsonl()
-                  }}
-                  title={jsonlLoadingMore ? '正在加载全部对话' : jsonlTotal > jsonlEntries.length ? `加载全部对话（${jsonlTotal} 条）` : `展开全部对话（${jsonlEntries.length} 条）`}
+                  disabled={easyLoadingAll}
+                  onClick={handleEasyLoadAll}
+                  title={easyLoadingAll ? '正在加载全部对话' : historyStats.totalCount > jsonlEntries.length ? `加载全部对话（${historyStats.totalCount} 条）` : `展开全部对话（${jsonlEntries.length} 条）`}
                 >
-                  {jsonlLoadingMore ? '加载中…' : jsonlTotal > jsonlEntries.length ? `加载全部 · ${jsonlTotal}` : `展开全部 · ${jsonlEntries.length}`}
+                  {easyLoadingAll ? '加载中…' : historyStats.totalCount > jsonlEntries.length ? `加载全部 · ${historyStats.totalCount}` : `展开全部 · ${jsonlEntries.length}`}
                 </button>
               )}
               {jsonlEntries.length > 200 && easyExpandAllSignal > 0 && (
@@ -4993,12 +4752,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           currentProjectId={currentProjectId}
           chatContainerRef={chatContainerRef}
           endRef={endRef}
+          historySnapshot={historySnapshot || EMPTY_HISTORY_SNAPSHOT_FALLBACK}
+          onEnsureGroupEntries={handleEnsureGroupEntries}
           visibleJsonl={visibleJsonl}
-          loadedJsonlCount={jsonlEntries.length}
-          jsonlTotal={jsonlTotal}
           jsonlEmptyLoadingText={jsonlEmptyLoadingText}
           jsonlInitialLoading={jsonlInitialLoading}
-          jsonlLoadingMore={jsonlLoadingMore}
           showJsonlMeta={showJsonlMeta}
           cursorStyleTools={cursorStyleTools}
           backendAlive={backendAlive}
@@ -5007,18 +4765,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           realTimeInfo={backendRealTimeInfo}
           lastTimestamp={liveDebugSnapshot.lastTimestampProp}
           hasNewMessages={hasNewMessages}
-          onLoadAllJsonl={handleLoadAllJsonl}
-          onLoadRoundDetail={loadRoundJsonlDetail}
-          roundDetailLoaded={roundDetailLoadedRef.current}
-          spineMode={spineMode}
-          roundDetailVersion={roundDetailTick}
-          loadingRoundUuid={loadingRoundUuid}
           onScrollPositionChange={handleJsonlScrollPositionChange}
           onJumpToBottom={jumpToJsonlBottom}
           scrollToEntryUuid={matchUuid}
           scrollToMatchTs={matchTs}
           onMatchScrollResolved={onMatchScrollResolved}
-          onMatchScrollUnresolved={handleLoadAllJsonl}
           onEasyRoundCountChange={handleEasyRoundCountChange}
           easyExpandAllSignal={easyExpandAllSignal}
           variant={layout === 'easy' ? 'easy' : 'standard'}
@@ -5671,44 +5422,22 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
             <div className="px-5 py-3 border-b flex items-center gap-3 flex-shrink-0" style={{ borderColor: 'var(--border-color)' }}>
               <span className="text-[14px] font-semibold flex-1 min-w-0 flex items-baseline gap-2" style={{ color: 'var(--text-primary)' }}>
-                <span className="flex-shrink-0">原始 JSONL <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· {jsonlEntries.length} 条</span></span>
-                {jsonlPath && (
-                  <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-muted)' }} title={jsonlPath}>{jsonlPath}</span>
-                )}
+                <span className="flex-shrink-0">原始 JSONL <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· 已载 {jsonlEntries.length}{historyStats.totalCount > jsonlEntries.length ? ` / ${historyStats.totalCount}` : ''} 条</span></span>
               </span>
               <JsonlCopyButton
                 copied={rawJsonlCopied}
                 title="复制全部 JSONL 到剪贴板"
                 copiedTitle="JSONL 已复制"
                 onClick={async () => {
-                  // 复制全部前必须确保拿到完整 entries: 后端 SSE 默认只回灌末尾窗口,
-                  // 且 REST 单次最多 5000 条. 这里分页拉满全量, 不省略不截断.
+                  // 复制全部 = 把所有未加载组的条目按 ② 逐组补齐后摊平 (用户显式动作, 不截断).
                   try {
-                    const sid = currentSession?.session_id || currentTask?.task_id
-                    let entriesToCopy = jsonlEntries
-                    if (sid && jsonlTotal > jsonlEntries.length) {
-                      const collected: any[] = []
-                      let from = 0
-                      const pageSize = 5000
-                      let total = jsonlTotal
-                      while (from < total) {
-                        const data = await api(`/api/sessions/${sid}/jsonl-history?from=${from}&limit=${pageSize}`)
-                        const slice = Array.isArray(data?.entries) ? data.entries : []
-                        if (slice.length === 0) break
-                        collected.push(...slice)
-                        from += slice.length
-                        if (Number.isFinite(Number(data?.total))) total = Number(data.total)
-                        if (slice.length < pageSize) break
-                      }
-                      if (collected.length > 0) {
-                        const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
-                        if (sid === activeSid) {
-                          entriesToCopy = collected
-                          setJsonlEntries(collected)
-                          if (collected.length === total) setJsonlTotal(total)
-                        }
+                    const store = historyStoreRef.current
+                    if (store) {
+                      for (const group of store.groups) {
+                        await store.ensureGroupEntries(group.id)
                       }
                     }
+                    const entriesToCopy = historyStoreRef.current?.flattenEntries() ?? jsonlEntries
                     await navigator.clipboard.writeText(entriesToCopy.map(e => JSON.stringify(e)).join('\n'))
                     setRawJsonlCopied(true)
                     setTimeout(() => setRawJsonlCopied(false), 1000)

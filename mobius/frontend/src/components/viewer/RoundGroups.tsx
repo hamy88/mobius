@@ -154,7 +154,7 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
   )
 }
 
-export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpandAll = false, forceOpen = false, showMeta = true, resolvedMap, cursorStyleTools = true, collapseLineNos, focusLineNo, headerPalette, taskPlans, detailLoaded, detailLoading, onNeedDetail }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; forceExpandAll?: boolean; forceOpen?: boolean; showMeta?: boolean; resolvedMap?: ResolvedCallMap | null; cursorStyleTools?: boolean; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; detailLoaded?: boolean; detailLoading?: boolean; onNeedDetail?: () => void }) {
+export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpandAll = false, forceOpen = false, showMeta = true, resolvedMap, cursorStyleTools = true, collapseLineNos, focusLineNo, headerPalette, taskPlans, detailLoaded, detailLoading, onNeedDetail, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; forceExpandAll?: boolean; forceOpen?: boolean; showMeta?: boolean; resolvedMap?: ResolvedCallMap | null; cursorStyleTools?: boolean; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; detailLoaded?: boolean; detailLoading?: boolean; onNeedDetail?: () => void; headerTitle?: string; headerSummary?: string }) {
   // 追踪用户是否手动点击过折叠/展开. 一旦手动操作, 后续不再被 autoOpen/forceExpandAll 自动接管.
   // 实现"最新两轮自动展开, 除非人为折叠": 最新轮和上一轮默认展开, 更早的轮默认折叠;
   // 某轮升入最新两轮时自动展开, 跌出最新两轮时自动折叠; 用户手动操作过的轮尊重用户, 不再自动改.
@@ -182,7 +182,8 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
 
   const userItem = round.items[0]
   const agentCount = round.items.length - 1
-  const userSummary = userItem ? buildHeaderSummary(userItem.entry).short : ''
+  // 条目未加载时 (折叠轮零条目驻留), 用调用方给的元数据摘要当轮次标识.
+  const userSummary = userItem ? buildHeaderSummary(userItem.entry).short : (headerSummary || '')
   // 探索类聚合: 连续只读/搜索调用合并为 "已探索 N 个工具"; cursorStyleTools 关闭时退化为逐条单卡 (回退原始展示).
   const renderSeq: ExploreRenderItem[] = cursorStyleTools
     ? groupExploreItems(round.items, resolvedMap)
@@ -208,7 +209,7 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
       >
         <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-[var(--round-header-accent)]" />
         <span className="font-mono text-[10px] font-bold text-[var(--text-secondary)] flex-shrink-0 w-12" title={`第 ${round.roundNum} 轮`}>
-          第 {round.roundNum} 轮
+          {headerTitle ?? `第 ${round.roundNum} 轮`}
         </span>
         <span className="text-[11px] text-[var(--text-secondary)] truncate flex-1 min-w-0">
           {/* 展开后用户问题由下方编号为 roundNum 的卡片完整呈现, header 不再重复摘要 (仅折叠态显示作轮次标识) */}

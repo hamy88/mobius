@@ -8,6 +8,7 @@
 import { useMemo } from 'react'
 import { diffLines } from 'diff'
 import { splitDiffValue, parseUnifiedHunkHeader, basename } from './utils'
+import { JsonlDownloadButton } from './JsonlDownloadButton'
 import type { DiffRow, CodeEdit, StringCodeEditFile, UnifiedCodeEditFile } from './types'
 
 function buildStringDiffRows(file: StringCodeEditFile): DiffRow[] {
@@ -126,6 +127,7 @@ export function JsonEntryCodeDiff({ edit }: { edit: CodeEdit }) {
             <span className="min-w-0 flex-1 truncate font-mono text-[var(--text-secondary)]" title={file.filePath || undefined}>
               {file.filePath ? basename(file.filePath) : 'Edit'}
             </span>
+            {file.filePath && <JsonlDownloadButton filePath={file.filePath} />}
             <span className="flex-shrink-0 font-mono text-red-700 dark:text-red-300">-{file.kind === 'unified' ? file.removedLineCount : file.oldLineCount}</span>
             <span className="flex-shrink-0 font-mono text-emerald-700 dark:text-emerald-300">+{file.kind === 'unified' ? file.addedLineCount : file.newLineCount}</span>
           </div>
