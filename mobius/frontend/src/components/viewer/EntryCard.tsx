@@ -24,6 +24,7 @@ import {
   AIMUX_COMMAND_THEME,
   READ_TOOL_THEME,
   CONTEXT_COMPACTED_THEME,
+  THREAD_SETTINGS_APPLIED_THEME,
   ASSISTANT_END_TURN_THEME,
   THINKING_ONLY_THEME,
   COMPACT_DONE_THEME,
@@ -54,6 +55,7 @@ import {
 import {
   isEditToolUse,
   isContextCompactedEvent,
+  isThreadSettingsAppliedEvent,
   isAssistantEndTurnEntry,
   isThinkingOnlyAssistantEntry,
   isAssistantResponseGoldKeyword,
@@ -282,6 +284,8 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
     ? READ_TOOL_THEME
     : isContextCompactedEvent(entry)
     ? CONTEXT_COMPACTED_THEME
+    : isThreadSettingsAppliedEvent(entry)
+    ? THREAD_SETTINGS_APPLIED_THEME
     : canPlan
     ? PLAN_THEME
     : mcpResult

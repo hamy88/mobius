@@ -29,6 +29,12 @@ export function isTokenCountEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'token_count'
 }
 
+// Codex 在会话/线程配置生效后写入的生命周期事件。它不是 token 统计或系统注入噪声，
+// 应在 JSONL 查看器中保留为可浏览的事件卡片。
+export function isThreadSettingsAppliedEvent(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg' && entry?.payload?.type === 'thread_settings_applied'
+}
+
 // codex 在每轮开始会以 response_item.message[role=user] 注入一条 <environment_context>…</environment_context>
 // 系统上下文 (cwd/shell/date/timezone/filesystem 等). 它套了 user 外壳但不是人类提问, 在 jsonl 卡片
 // 视图里属于噪声, 与 token_count 同级整卡过滤隐藏.

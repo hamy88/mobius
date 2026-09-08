@@ -1,4 +1,4 @@
-import type { AnyEntry, Round } from '../viewer/types'
+import type { AnyEntry, JsonlViewItem, Round } from '../viewer/types'
 import {
   entryDisplayImages,
   entryReadImagePaths,
@@ -268,6 +268,19 @@ function errorText(entry: AnyEntry): string {
   return ''
 }
 
+function threadSettingsDetail(entry: AnyEntry): string {
+  if (entry?.type !== 'event_msg' || entry?.payload?.type !== 'thread_settings_applied') return ''
+  const settings = entry?.payload?.thread_settings
+  if (!settings || typeof settings !== 'object') return '线程配置已生效'
+  const parts = [
+    typeof settings.model === 'string' && settings.model ? `模型 ${settings.model}` : '',
+    typeof settings.model_provider_id === 'string' && settings.model_provider_id ? `提供方 ${settings.model_provider_id}` : '',
+    typeof settings.approval_policy === 'string' && settings.approval_policy ? `审批策略 ${settings.approval_policy}` : '',
+    typeof settings.reasoning_effort === 'string' && settings.reasoning_effort ? `推理强度 ${settings.reasoning_effort}` : '',
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : '线程配置已生效'
+}
+
 function activityTitle(kind: EasyActivityKind, details: string[], images: string[]): string {
   if (kind === 'explore') return details.length === 1 ? '探索了 1 项上下文' : `探索了 ${details.length} 项上下文`
   if (kind === 'command') return details.length === 1 ? '运行了 1 条命令' : `运行了 ${details.length} 条命令`
@@ -286,11 +299,14 @@ function unique(values: string[]): string[] {
   return Array.from(new Set(values.map(value => value.trim()).filter(Boolean)))
 }
 
-export function buildEasyJsonlRounds(rounds: Round[]): EasyJsonlRound[] {
-  return rounds.map((round) => {
+export function buildEasyJsonlRounds(rounds: Round[], preItems: JsonlViewItem[] = []): EasyJsonlRound[] {
+  return rounds.map((round, roundIndex) => {
     const buckets = new Map<EasyActivityKind, ActivityBucket>()
     const assistantMessages: Array<{ text: string; lineNo: number; index: number }> = []
-    const lineNos = round.items.map(item => item.lineNo)
+    const leadingSettings = roundIndex === 0
+      ? preItems.filter(item => item.entry?.type === 'event_msg' && item.entry?.payload?.type === 'thread_settings_applied')
+      : []
+    const lineNos = [...leadingSettings.map(item => item.lineNo), ...round.items.map(item => item.lineNo)]
 
     const add = (kind: EasyActivityKind, detail: string, lineNo: number, index: number, imageUrls: string[] = []) => {
       let bucket = buckets.get(kind)
@@ -303,12 +319,20 @@ export function buildEasyJsonlRounds(rounds: Round[]): EasyJsonlRound[] {
       bucket.imageUrls.push(...imageUrls)
     }
 
+    leadingSettings.forEach((item, index) => {
+      const detail = threadSettingsDetail(item.entry)
+      if (detail) add('progress', `线程配置已生效 · ${detail}`, item.lineNo, index - leadingSettings.length)
+    })
+
     round.items.forEach((item, index) => {
       const entry = item.entry
       if (index > 0) {
         const response = easyAssistantText(entry)
         if (response) assistantMessages.push({ text: response, lineNo: item.lineNo, index })
       }
+
+      const settingsDetail = threadSettingsDetail(entry)
+      if (settingsDetail) add('progress', `线程配置已生效 · ${settingsDetail}`, item.lineNo, index)
 
       const plan = extractPlanCard(entry)
       if (plan) {

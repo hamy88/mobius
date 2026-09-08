@@ -3990,7 +3990,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           // count-then-tail: 后端 cheap count, 优先显示这个 total.
           if (msg.session_id && msg.session_id !== sid) return
           const total = Number(msg.total)
-          if (Number.isFinite(total)) setJsonlTotal(total)
+          // 骨架模式下不用服务端计数覆盖 total: 否则每次 SSE 重连重发 jsonl_meta,
+          // "加载全部" 按钮就会复活 (骨架模式下全部内容按需可取, 不需要该按钮).
+          if (Number.isFinite(total) && !spineModeRef.current) setJsonlTotal(total)
           if (typeof msg.jsonl_path === 'string') setJsonlPath(msg.jsonl_path)
         }
         else if (msg.event === 'jsonl_history') {
@@ -4009,13 +4011,23 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             setJsonlEntries(entries)
             setJsonlInitialLoading(false)
             freshHistoryReceivedRef.current = true
+            // SSE 重连 reset 把 entries 重置回尾部窗口: 之前并入的骨架和已加载轮明细都丢了。
+            // 重置骨架相关状态, 让"自动拉骨架"effect 重新执行 (服务端有 LRU 缓存, 代价极小);
+            // 已加载轮明细集合也清空 (那些主轨条目已不在本地, 展开时需重取)。
+            if (spineModeRef.current) {
+              spineModeRef.current = false
+              setSpineMode(false)
+              spineAutoLoadedForRef.current = null
+              roundDetailLoadedRef.current = new Set()
+              setRoundDetailTick(t => t + 1)
+            }
           } else if (entries.length > 0) {
             setJsonlEntries(prev => prev.concat(entries))
             setJsonlInitialLoading(false)
           }
           // 兼容老后端: 没有先发 jsonl_meta 时, 用 msg.total / entries.length 回退.
           const fallbackTotal = Number(msg.total)
-          if (Number.isFinite(fallbackTotal) && fallbackTotal > 0) {
+          if (Number.isFinite(fallbackTotal) && fallbackTotal > 0 && !spineModeRef.current) {
             setJsonlTotal(prev => (fallbackTotal > prev ? fallbackTotal : prev))
           }
         }

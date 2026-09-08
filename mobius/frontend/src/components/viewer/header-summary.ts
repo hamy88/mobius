@@ -215,6 +215,13 @@ export function buildHeaderSummary(entry: AnyEntry): HeaderSummary {
   }
   if (t === 'event_msg') {
     const pt = payload?.type || 'event'
+    if (pt === 'thread_settings_applied') {
+      const settings = payload?.thread_settings
+      const model = typeof settings?.model === 'string' ? settings.model : ''
+      const provider = typeof settings?.model_provider_id === 'string' ? settings.model_provider_id : ''
+      const parts = [model && `模型 ${model}`, provider && `提供方 ${provider}`].filter(Boolean)
+      return clip(parts.length > 0 ? `thread_settings_applied · ${parts.join(' · ')}` : pt, HEADER_SHORT_LIMIT)
+    }
     if (pt === 'agent_message') return clip(String(payload?.message || ''), HEADER_SHORT_LIMIT)
     if (pt === 'user_message') return clip(String(payload?.message || ''), HEADER_SHORT_LIMIT)
     if (pt === 'task_complete') return clip(`task_complete · ${payload?.duration_ms || 0}ms`, HEADER_SHORT_LIMIT)
