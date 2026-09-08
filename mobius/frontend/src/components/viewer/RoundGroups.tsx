@@ -235,6 +235,14 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, open, stick
               )}
             </div>
           )}
+          {/* 已加载但渲染为空 (条目全被噪声过滤 / 数据本就为空) → 显式提醒, 不留空白. */}
+          {resident && renderSeq.length === 0 && (
+            <div className="mb-1 flex justify-center">
+              <span className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)]">
+                本轮为空 · 没有可显示的条目
+              </span>
+            </div>
+          )}
           {renderSeq.map((ri, idx) => {
             if (ri.kind === 'explore') {
               return (

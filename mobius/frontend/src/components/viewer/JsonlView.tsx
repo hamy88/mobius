@@ -280,7 +280,8 @@ export function JsonlView({
         sticky={!!rt?.sticky}
         loading={r.state === 'open-loading'}
         failed={!!rt?.lastError}
-        resident={!!entries}
+        // resident = ② 已到货 (数据驻留), 与条目数无关: 加载出的空组走"空提醒"而非永转加载.
+        resident={snapshot.entriesByGroup.has(r.meta.id)}
         onUserToggle={() => store?.toggleGroup(r.meta.id)}
         onAutoOpen={() => store?.openGroup(r.meta.id, 'auto')}
         onAutoClose={() => store?.closeGroup(r.meta.id, 'auto')}
@@ -290,6 +291,8 @@ export function JsonlView({
         toolStatusMap={entries ? toolStatusMapFor(entries) : null}
         collapseLineNos={entries ? collapsedLineNosFor(entries, r.round.items) : undefined}
         focusLineNo={extFocusLineNo}
+        // 未加载组零条目驻留: 折叠头摘要用组元数据 (loaded 后 items[0] 摘要优先).
+        headerSummary={r.meta.user_summary}
         headerPalette={roundHeaderPalette}
         taskPlans={entries ? taskPlansFor(entries, r.round.items) : null}
       />
