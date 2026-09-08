@@ -20,6 +20,7 @@ import { resolveMediaSrc } from '../jsonl-vscode-link'
 import type { AnyEntry, JsonlViewItem } from '../viewer/types'
 import { mergeBashToolResultItems } from '../viewer/entry-extract'
 import { isHiddenJsonlNoiseEntry } from '../viewer/entry-classify'
+import { filterDisplayDuplicates } from '../viewer/display-dedup'
 import { buildRounds } from '../viewer/rounds'
 import { buildEasyJsonlRounds, type EasyActivity, type EasyActivityKind } from './easy-jsonl-model'
 import './easy-jsonl.css'
@@ -149,7 +150,7 @@ export default function EasyJsonlView({
   const [showAll, setShowAll] = useState(false)
   const recent = useMemo(() => entries.slice(-(showAll ? entries.length : EASY_INITIAL_WINDOW_SIZE)), [entries, showAll])
   const windowOffset = entries.length - recent.length
-  const visibleItems = useMemo(() => mergeBashToolResultItems(recent, windowOffset).filter(item => !isHiddenJsonlNoiseEntry(item.entry)), [recent, windowOffset])
+  const visibleItems = useMemo(() => mergeBashToolResultItems(filterDisplayDuplicates(recent), windowOffset).filter(item => !isHiddenJsonlNoiseEntry(item.entry)), [recent, windowOffset])
   const { preItems, rounds } = useMemo(() => buildRounds(visibleItems), [visibleItems])
   const easyRounds = useMemo(() => buildEasyJsonlRounds(rounds, preItems), [rounds, preItems])
   const displayTotal = typeof total === 'number' && total > entries.length ? total : entries.length

@@ -12,7 +12,6 @@ import { NewSessionModal } from './modals'
 import { FileTreeLevel, OpenInVSCodeButton, type DirState, type Entry } from './project-files'
 import { WebTerminalModal, type WebTerminalMode } from './web-terminal-modal'
 import { SessionJsonlPanel } from './session-jsonl-panel'
-import { useVisibleJsonl } from './session-jsonl-filter'
 import { JsonlCopyButton } from './viewer/JsonlCopyButton'
 import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
@@ -1355,16 +1354,13 @@ function HeaderActionButton({
 // (原始数据 / 隐藏次要 / 显示时间与序号)
 // =====================================================================
 function ChatHeaderOverflowMenu({
-  jsonlCount, minorCount, hideMinor, onToggleHideMinor, onOpenRaw,
+  jsonlCount, onOpenRaw,
   showJsonlMeta, onToggleShowJsonlMeta,
   autoUrgentOnEnter, onToggleAutoUrgentOnEnter,
   onStop, canStop,
   onViewScheduledTasks,
 }: {
   jsonlCount: number
-  minorCount: number
-  hideMinor: boolean
-  onToggleHideMinor: () => void
   onOpenRaw: () => void
   showJsonlMeta: boolean
   onToggleShowJsonlMeta: () => void
@@ -1412,11 +1408,6 @@ function ChatHeaderOverflowMenu({
             onClick={() => { setOpen(false); onOpenRaw() }}>
             <span>原始 JSONL 数据</span>
             {jsonlCount > 0 && <span className="text-[10px] text-[var(--text-muted)]">{jsonlCount}</span>}
-          </button>
-          <button className={itemClass} disabled={jsonlCount === 0}
-            onClick={() => { setOpen(false); onToggleHideMinor() }}>
-            <span>{hideMinor ? '显示次要条目' : '隐藏次要条目'}</span>
-            {minorCount > 0 && <span className="text-[10px] text-[var(--text-muted)]">{minorCount}</span>}
           </button>
           <button className={itemClass}
             onClick={() => { setOpen(false); onToggleAutoUrgentOnEnter() }}>
@@ -2716,8 +2707,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const voiceRecordFailedRef = useRef(false)
   const voiceStopTimerRef = useRef<number | null>(null)
   const voiceTickTimerRef = useRef<number | null>(null)
-  // 默认隐藏次要条目 (last-prompt / title / agent-name / permission / 连续重复 entry / 连续等摘要 entry / task_started 生命周期事件)
-  const [hideMinorJsonl, setHideMinorJsonl] = useState(true)
   // 默认隐藏 jsonl 卡片标题里的"序号 + 时间"前缀; 开启后才显示 #序号 和 MM-DD HH:MM:SS.
   const [showJsonlMeta, setShowJsonlMeta] = useState(false)
   // Cursor 式工具调用展示: 工具卡显示状态图标 (⏳/✅/❌) + 连续探索类自动聚合为 "已探索 N 个工具". 默认开启.
@@ -2762,8 +2751,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       ? '正在转写并发送语音'
       : '语音输入'
 
-  // 次要条目过滤: 普通 SSE append 走增量快路径; 切 session / 加载全部 / 切过滤开关时完整重算.
-  const { visibleJsonl, minorCount } = useVisibleJsonl(jsonlEntries, hideMinorJsonl)
 
   // 状态唯一真相源: 后端 GET /api/sessions/:id/status.
   //   alive   = hub.isAlive       — 进程存活 (TUI 可接收输入)
@@ -4674,9 +4661,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           {/* … 溢出菜单: 把 "原始数据 / 隐藏次要条目" 收纳进来 */}
           <ChatHeaderOverflowMenu
             jsonlCount={jsonlEntries.length}
-            minorCount={minorCount}
-            hideMinor={hideMinorJsonl}
-            onToggleHideMinor={() => setHideMinorJsonl(v => !v)}
             onOpenRaw={() => setShowRaw(true)}
             showJsonlMeta={showJsonlMeta}
             onToggleShowJsonlMeta={() => setShowJsonlMeta(v => !v)}
@@ -4751,7 +4735,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           endRef={endRef}
           historySnapshot={historySnapshot || EMPTY_HISTORY_SNAPSHOT_FALLBACK}
           historyStore={historyStore}
-          visibleJsonl={visibleJsonl}
+          visibleJsonl={jsonlEntries}
           jsonlEmptyLoadingText={jsonlEmptyLoadingText}
           jsonlInitialLoading={jsonlInitialLoading}
           showJsonlMeta={showJsonlMeta}

@@ -128,8 +128,23 @@ export function isNoResponseRequestedEntry(entry: AnyEntry): boolean {
   return assistantResponseText(entry?.message?.content).trim() === 'No response requested.'
 }
 
+// 对话内容类型白名单: 只有这些 type 的条目可能进入卡片视图.
+// 白名单之外的任何 type (file-history-snapshot / last-prompt / mode / permission-mode /
+// ai-title / queue-operation / 未来新增的任何元数据类型) 一律整卡隐藏 —
+// 旧"次要条目(可切换)"层已并入本谓词, 不再有开关.
+const MAJOR_JSONL_TYPES = new Set([
+  'user', 'assistant', 'attachment', 'system',
+  'session_meta', 'turn_context', 'event_msg', 'response_item', 'error',
+])
+
+// codex 的任务启动生命周期标记, 对浏览对话内容无价值.
+export function isTaskStartedEvent(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg' && entry?.payload?.type === 'task_started'
+}
+
 // jsonl 卡片视图里"整卡过滤隐藏"的噪声 entry 集合: 对浏览对话内容无价值的系统注入/元数据噪声.
 // 集中在此一处, viewer/JsonlView 的 visibleItems 过滤只调本谓词, 以后新增噪声类型往这里加即可.
+//   - 非白名单类型        : file-history-snapshot / last-prompt / mode / permission-mode / ai-title / queue-operation ...
 //   - token_count         : codex 每轮 token 用量统计 (event_msg)
 //   - environment_context : codex 每轮注入的 <environment_context> 系统 user 消息
 //   - session_meta        : codex 会话首条元数据 (含巨大 base_instructions 系统提示词)
@@ -143,6 +158,8 @@ export function isNoResponseRequestedEntry(entry: AnyEntry): boolean {
 //                            model "<synthetic>", 本地生成非模型输出; 同源的 API Error 卡保留)
 export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
   return (
+    !MAJOR_JSONL_TYPES.has(entry?.type as string) ||
+    isTaskStartedEvent(entry) ||
     isTokenCountEvent(entry) ||
     isEnvironmentContextEntry(entry) ||
     isSessionMetaEntry(entry) ||

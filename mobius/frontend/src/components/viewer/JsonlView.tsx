@@ -16,6 +16,7 @@ import { mergeBashToolResultItems } from './entry-extract'
 import { collectResolvedCallIds } from './tool-status'
 import { RoundGroup } from './RoundGroups'
 import { isHiddenJsonlNoiseEntry } from './entry-classify'
+import { filterDisplayDuplicates } from './display-dedup'
 import { computeCollapsedByForgottenFlag } from './fold-rules'
 import { buildTaskPlans } from './task-progress'
 import type { HistorySnapshot, SessionHistoryStore } from '../../services/agent-history-store'
@@ -90,7 +91,8 @@ function findItemInRounds(rounds: Round[], uuid: string | null | undefined, ts: 
 // 组条目 → 渲染流水线 (与旧版整列表流水线相同, 逐组独立跑; lineNo = 组基址 + 组内序).
 function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo: number): Round {
   const windowed = entries.length > GROUP_ENTRY_WINDOW ? entries.slice(-GROUP_ENTRY_WINDOW) : entries
-  const merged = mergeBashToolResultItems(windowed, baseLineNo)
+  const deduped = filterDisplayDuplicates(windowed)
+  const merged = mergeBashToolResultItems(deduped, baseLineNo)
   const visible = merged.filter((item) => !isHiddenJsonlNoiseEntry(item.entry))
   return { roundNum, items: visible.map((item, index) => ({ ...item, relIdx: index })) }
 }
