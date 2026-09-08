@@ -84,7 +84,9 @@ type LiveDebugSnapshot = {
   jsonlCount: number
   tail: LiveDebugTailEntry[]
   lastEntry: LiveDebugTailEntry | null
-  lastTimestampProp: string | number | null
+  lastTimestampProp: string | null
+  lastTimestampEntryIndex: number | null
+  lastTimestampSource: 'timestamp' | 'created_at' | 'payload.timestamp' | 'message.created_at' | null
   parsedLastTimestampMs: number | null
   hasUsableTimestamp: boolean
   lastEntryAnyTimestamp: string | null
@@ -114,6 +116,29 @@ function parseDebugTimestamp(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null
   const ms = new Date(value as string | number).getTime()
   return Number.isFinite(ms) ? ms : null
+}
+
+function findLatestEntryTimestamp(entries: any[]): {
+  value: string | null
+  index: number | null
+  source: LiveDebugSnapshot['lastTimestampSource']
+} {
+  const candidates: Array<{ source: NonNullable<LiveDebugSnapshot['lastTimestampSource']>; get: (entry: any) => unknown }> = [
+    { source: 'timestamp', get: (entry) => entry?.timestamp },
+    { source: 'created_at', get: (entry) => entry?.created_at },
+    { source: 'payload.timestamp', get: (entry) => entry?.payload?.timestamp },
+    { source: 'message.created_at', get: (entry) => entry?.message?.created_at },
+  ]
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    for (const candidate of candidates) {
+      const value = candidate.get(entry)
+      if ((typeof value === 'string' || typeof value === 'number') && parseDebugTimestamp(value) !== null) {
+        return { value: String(value), index, source: candidate.source }
+      }
+    }
+  }
+  return { value: null, index: null, source: null }
 }
 
 function debugTailEntry(entry: any): LiveDebugTailEntry {
@@ -2800,12 +2825,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const shouldMount = standardVariant && alive && working
     const tail = jsonlEntries.slice(-5).map(debugTailEntry)
     const lastEntry = tail[tail.length - 1] || null
-    // 这必须与 ChatArea 传给 SessionJsonlPanel/JsonlLiveTailCard 的值保持一致：
-    // 当前实现只使用最后一条 entry 的顶层 timestamp。
-    const rawLastTimestamp = jsonlEntries[jsonlEntries.length - 1]?.timestamp
-    const lastTimestampProp = typeof rawLastTimestamp === 'string' || typeof rawLastTimestamp === 'number'
-      ? rawLastTimestamp
-      : null
+    // 与 ChatArea 传给 SessionJsonlPanel/JsonlLiveTailCard 的值保持一致：
+    // 从尾部向前找最近一个带可解析时间的 entry，跳过无时间戳的元数据 entry。
+    const latestTimestamp = findLatestEntryTimestamp(jsonlEntries)
+    const lastTimestampProp = latestTimestamp.value
     const parsedLastTimestampMs = parseDebugTimestamp(lastTimestampProp)
     const hasUsableTimestamp = !!parsedLastTimestampMs
     const lastEntryAnyTimestamp = lastEntry
@@ -2818,9 +2841,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     if (!alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
     if (!working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
     if (jsonlEntries.length === 0) reasons.push('jsonlEntries 为空')
-    if (jsonlEntries.length > 0 && !lastTimestampProp) reasons.push('最后一条 entry 没有顶层 timestamp')
-    if (lastTimestampProp && !hasUsableTimestamp) reasons.push('最后一条顶层 timestamp 无法解析')
-    if (lastEntryAnyTimestamp && !lastTimestampProp) reasons.push(`最后一条 entry 仍有其他时间字段：${lastEntryAnyTimestamp}`)
+    if (jsonlEntries.length > 0 && !lastTimestampProp) reasons.push('所有 JSONL entry 都没有可解析时间戳')
+    if (jsonlEntries.length > 0 && latestTimestamp.index !== null && latestTimestamp.index !== jsonlEntries.length - 1 && lastEntryAnyTimestamp === null) {
+      reasons.push(`最后一条 entry 无时间戳，已回退到第 ${latestTimestamp.index! + 1} 条 entry 的 ${latestTimestamp.source} 时间`)
+    }
     if (cardWouldReturnNull) reasons.push('父级门槛满足，但 JsonlLiveTailCard 因 silenceSec=null 返回 null')
     if (shouldMount && hasUsableTimestamp) reasons.push('代码路径应当挂载 LIVE；若页面仍不可见，请检查 DOM/CSS 或渲染层')
     if (reasons.length === 0) reasons.push('没有发现隐藏原因')
@@ -2836,6 +2860,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       tail,
       lastEntry,
       lastTimestampProp,
+      lastTimestampEntryIndex: latestTimestamp.index,
+      lastTimestampSource: latestTimestamp.source,
       parsedLastTimestampMs,
       hasUsableTimestamp,
       lastEntryAnyTimestamp,
@@ -4967,7 +4993,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           backendWorking={backendWorking}
           backendPid={backendPid}
           realTimeInfo={backendRealTimeInfo}
-          lastTimestamp={jsonlEntries[jsonlEntries.length - 1]?.timestamp}
+          lastTimestamp={liveDebugSnapshot.lastTimestampProp}
           hasNewMessages={hasNewMessages}
           onLoadAllJsonl={handleLoadAllJsonl}
           onLoadRoundDetail={loadRoundJsonlDetail}
