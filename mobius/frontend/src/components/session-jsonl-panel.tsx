@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { lazy, memo, Suspense, useMemo, useRef, useState, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import type { SessionHistoryStore } from '../services/agent-history-store'
@@ -87,21 +87,22 @@ function SessionJsonlPanelInner({
   const historySnapshot = useHistorySnapshotOf(historyStore)
   // URL 中的 match/ts 会在首次精确滚动完成后被上层清理，命中视觉反馈不能随之消失。
   // 面板本地保留本次目标，直到切换到另一份 historyStore（即离开当前会话）。
-  const [highlightTarget, setHighlightTarget] = useState<{ uuid: string | null; ts: string | null } | null>(null)
-  useEffect(() => {
-    if (scrollToEntryUuid || scrollToMatchTs) {
-      setHighlightTarget({ uuid: scrollToEntryUuid || null, ts: scrollToMatchTs || null })
-    }
-  }, [scrollToEntryUuid, scrollToMatchTs])
+  const highlightTargetRef = useRef<{ uuid: string | null; ts: string | null } | null>(null)
   const previousStoreRef = useRef(historyStore)
-  useEffect(() => {
-    if (previousStoreRef.current !== historyStore) {
-      previousStoreRef.current = historyStore
-      setHighlightTarget(null)
-    }
-  }, [historyStore])
-  const effectiveScrollToEntryUuid = scrollToEntryUuid || highlightTarget?.uuid || null
-  const effectiveScrollToMatchTs = scrollToMatchTs || highlightTarget?.ts || null
+  // Keep the target synchronously while rendering. The parent removes match/ts as soon as
+  // scrolling completes; a passive effect here can lose a frame (and the highlight) when
+  // that URL cleanup races the initial target capture.
+  if (previousStoreRef.current !== historyStore) {
+    // Do not discard a URL target during the normal null -> store initialization
+    // transition; clear only after an already-bound session is replaced.
+    if (previousStoreRef.current !== null) highlightTargetRef.current = null
+    previousStoreRef.current = historyStore
+  }
+  if (scrollToEntryUuid || scrollToMatchTs) {
+    highlightTargetRef.current = { uuid: scrollToEntryUuid || null, ts: scrollToMatchTs || null }
+  }
+  const effectiveScrollToEntryUuid = scrollToEntryUuid || highlightTargetRef.current?.uuid || null
+  const effectiveScrollToMatchTs = scrollToMatchTs || highlightTargetRef.current?.ts || null
   const visibleJsonl = useMemo(
     () => (historyStore ? historyStore.flattenEntries() : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps

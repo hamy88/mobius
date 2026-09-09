@@ -369,7 +369,10 @@ export function JsonlView({
         onAutoOpen={cb.open}
         onAutoClose={cb.close}
         onRetry={cb.retry}
-        forceOpen={block.key === extTarget?.key && extFocusLineNo !== null}
+        // Keep the owning group highlighted even when the exact card is still loading
+        // (or the target only resolved to group metadata). The card itself is marked once
+        // extFocusLineNo is known.
+        forceOpen={block.key === extTarget?.key}
         showMeta={showMeta}
         toolStatusMap={entries ? toolStatusMapFor(entries) : null}
         collapseLineNos={entries ? collapsedLineNosFor(entries, r.round.items) : undefined}
@@ -434,14 +437,18 @@ export function JsonlView({
         scrollOffset={activeTarget?.offset ?? 0}
         onScrollToKeyDone={() => {
           if (extTarget && extFocusLineNo !== null) return
-          if (extTarget) onResolvedRef.current?.()
-          setExtTarget(null)
+          if (extTarget) {
+            // URL cleanup must not clear the visual target: SessionJsonlPanel retains it
+            // for the lifetime of this history store, so loading/reflow cannot make the
+            // red group/card treatment disappear.
+            onResolvedRef.current?.()
+            return
+          }
           setInternalTarget(null)
         }}
         onScrollToEntryDone={() => {
           if (!extTarget || extFocusLineNo === null) return
           onResolvedRef.current?.()
-          setExtTarget(null)
           setInternalTarget(null)
         }}
       />
