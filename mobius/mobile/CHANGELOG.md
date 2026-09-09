@@ -3,6 +3,18 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.0] - 2026-09-09
+
+### 修复
+- **聊天内容无法长按选取复制**（Issue 96dd6585）：1v1 私聊与群聊气泡此前用 `pointerInput { detectTapGestures(onTap, onLongPress) }`，长按手势被外层 Box 消费，加上消息文本/ Markdown 未包 `SelectionContainer`，原生选区工具栏弹不出，长按只能触发手动「复制」按钮。
+  修复方案（最小 diff）：
+  - `MomoApp.kt:MessageRow` / `GroupMessageRow` 将外层 `detectTapGestures` 替换为 `Modifier.combinedClickable(interactionSource, indication = null, onClick, onLongClick)`，`onLongClick` 与 `SelectionContainer` 的选区手势并存，长按文本优先弹原生选区工具栏（选取/全选/复制），长按空白边距仍保留「复制/播放」按钮兜底。
+  - 消息正文（用户文本 / 助手 `MarkdownMessageBody`）统一包入 `SelectionContainer { ... }`，1v1 与群聊两条路径都已覆盖。
+- 同步把 `androidApp/build.gradle.kts` 的 `versionCode=21` / `versionName="0.2.0"`，覆盖安装时系统可识别。
+
+### 已知限制
+- 本地环境无 Android SDK platforms（仅 build-tools）+ gradle 8.8 分发下载慢，`./gradlew :androidApp:assembleRelease` 未能跑完。0.2.0 双 ABI APK 由 GitHub Actions `build-all-formats`（手动触发）补打。
+
 ## [0.1.7] - 2026-07-28
 
 首个 GitHub Release。

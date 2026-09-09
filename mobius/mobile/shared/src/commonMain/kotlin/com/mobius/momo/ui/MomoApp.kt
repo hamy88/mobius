@@ -17,6 +17,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -58,6 +59,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -1640,6 +1642,7 @@ private fun MessageRow(
                     // 消息框无 border(用户要求纯背景色); 仅语音播报时给 accent 高亮边。
                     val bubbleBorderWidth = if (isSpeaking) 1.5.dp else 0.dp
                     val bubbleBorder = if (isSpeaking) bubbleBorderColor else Color.Transparent
+                    val bubbleInteraction = remember(message.id) { MutableInteractionSource() }
                     Box(
                         modifier = Modifier
                             .scale(bubbleScale.coerceAtLeast(1f))
@@ -1648,20 +1651,22 @@ private fun MessageRow(
                             .background(
                                 if (isUser) SolidColor(theme.accentPrimary.copy(alpha = 0.16f)) else SolidColor(theme.bubbleMomo),
                             )
-                            .pointerInput(message.id) {
-                                detectTapGestures(
-                                    onTap = {
-                                        // 点击气泡: 收起键盘 + 停止"其他"消息的语音(正在播放的本条不停止, 便于看内容)。
-                                        hideKeyboard()
-                                        if (speakingMessageId != null && speakingMessageId != message.id) onStopSpeaking()
-                                        showActions = false
-                                    },
-                                    onLongPress = {
-                                        showActions = !showActions
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
-                                )
-                            }
+                            .combinedClickable(
+                                interactionSource = bubbleInteraction,
+                                indication = null,
+                                onClick = {
+                                    // 点击气泡: 收起键盘 + 停止"其他"消息的语音(正在播放的本条不停止, 便于看内容)。
+                                    hideKeyboard()
+                                    if (speakingMessageId != null && speakingMessageId != message.id) onStopSpeaking()
+                                    showActions = false
+                                },
+                                onLongClick = {
+                                    // 长按在文本上由 SelectionContainer 接管, 弹出原生选区工具栏(选取复制);
+                                    // 此处保留"复制/播放"操作菜单作为兜底(例如长按空白边距时)。
+                                    showActions = !showActions
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                            )
                             .padding(horizontal = if (isUser) 14.dp else 16.dp, vertical = if (isUser) 10.dp else 12.dp),
                     ) {
                         if (!isUser) {
@@ -1676,34 +1681,38 @@ private fun MessageRow(
                             Spacer(Modifier.width(2.dp))
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(MomoSpacing.sm)) {
-                            if (isUser) {
-                                Text(
-                                    message.text,
-                                    color = theme.accentPrimary.copy(alpha = if (theme.dark) 0.92f else 1f),
-                                    style = momoTextStyle(MomoTypography.body),
-                                )
-                                if (imagePreviews.isNotEmpty()) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(MomoSpacing.sm)) {
-                                        imagePreviews.forEachIndexed { _, bytes ->
-                                            val bitmap = rememberDecodedImage(bytes)
-                                            if (bitmap != null) {
-                                                Image(
-                                                    bitmap = bitmap,
-                                                    contentDescription = "图片附件",
-                                                    contentScale = ContentScale.Crop,
-                                                    modifier = Modifier
-                                                        .size(96.dp)
-                                                        .clip(RoundedCornerShape(MomoCorners.medium)),
-                                                )
+                            // SelectionContainer 让长按文本触发原生选区工具栏(选取/全选/复制);
+                            // 同时外部气泡的 onLongClick 仍保留"复制"按钮兜底(命中空白边距时)。
+                            SelectionContainer {
+                                if (isUser) {
+                                    Text(
+                                        message.text,
+                                        color = theme.accentPrimary.copy(alpha = if (theme.dark) 0.92f else 1f),
+                                        style = momoTextStyle(MomoTypography.body),
+                                    )
+                                    if (imagePreviews.isNotEmpty()) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(MomoSpacing.sm)) {
+                                            imagePreviews.forEachIndexed { _, bytes ->
+                                                val bitmap = rememberDecodedImage(bytes)
+                                                if (bitmap != null) {
+                                                    Image(
+                                                        bitmap = bitmap,
+                                                        contentDescription = "图片附件",
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(96.dp)
+                                                            .clip(RoundedCornerShape(MomoCorners.medium)),
+                                                    )
+                                                }
                                             }
                                         }
                                     }
+                                } else {
+                                    MarkdownMessageBody(
+                                        content = message.text,
+                                        theme = theme,
+                                    )
                                 }
-                            } else {
-                                MarkdownMessageBody(
-                                    content = message.text,
-                                    theme = theme,
-                                )
                             }
                             // 续条: 时间戳放进气泡内(右下角小字), 段间不再有时间戳横条 → 整组读作一个整体。
                             if (!isUser && continuation) {
@@ -6270,30 +6279,35 @@ private fun GroupMessageRow(
                     )
                     .clip(bubbleShape)
                     .background(if (alignRight) theme.bubbleBg else theme.bubbleMomo)
-                    .pointerInput(message.id) {
-                        detectTapGestures(
-                            onTap = {
-                                // 点击气泡: 收起键盘 + 停止"其他"消息的语音(正在播放的本条不停止, 便于看内容)。
-                                hideKeyboard()
-                                if (speakingMessageId != null && speakingMessageId != "group-${message.id}") onStopSpeaking()
-                                showActions = false
-                            },
-                            onLongPress = {
-                                showActions = !showActions
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            },
-                        )
-                    }
+                    .combinedClickable(
+                        interactionSource = remember(message.id) { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {
+                            // 点击气泡: 收起键盘 + 停止"其他"消息的语音(正在播放的本条不停止, 便于看内容)。
+                            hideKeyboard()
+                            if (speakingMessageId != null && speakingMessageId != "group-${message.id}") onStopSpeaking()
+                            showActions = false
+                        },
+                        onLongClick = {
+                            // 长按文本由 SelectionContainer 接管弹原生选区; 此处保留操作菜单兜底。
+                            showActions = !showActions
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        },
+                    )
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {
-                if (alignRight) {
-                    Text(
-                        message.content,
-                        color = Color.White,
-                        style = momoTextStyle(MomoTypography.body),
-                    )
-                } else {
-                    MarkdownMessageBody(content = message.content, theme = theme)
+                // SelectionContainer 让长按文本触发原生选区工具栏(选取/全选/复制);
+                // 外层 combinedClickable.onLongClick 保留作为"操作菜单"兜底(命中空白边距时)。
+                SelectionContainer {
+                    if (alignRight) {
+                        Text(
+                            message.content,
+                            color = Color.White,
+                            style = momoTextStyle(MomoTypography.body),
+                        )
+                    } else {
+                        MarkdownMessageBody(content = message.content, theme = theme)
+                    }
                 }
             }
             if (isFetching) {
