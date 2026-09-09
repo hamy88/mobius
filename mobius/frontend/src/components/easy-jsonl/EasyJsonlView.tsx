@@ -150,8 +150,8 @@ export default function EasyJsonlView({
   const recent = useMemo(() => entries.slice(-(showAll ? entries.length : EASY_INITIAL_WINDOW_SIZE)), [entries, showAll])
   const windowOffset = entries.length - recent.length
   const visibleItems = useMemo(() => mergeBashToolResultItems(recent, windowOffset).filter(item => !isHiddenJsonlNoiseEntry(item.entry)), [recent, windowOffset])
-  const { rounds } = useMemo(() => buildRounds(visibleItems), [visibleItems])
-  const easyRounds = useMemo(() => buildEasyJsonlRounds(rounds), [rounds])
+  const { preItems, rounds } = useMemo(() => buildRounds(visibleItems), [visibleItems])
+  const easyRounds = useMemo(() => buildEasyJsonlRounds(rounds, preItems), [rounds, preItems])
   const displayTotal = typeof total === 'number' && total > entries.length ? total : entries.length
   const hasRemoteMore = typeof total === 'number' && total > entries.length
   const targetHandledRef = useRef('')

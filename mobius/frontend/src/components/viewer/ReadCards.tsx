@@ -8,6 +8,7 @@ import { useMemo, useState } from 'react'
 import { splitDiffValue, basename } from './utils'
 import { ResultTextPreview } from './text-preview'
 import { JsonlCopyButton } from './JsonlCopyButton'
+import { JsonlDownloadButton } from './JsonlDownloadButton'
 import type { ReadToolCall, BashToolResult } from './types'
 
 export function JsonEntryReadCalls({ calls, results = [] }: { calls: ReadToolCall[]; results?: BashToolResult[] }) {
@@ -57,6 +58,7 @@ function ReadCallCard({ call, index, results = [] }: { call: ReadToolCall; index
             {meta}
           </span>
         )}
+        <JsonlDownloadButton filePath={call.filePath} />
         <JsonlCopyButton
           copied={copied}
           title="复制文件路径到剪贴板"

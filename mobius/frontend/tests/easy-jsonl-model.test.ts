@@ -140,7 +140,31 @@ function userEntry(text: string, lineNo: number) {
     { entry: { type: 'event_msg', payload: { type: 'agent_message', message: '镜像正文兜底' } } as AnyEntry, lineNo: 2 },
   )
   assert.equal(rounds[0].assistantResponse, '镜像正文兜底')
-  console.log('7. event 镜像兜底: passed')
+console.log('7. event 镜像兜底: passed')
+
+// ── 7b. 首轮前的线程配置事件也应进入简易模式活动轨 ──
+{
+  const settings: JsonlViewItem = {
+    entry: {
+      type: 'event_msg',
+      payload: {
+        type: 'thread_settings_applied',
+        thread_settings: {
+          model: 'gpt-5.6-sol',
+          model_provider_id: 'mobiusdefaultaabb',
+          approval_policy: 'never',
+        },
+      },
+    },
+    lineNo: 1,
+  }
+  const firstRound = userEntry('继续处理', 2)
+  const grouped = buildRounds([settings, firstRound])
+  const roundsWithSettings = buildEasyJsonlRounds(grouped.rounds, grouped.preItems)
+  assert.equal(roundsWithSettings.length, 1)
+  assert.ok(roundsWithSettings[0].activities.some(activity => activity.summary?.includes('模型 gpt-5.6-sol')))
+  console.log('7b. thread_settings_applied 活动可见: passed')
+}
 }
 
 // ── 8. 纯函数直接测试: 最终正文不含 compactText 省略号 ──

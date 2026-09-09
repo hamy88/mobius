@@ -56,6 +56,9 @@ export const READ_TOOL_THEME: CardTheme = { dot: 'bg-sky-400', border: 'border-s
 // 在长列表里需要一眼可扫, 复用 yellow (gold) 与 start.py 同色但 label 区分.
 export const CONTEXT_COMPACTED_THEME: CardTheme = { ...START_PY_THEME, label: '压缩' }
 
+// Codex 线程配置生效事件。用 amber 表示配置/生命周期状态，同时与上下文压缩的“压缩”标签区分。
+export const THREAD_SETTINGS_APPLIED_THEME: CardTheme = { ...TYPE_THEME.system, label: '配置' }
+
 // 特例: Claude assistant 最终结束消息. 复用 system/turn_duration 的 amber gold 主题,
 // 让 stop_reason:"end_turn" 的卡片在长列表中和轮次耗时卡片一样容易扫到.
 export const ASSISTANT_END_TURN_THEME: CardTheme = { ...TYPE_THEME.system, label: '结束' }

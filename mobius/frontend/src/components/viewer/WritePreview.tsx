@@ -6,6 +6,7 @@
 import { useMemo } from 'react'
 import { splitDiffValue, basename } from './utils'
 import { CodePreviewRows, WRITE_PREVIEW_LINE_LIMIT } from './text-preview'
+import { JsonlDownloadButton } from './JsonlDownloadButton'
 import type { WriteToolCall } from './types'
 
 export function JsonEntryWritePreview({ writeCall }: { writeCall: WriteToolCall }) {
@@ -27,6 +28,7 @@ export function JsonEntryWritePreview({ writeCall }: { writeCall: WriteToolCall 
         <span className="flex-shrink-0 rounded border border-[var(--border-color)] px-1.5 py-0.5 font-mono text-[var(--text-muted)]">
           {writeCall.lineCount} lines
         </span>
+        <JsonlDownloadButton filePath={writeCall.filePath} />
       </div>
       <div className="max-h-[34rem] overflow-auto">
         <div className="min-w-max py-1 font-mono text-[11px] leading-[1.45]">
