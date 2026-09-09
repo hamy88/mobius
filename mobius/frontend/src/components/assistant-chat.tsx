@@ -4010,7 +4010,7 @@ export function AssistantChat() {
                 </span>
               </div>
 
-              <div ref={logRef} className="assistant-session-log">
+              <div ref={logRef} className="assistant-session-log" tabIndex={0}>
                 {loading && sessions.length === 0 && visiblePendingTurns.length === 0 ? (
                   <div className="assistant-session-placeholder">正在读取小莫会话...</div>
                 ) : sessions.length === 0 && visiblePendingTurns.length === 0 ? (

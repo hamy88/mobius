@@ -6,8 +6,11 @@ import './index.css'
 // 字体走相对路径, Vite 本地化打包, 不连外部 CDN; 仅引入一次, 全局生效。
 import 'katex/dist/katex.min.css'
 import { installStaleChunkHandler } from './services/handle-stale-chunk'
+import { installWheelFastScroll } from './services/wheel-fast-scroll'
 
 installStaleChunkHandler()
+// Alt+滚轮 = 长内容快速滚动 (每 notch 25% 视口); 普通滚动不受影响
+installWheelFastScroll()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

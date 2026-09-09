@@ -1666,13 +1666,25 @@ button {
   border-right-color: transparent;
 }
 
-/* ===== 滚动条 (单一来源; 各处滚动条都走这套, 主题色见 :root --scrollbar-thumb) ===== */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+/* ===== 滚动条 (单一来源; 各处滚动条都走这套, 主题色见 :root --scrollbar-thumb) =====
+   加粗为可抓取拖动的经典滑块: 长内容(聊天/jsonl 流)用鼠标滚轮慢, 直接拖滑块最快。
+   10px 宽 + border 内缩 (视觉细但抓取区是整条宽), hover 加深提示可拖。 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 999px; }
-::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
-/* Firefox 等价: thin + themed color (Chrome/Safari 走上面的 ::-webkit-scrollbar) */
-* { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent; /* 视觉内缩, 实际抓取区仍是整条 10px */
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-thumb-hover); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background-color: var(--scrollbar-thumb-hover); }
+/* Firefox 等价: auto = 粗滑块可拖 (thin 太细难抓) */
+* { scrollbar-width: auto; scrollbar-color: var(--scrollbar-thumb) transparent; }
+
+/* 滚动容器获焦点 (键盘 Home/End/PageUp 快速定位) 不显示轮廓, 仅点击处淡光提示 */
+.mobius-chat-history:focus-visible,
+.assistant-session-log:focus-visible { outline: none; }
 
 /* ===== 流式光标 ===== */
 .streaming-cursor::after {

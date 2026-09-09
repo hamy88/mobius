@@ -84,6 +84,7 @@ function SessionJsonlPanelInner({
       <div
         className="flex-1 overflow-y-auto relative"
         ref={chatContainerRef}
+        tabIndex={0}
         onScroll={(e) => {
           const el = e.currentTarget
           const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
