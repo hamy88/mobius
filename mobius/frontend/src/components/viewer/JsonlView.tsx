@@ -20,6 +20,14 @@ import { filterDisplayDuplicates } from './display-dedup'
 import { computeCollapsedByForgottenFlag } from './fold-rules'
 import { buildTaskPlans } from './task-progress'
 import type { HistorySnapshot, SessionHistoryStore } from '../../services/agent-history-store'
+
+// 逐组状态机转移回调 (身份稳定, 供 RoundGroup memo 判等).
+interface GroupCallbacks {
+  toggle: () => void
+  open: () => void
+  close: () => void
+  retry: () => void
+}
 import {
   ROUND_HEADER_PALETTES,
   ROUND_HEADER_PALETTE_STORAGE_KEY,
@@ -96,6 +104,13 @@ function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo
   const visible = merged.filter((item) => !isHiddenJsonlNoiseEntry(item.entry))
   return { roundNum, items: visible.map((item, index) => ({ ...item, relIdx: index })) }
 }
+
+// 每组渲染结果按 entries 数组身份记忆 (SSE 只让收数据的组换数组身份):
+// 快照每变一次, 只有真正收到新数据的组重跑流水线, 其余组直接复用上一代的 Round —
+// 连带 toolStatusMap/taskPlans 等下游 WeakMap 缓存与卡片 memo 的 prop 身份全部保持稳定.
+interface CachedRound { seq: number; base: number; round: Round }
+const roundByEntries = new WeakMap<AnyEntry[], CachedRound>()
+const EMPTY_GROUP_ENTRIES: AnyEntry[] = []
 
 // ── 逐组派生数据的 WeakMap 缓存 (items 数组在快照 rev 不变时引用稳定) ─────────
 
@@ -184,13 +199,27 @@ export function JsonlView({
 
   // 组 → Round: 条目已加载才建 items; 未加载 = 零条目驻留, 只渲染元数据头.
   // lineNo 组基址累加, 保证跨组唯一 (搜索跳转按 data-jsonl-line-no 全局查询).
+  // 逐组缓存 (roundByEntries): 命中条件 = 同一 entries 数组 + 同 seq + 同基址
+  // (前面某组条数变了会推 base, 后续组 lineNo 失效 → 自动重建).
   const rounds = useMemo(() => {
     let baseLineNo = 0
     return groups.map((meta) => {
-      const entries = snapshot.entriesByGroup.get(meta.id) || []
-      const round = entries.length > 0 ? buildRoundFromEntries(entries, meta.seq, baseLineNo) : { roundNum: meta.seq, items: [] as any[] }
+      const entries = snapshot.entriesByGroup.get(meta.id) || EMPTY_GROUP_ENTRIES
+      const state = (snapshot.groupRuntime.get(meta.id)?.state) || 'closed'
+      let round: Round
+      if (entries.length === 0) {
+        round = { roundNum: meta.seq, items: [] as any[] }
+      } else {
+        const hit = roundByEntries.get(entries)
+        if (hit && hit.seq === meta.seq && hit.base === baseLineNo) {
+          round = hit.round
+        } else {
+          round = buildRoundFromEntries(entries, meta.seq, baseLineNo)
+          roundByEntries.set(entries, { seq: meta.seq, base: baseLineNo, round })
+        }
+      }
       baseLineNo += entries.length
-      return { meta, round, state: (snapshot.groupRuntime.get(meta.id)?.state) || 'closed', entries }
+      return { meta, round, state, entries }
     })
   }, [snapshot]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -264,12 +293,30 @@ export function JsonlView({
     }))
   }, [rounds])
 
+  // 逐组回调缓存: 身份跨渲染稳定, 是 RoundGroup memo 生效的前提 (store 换实例时整体作废).
+  const groupCbRef = useRef<{ store: SessionHistoryStore | null; map: Map<string, GroupCallbacks> }>({ store: null, map: new Map() })
+  if (groupCbRef.current.store !== store) groupCbRef.current = { store, map: new Map() }
+  const groupCallbacksOf = (gid: string): GroupCallbacks => {
+    let c = groupCbRef.current.map.get(gid)
+    if (!c) {
+      c = {
+        toggle: () => { store?.toggleGroup(gid) },
+        open: () => { store?.openGroup(gid, 'auto') },
+        close: () => { store?.closeGroup(gid, 'auto') },
+        retry: () => { store?.retryGroup(gid) },
+      }
+      groupCbRef.current.map.set(gid, c)
+    }
+    return c
+  }
+
   const renderBlock = (block: JsonlRenderBlock) => {
     if (block.kind !== 'round') return null
     const r = rounds[block.index]
     if (!r) return null
     const entries = r.entries.length > 0 ? r.entries : null
     const rt = snapshot.groupRuntime.get(r.meta.id)
+    const cb = groupCallbacksOf(r.meta.id)
     return (
       <RoundGroup
         round={r.round}
@@ -282,10 +329,10 @@ export function JsonlView({
         failed={!!rt?.lastError}
         // resident = ② 已到货 (数据驻留), 与条目数无关: 加载出的空组走"空提醒"而非永转加载.
         resident={snapshot.entriesByGroup.has(r.meta.id)}
-        onUserToggle={() => store?.toggleGroup(r.meta.id)}
-        onAutoOpen={() => store?.openGroup(r.meta.id, 'auto')}
-        onAutoClose={() => store?.closeGroup(r.meta.id, 'auto')}
-        onRetry={() => store?.retryGroup(r.meta.id)}
+        onUserToggle={cb.toggle}
+        onAutoOpen={cb.open}
+        onAutoClose={cb.close}
+        onRetry={cb.retry}
         forceOpen={block.key === extTarget?.key && extFocusLineNo !== null}
         showMeta={showMeta}
         toolStatusMap={entries ? toolStatusMapFor(entries) : null}

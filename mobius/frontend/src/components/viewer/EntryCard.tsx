@@ -65,8 +65,8 @@ import {
   jsonEntryTourTarget,
 } from './entry-classify'
 import { buildHeaderSummary, resolveTaskHeaderSummary } from './header-summary'
-import { deriveToolCallStatus, TOOL_STATUS_META } from './tool-status'
-import type { ToolStatusMap, ToolStatus } from './tool-status'
+import { TOOL_STATUS_META } from './tool-status'
+import type { ToolStatus } from './tool-status'
 import { estimateRenderChars, estimateToolResultsChars, clampNodeForRender, clampToolResults } from './oversized'
 import { KeyNode } from './KeyNode'
 import { JsonEntryCodeDiff } from './CodeDiff'
@@ -164,7 +164,7 @@ function resolveDesiredOpen(opts: {
 /**
  * 单条 entry 卡片. type 决定颜色, 摘要行展示关键内容 (供快速扫).
  */
-function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], toolStatusMap, taskPlan }: {
+function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], toolStatus, taskPlan }: {
   entry: AnyEntry
   lineNo?: number
   // forceOpen: 搜索命中该卡 — 用户显式查看, 优先级最高, 压过 parentOrderedCollapse 与用户曾手动折叠.
@@ -178,7 +178,9 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   dense?: boolean
   bashResults?: BashToolResult[]
   readResults?: BashToolResult[]
-  toolStatusMap?: ToolStatusMap | null
+  // 已派生的每卡工具状态 ('running' | 'success' | 'error' | null). 父层 toolStatusOf
+  // 按 (entry, map) 记忆后传入 — primitive prop, SSE 新数据不再让内容未变的卡重渲染.
+  toolStatus?: ToolStatus | null
   // 任务工具 (TaskCreate/TaskUpdate) 的跨条目累积快照 (JsonlView 顶层扫描产出,
   // anchor uuid → PlanUpdate). 与 update_plan / task_reminder 共用计划卡片视图.
   taskPlan?: PlanUpdate | null
@@ -303,8 +305,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   // 用户手动折叠 → onToggle 写回 state, 此后重渲染不再强制掀开 (字段模式也不会被自动掀开).
   const tourTarget = jsonEntryTourTarget(entry)
 
-  // 工具调用状态: 由 "该 tool_use 的结果是否已落地" 推导 (running = 已发起未回结果).
-  const toolStatus = deriveToolCallStatus(entry, toolStatusMap)
+  // 工具调用状态: 父层预算好的每卡状态 (原为组级 map + 此处派生, 身份传染已消除).
 
   // 系统期望 open — 所有展开/折叠条件集中在上方的 resolveDesiredOpen 判定.
   const desiredOpen = resolveDesiredOpen({
@@ -542,7 +543,34 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   )
 }
 
+// ── memo 判等辅助: 引用先比, 内容后比 ──────────────────────────────────────
+// bashResults/readResults/taskPlan 每代流水线都重建对象 (merge 从零分配), 引用判等会
+// 让内容未变的卡全量重渲染; 这里做深度受限的内容判等 (记录字段是扁平结构, 值多为
+// 直接取自 entry 的引用, 引用快路径通常直接命中).
+function contentEqual(a: unknown, b: unknown, depth: number): boolean {
+  if (a === b) return true
+  if (depth <= 0 || a === null || b === null) return false
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) { if (!contentEqual(a[i], b[i], depth - 1)) return false }
+    return true
+  }
+  if (typeof a !== 'object' || typeof b !== 'object') return false
+  const ka = Object.keys(a as object)
+  const kb = Object.keys(b as object)
+  if (ka.length !== kb.length) return false
+  for (const k of ka) { if (!contentEqual((a as any)[k], (b as any)[k], depth - 1)) return false }
+  return true
+}
+
+function toolResultsEqual(a: BashToolResult[] | undefined, b: BashToolResult[] | undefined): boolean {
+  if (a === b) return true
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) { if (!contentEqual(a[i], b[i], 3)) return false }
+  return true
+}
+
 export const JsonEntryCard = memo(
   JsonEntryCardInner,
-  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && prev.bashResults === next.bashResults && prev.readResults === next.readResults && prev.toolStatusMap === next.toolStatusMap && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && prev.taskPlan === next.taskPlan,
+  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && toolResultsEqual(prev.bashResults, next.bashResults) && toolResultsEqual(prev.readResults, next.readResults) && prev.toolStatus === next.toolStatus && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && contentEqual(prev.taskPlan, next.taskPlan, 4),
 )

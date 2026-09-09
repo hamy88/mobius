@@ -597,14 +597,14 @@ export function getHistoryStore(sid: string): SessionHistoryStore {
 // ── React 绑定 ───────────────────────────────────────────────────────────
 
 function noopSubscribe() { return () => {} }
+function emptySnapshot() { return EMPTY_SNAPSHOT }
 
-export function useAgentHistory(sid: string): SessionHistoryStore | null {
+/**
+ * 持有 store + 生命周期 (缓存水合 → ① 协商), 但不订阅快照 —
+ * 调用组件不随每条数据到达而重渲染 (订阅下沉到真正消费数据的子组件).
+ */
+export function useAgentHistoryStore(sid: string): SessionHistoryStore | null {
   const store = useMemo(() => (sid ? getHistoryStore(sid) : null), [sid])
-  const snapshot = useSyncExternalStore(
-    store ? store.subscribe : noopSubscribe,
-    store ? store.getSnapshot : () => EMPTY_SNAPSHOT,
-  )
-  void snapshot
   useEffect(() => {
     if (!store) return
     let cancelled = false
@@ -614,5 +614,40 @@ export function useAgentHistory(sid: string): SessionHistoryStore | null {
     }).catch(() => {})
     return () => { cancelled = true }
   }, [store])
+  return store
+}
+
+/** 订阅快照 (生命周期由 useAgentHistoryStore 负责; 本钩子纯订阅, 供面板等子组件用). */
+export function useHistorySnapshotOf(store: SessionHistoryStore | null): HistorySnapshot {
+  return useSyncExternalStore(
+    store ? store.subscribe : noopSubscribe,
+    store ? store.getSnapshot : emptySnapshot,
+  )
+}
+
+/** primitive selector: 已加载条目数 (原样计数, 含被展示层过滤隐藏的). 返回值变化才重渲染. */
+export function useLoadedEntryCount(store: SessionHistoryStore | null): number {
+  return useSyncExternalStore(
+    store ? store.subscribe : noopSubscribe,
+    store ? () => {
+      let n = 0
+      for (const g of store.groups) n += store.entriesByGroup.get(g.id)?.length || 0
+      return n
+    } : () => 0,
+  )
+}
+
+/** primitive selector: 全部条目数 (组元数据 entry_count 之和). */
+export function useTotalEntryCount(store: SessionHistoryStore | null): number {
+  return useSyncExternalStore(
+    store ? store.subscribe : noopSubscribe,
+    store ? () => store.groups.reduce((n, g) => n + (g.entry_count || 0), 0) : () => 0,
+  )
+}
+
+/** 兼容旧名: 订阅 + 生命周期一体 (会让调用组件随每条数据重渲染, 新代码请用上面两个). */
+export function useAgentHistory(sid: string): SessionHistoryStore | null {
+  const store = useAgentHistoryStore(sid)
+  void useHistorySnapshotOf(store)
   return store
 }

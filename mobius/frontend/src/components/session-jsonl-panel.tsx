@@ -1,27 +1,55 @@
-import { lazy, memo, Suspense, type RefObject } from 'react'
+import { lazy, memo, Suspense, useMemo, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
-import type { HistorySnapshot } from '../services/agent-history-store'
+import type { SessionHistoryStore } from '../services/agent-history-store'
+import { useHistorySnapshotOf } from '../services/agent-history-store'
 
 const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
+
+// ── 最新可解析时间戳 (LIVE 卡锚点 / 诊断用). 从尾部向前找, 跳过无时间戳的元数据条目. ──
+// 从 chat.tsx 迁入 (Chat 不再订阅快照, 摊平条目的派生消费集中到本面板).
+function parseDebugTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const ms = new Date(value as string | number).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+export function findLatestEntryTimestamp(entries: any[]): {
+  value: string | null
+  index: number | null
+  source: string | null
+} {
+  const candidates: Array<{ source: string; get: (entry: any) => unknown }> = [
+    { source: 'timestamp', get: (entry) => entry?.timestamp },
+    { source: 'created_at', get: (entry) => entry?.created_at },
+    { source: 'payload.timestamp', get: (entry) => entry?.payload?.timestamp },
+    { source: 'message.created_at', get: (entry) => entry?.message?.created_at },
+  ]
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    for (const candidate of candidates) {
+      const value = candidate.get(entry)
+      if ((typeof value === 'string' || typeof value === 'number') && parseDebugTimestamp(value) !== null) {
+        return { value: String(value), index, source: candidate.source }
+      }
+    }
+  }
+  return { value: null, index: null, source: null }
+}
 
 type SessionJsonlPanelProps = {
   currentProjectId: string
   chatContainerRef: RefObject<HTMLDivElement>
   endRef: RefObject<HTMLDivElement>
-  // agent-history-store 快照 + store 实例 (视图只发状态机转移意图).
-  historySnapshot: HistorySnapshot
-  historyStore: import('../services/agent-history-store').SessionHistoryStore | null
-  // 简易视图仍吃摊平的已加载条目 (组结构对它是轮次列表, 派生自同一 store).
-  visibleJsonl: any[]
-  jsonlEmptyLoadingText: string
-  jsonlInitialLoading: boolean
+  // agent-history-store 实例 (快照订阅在本面板内部 — Chat 不随每条数据重渲染).
+  historyStore: SessionHistoryStore | null
+  // 空会话占位文案的状态输入 (文案规则见下, 由 Chat 的会话状态派生).
+  derivedStatus: string
   showJsonlMeta: boolean
   backendAlive: boolean | null
   backendWorking: boolean | null
   backendPid: number | null
   realTimeInfo?: string
-  lastTimestamp?: string | null
   hasNewMessages: boolean
   onScrollPositionChange: (userScrolledUp: boolean) => void
   onJumpToBottom: () => void
@@ -38,17 +66,13 @@ function SessionJsonlPanelInner({
   currentProjectId,
   chatContainerRef,
   endRef,
-  historySnapshot,
   historyStore,
-  visibleJsonl,
-  jsonlEmptyLoadingText,
-  jsonlInitialLoading,
+  derivedStatus,
   showJsonlMeta,
   backendAlive,
   backendWorking,
   backendPid,
   realTimeInfo,
-  lastTimestamp,
   hasNewMessages,
   onScrollPositionChange,
   onJumpToBottom,
@@ -59,6 +83,23 @@ function SessionJsonlPanelInner({
   easyExpandAllSignal,
   variant = 'standard',
 }: SessionJsonlPanelProps) {
+  // 订阅下沉: 快照/摊平条目/派生值都在本组件内算, Chat 只递 store.
+  const historySnapshot = useHistorySnapshotOf(historyStore)
+  const visibleJsonl = useMemo(
+    () => (historyStore ? historyStore.flattenEntries() : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [historyStore, historySnapshot.rev],
+  )
+  const jsonlInitialLoading = !historySnapshot.negotiated && historySnapshot.groups.length === 0 && !historySnapshot.error
+  // 空会话占位文案: pending(刚发消息等创建进程) / running(agent 在跑等首条输出) 时给 loading 文案,
+  // 由 JsonlView 配 spinner 显示; idle/waiting(终态空, 不会有数据自动到来) 时留空.
+  const jsonlEmptyLoadingText = visibleJsonl.length === 0
+    ? (derivedStatus === 'pending'
+        ? (backendAlive ? '智能体进程已创建，联络中' : '正在创建智能体进程，请稍等')
+        : derivedStatus === 'running' ? '智能体工作中，等待输出…' : '')
+    : ''
+  const lastTimestamp = useMemo(() => findLatestEntryTimestamp(visibleJsonl).value, [visibleJsonl])
+
   return (
     <div data-tour="session-jsonl-view" className="mobius-chat-history flex min-w-0 flex-1 flex-col">
       <div

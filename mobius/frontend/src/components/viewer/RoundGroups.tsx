@@ -7,10 +7,11 @@
  *  - RoundGroup: 一个对话轮次 (1 条 user 问题 + N 条 agent 回复); 最新两轮默认展开,
  *    更早的轮在跌出最新两轮时自动折叠, 用户手动操作过的轮尊重用户.
  */
-import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { Fragment, memo, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Search } from 'lucide-react'
 import type { AnyEntry, BashToolResult, JsonlViewItem, Round, RoundItem } from './types'
-import type { ToolStatusMap } from './tool-status'
+import type { ToolStatus, ToolStatusMap } from './tool-status'
+import { deriveToolCallStatus } from './tool-status'
 import { groupExploreItems, type ExploreRenderItem } from './explore-group'
 import { entryDisplayImages, entryReadImagePaths, entryUserAttachmentImages } from './entry-extract'
 import { buildHeaderSummary } from './header-summary'
@@ -19,7 +20,18 @@ import { DisplayImagesCard } from './DisplayImages'
 import type { TaskPlanByUuid } from './task-progress'
 import type { RoundHeaderPalette } from './round-header-palette'
 
-export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResults = [], forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, toolStatusMap, taskPlans }: {
+// 每卡工具状态 (组级 map 的预派生值): 按 (entry 身份, map 身份) 记忆.
+// 传 primitive 给卡片 → SSE 新数据只换 map 身份, 内容未变的卡拿到同一字符串, memo 保持.
+const statusCacheByEntry = new WeakMap<AnyEntry, { map: ToolStatusMap | null | undefined; status: ToolStatus | null }>()
+function toolStatusOf(entry: AnyEntry, map: ToolStatusMap | null | undefined): ToolStatus | null {
+  const hit = statusCacheByEntry.get(entry)
+  if (hit && hit.map === map) return hit.status
+  const status = deriveToolCallStatus(entry, map)
+  statusCacheByEntry.set(entry, { map, status })
+  return status
+}
+
+export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResults = [], forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, toolStatus, taskPlans }: {
   entry: AnyEntry
   lineNo: number
   bashResults?: BashToolResult[]
@@ -30,7 +42,8 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
   parentOrderedCollapse?: boolean
   showMeta?: boolean
   dense?: boolean
-  toolStatusMap?: ToolStatusMap | null
+  // 已派生的每卡工具状态 ('running' | 'success' | 'error' | null), 见 toolStatusOf.
+  toolStatus?: ToolStatus | null
   // 任务工具跨条目累积快照 (anchor uuid → PlanUpdate), 按卡片 uuid 取值透传给计划视图.
   taskPlans?: TaskPlanByUuid | null
 }) {
@@ -47,7 +60,7 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
   const uuid = typeof entry?.uuid === 'string' ? entry.uuid : null
   return (
     <>
-      <JsonEntryCard entry={entry} lineNo={lineNo} forceOpen={forceOpen} parentOrderedCollapse={parentOrderedCollapse} showMeta={showMeta} dense={dense} bashResults={bashResults} readResults={readResults} toolStatusMap={toolStatusMap} taskPlan={(uuid && taskPlans) ? taskPlans.get(uuid) ?? null : null} />
+      <JsonEntryCard entry={entry} lineNo={lineNo} forceOpen={forceOpen} parentOrderedCollapse={parentOrderedCollapse} showMeta={showMeta} dense={dense} bashResults={bashResults} readResults={readResults} toolStatus={toolStatus} taskPlan={(uuid && taskPlans) ? taskPlans.get(uuid) ?? null : null} />
       {imgs.length > 0 && <DisplayImagesCard images={imgs} lineNo={lineNo} sourceLabel={sourceLabel} />}
     </>
   )
@@ -92,7 +105,7 @@ export function ExploreGroupCard({ items, hasError, showMeta = true, toolStatusM
               bashResults={item.bashResults}
               readResults={item.readResults}
               showMeta={showMeta}
-              toolStatusMap={toolStatusMap}
+              toolStatus={toolStatusOf(item.entry, toolStatusMap)}
               forceOpen={item.lineNo === focusLineNo}
               parentOrderedCollapse={collapseLineNos?.has(item.lineNo)}
               taskPlans={taskPlans}
@@ -144,7 +157,7 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
                 ...
               </span>
               <div className="flex-1 min-w-0">
-                <EntryCardWithImages entry={entry} lineNo={lineNo} bashResults={bashResults} readResults={readResults} showMeta={showMeta} toolStatusMap={toolStatusMap} forceOpen={lineNo === focusLineNo} parentOrderedCollapse={collapseLineNos?.has(lineNo)} taskPlans={taskPlans} />
+                <EntryCardWithImages entry={entry} lineNo={lineNo} bashResults={bashResults} readResults={readResults} showMeta={showMeta} toolStatus={toolStatusOf(entry, toolStatusMap)} forceOpen={lineNo === focusLineNo} parentOrderedCollapse={collapseLineNos?.has(lineNo)} taskPlans={taskPlans} />
               </div>
             </div>
           ))}
@@ -157,7 +170,8 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
 // 受控组件: 开合状态来自 store 的组状态机 (closed/open-*), 本组件只发转移意图.
 // 自动规则: 用户没插手过 (sticky=false) 时跟随"末两轮展开"自动开合;
 // 用户点过一次后 sticky=true, 自动规则永不再接管. 展开即加载由 store 状态机保证.
-export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; showMeta?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
+// memo: 未收数据的组全部 prop 身份稳定 (round 缓存 + 回调缓存 + map 缓存), 整组跳过重渲染.
+function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; showMeta?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
   const autoOpen = isLast || isSecondLast
   // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
@@ -271,7 +285,7 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, open, stick
                       bashResults={item.bashResults}
                       readResults={item.readResults}
                       showMeta={showMeta}
-                      toolStatusMap={toolStatusMap}
+                      toolStatus={toolStatusOf(item.entry, toolStatusMap)}
                       forceOpen={item.lineNo === focusLineNo}
                       parentOrderedCollapse={collapseLineNos?.has(item.lineNo)}
                       taskPlans={taskPlans}
@@ -286,3 +300,5 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, open, stick
     </div>
   )
 }
+
+export const RoundGroup = memo(RoundGroupInner)

@@ -17,7 +17,8 @@ import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
 import { AnnouncePcButton } from './announce-pc-button'
 import { isGuidedDemoSession, patchGuidedDemoSessionCompleted } from '../services/guided-demo'
-import { useAgentHistory, type HistorySnapshot } from '../services/agent-history-store'
+import { useAgentHistoryStore, useHistorySnapshotOf, useLoadedEntryCount, useTotalEntryCount, type SessionHistoryStore } from '../services/agent-history-store'
+import { findLatestEntryTimestamp } from './session-jsonl-panel'
 import {
   preloadSessionInputCache,
   prependSessionInputCache,
@@ -117,34 +118,86 @@ function parseDebugTimestamp(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null
 }
 
-// 无会话时的空快照 (panel 需要 snapshot 形状).
-const EMPTY_HISTORY_SNAPSHOT_FALLBACK: HistorySnapshot = {
-  rev: 0, sessionVersion: 0, groups: [], entriesByGroup: new Map(),
-  groupRuntime: new Map(), error: null, negotiated: false,
+// ── 历史快照的"轻消费点"小组件 (Chat 本体不订阅快照, 见 useAgentHistoryStore) ──
+// 计数槽 (render-prop): 只随已加载/总条数变化重渲染, 供 header / 溢出菜单等.
+function JsonlCountSlot({ store, children }: { store: SessionHistoryStore | null; children: (loaded: number, total: number) => React.ReactNode }) {
+  const loaded = useLoadedEntryCount(store)
+  const total = useTotalEntryCount(store)
+  return <>{children(loaded, total)}</>
 }
 
-function findLatestEntryTimestamp(entries: any[]): {
-  value: string | null
-  index: number | null
-  source: LiveDebugSnapshot['lastTimestampSource']
-} {
-  const candidates: Array<{ source: NonNullable<LiveDebugSnapshot['lastTimestampSource']>; get: (entry: any) => unknown }> = [
-    { source: 'timestamp', get: (entry) => entry?.timestamp },
-    { source: 'created_at', get: (entry) => entry?.created_at },
-    { source: 'payload.timestamp', get: (entry) => entry?.payload?.timestamp },
-    { source: 'message.created_at', get: (entry) => entry?.message?.created_at },
-  ]
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index]
-    for (const candidate of candidates) {
-      const value = candidate.get(entry)
-      if ((typeof value === 'string' || typeof value === 'number') && parseDebugTimestamp(value) !== null) {
-        return { value: String(value), index, source: candidate.source }
-      }
+// 新条目到达自动滚底 (null 渲染): 只随已加载条数变化; 消息/typing 触发的滚底仍由 Chat 自己的 effect 负责.
+function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp, onBlocked }: {
+  store: SessionHistoryStore | null
+  containerRef: React.RefObject<HTMLDivElement | null>
+  matchActiveRef: React.RefObject<boolean>
+  userScrolledUp: boolean
+  onBlocked: () => void
+}) {
+  const count = useLoadedEntryCount(store)
+  const stateRef = useRef({ userScrolledUp, onBlocked })
+  stateRef.current = { userScrolledUp, onBlocked }
+  useEffect(() => {
+    if (matchActiveRef.current) return
+    if (stateRef.current.userScrolledUp) {
+      stateRef.current.onBlocked()
+    } else {
+      requestAnimationFrame(() => {
+        const el = containerRef.current
+        if (el) el.scrollTop = el.scrollHeight
+      })
     }
-  }
-  return { value: null, index: null, source: null }
+  }, [count, containerRef, matchActiveRef])
+  return null
 }
+
+// 简易视图"加载/展开全部"控件: 计数来自 store, 信号/回调来自 Chat.
+function EasyLoadAllControls({ store, loading, onLoadAll, expandAllSignal }: {
+  store: SessionHistoryStore | null
+  loading: boolean
+  onLoadAll: () => void
+  expandAllSignal: number
+}) {
+  const loaded = useLoadedEntryCount(store)
+  const total = useTotalEntryCount(store)
+  return (
+    <>
+      {(total > loaded || (loaded > 200 && expandAllSignal === 0)) && (
+        <button
+          type="button"
+          className="easy-session-summary__action"
+          disabled={loading}
+          onClick={onLoadAll}
+          title={loading ? '正在加载全部对话' : total > loaded ? `加载全部对话（${total} 条）` : `展开全部对话（${loaded} 条）`}
+        >
+          {loading ? '加载中…' : total > loaded ? `加载全部 · ${total}` : `展开全部 · ${loaded}`}
+        </button>
+      )}
+      {loaded > 200 && expandAllSignal > 0 && (
+        <span className="easy-session-summary__complete">已加载全部</span>
+      )}
+    </>
+  )
+}
+
+// 原始 JSONL 弹窗的正文 (条目列表): 自订阅快照, 打开弹窗才随数据更新.
+function RawJsonlList({ store }: { store: SessionHistoryStore | null }) {
+  const snapshot = useHistorySnapshotOf(store)
+  const entries = useMemo(
+    () => (store ? store.flattenEntries() : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store, snapshot.rev],
+  )
+  if (entries.length === 0) {
+    return <div className="text-center text-[13px] py-8" style={{ color: 'var(--text-muted)' }}>暂无 JSONL 数据 (会话尚未产生输出)</div>
+  }
+  return (
+    <pre className="text-[11px] leading-relaxed p-5 m-0 whitespace-pre font-mono select-text" style={{ color: 'var(--text-secondary)' }}>
+      {entries.map((e: any, i: number) => `// #${i + 1}\n${JSON.stringify(e, null, 2)}`).join('\n\n')}
+    </pre>
+  )
+}
+
 
 function debugTailEntry(entry: any): LiveDebugTailEntry {
   const payload = entry?.payload
@@ -2658,23 +2711,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   // ── 历史存储 (协议 ①②③): 组元数据 + 按需组条目, agent-history-store 是唯一数据源 ──
+  // Chat 只持有 store + 生命周期, 不订阅快照 — SSE 数据到达不再触发整个组件重渲染;
+  // 订阅下沉到 SessionJsonlPanel / JsonlCountSlot / EntriesAutoScroll 等子组件.
   const sessionId = currentSession?.session_id || currentTask?.task_id || ''
-  const historyStore = useAgentHistory(sessionId)
+  const historyStore = useAgentHistoryStore(sessionId)
   const historyStoreRef = useRef(historyStore)
   historyStoreRef.current = historyStore
-  const historySnapshot = historyStore ? historyStore.getSnapshot() : null
-  // 摊平的已加载条目: 简易视图 / 次要过滤 / live 时间戳等派生消费 (未加载的组零条目驻留, 不参与).
-  const jsonlEntries = useMemo(
-    () => (historyStore && historySnapshot ? historyStore.flattenEntries() : []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [historyStore, historySnapshot?.rev],
-  )
-  const historyStats = useMemo(() => {
-    void historySnapshot?.rev
-    return historyStore ? historyStore.stats() : { loadedCount: 0, totalCount: 0 }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyStore, historySnapshot?.rev])
-  const jsonlInitialLoading = !historySnapshot?.negotiated && (historySnapshot?.groups.length ?? 0) === 0 && !historySnapshot?.error
   const [easyRoundCount, setEasyRoundCount] = useState(0)
   const [easyExpandAllSignal, setEasyExpandAllSignal] = useState(0)
   const [easyLoadingAll, setEasyLoadingAll] = useState(false)
@@ -2769,18 +2811,20 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // agent TUI 实时状态行 (如 "✻ Propagating… (7m 44s · ↓ 24.1k tokens)"), 给 LIVE 卡片.
   // 非 claude-code / 非 working 时为 "". 由 /status 轮询返回.
   const [backendRealTimeInfo, setBackendRealTimeInfo] = useState('')
-  const liveDebugSnapshotRef = useRef<LiveDebugSnapshot | null>(null)
-  const liveDebugSnapshot = useMemo<LiveDebugSnapshot>(() => {
+  // LIVE 卡诊断快照: 惰性构建 (Chat 不再订阅快照, 诊断命令触发时现取摊平条目).
+  const buildLiveDebugRef = useRef<(() => LiveDebugSnapshot | null) | null>(null)
+  buildLiveDebugRef.current = () => {
+    const jsonlEntriesNow = historyStoreRef.current?.flattenEntries() ?? []
     const variant: 'standard' | 'easy' = layout === 'easy' ? 'easy' : 'standard'
     const standardVariant = variant === 'standard'
     const alive = backendAlive === true
     const working = backendWorking === true
     const shouldMount = standardVariant && alive && working
-    const tail = jsonlEntries.slice(-5).map(debugTailEntry)
+    const tail = jsonlEntriesNow.slice(-5).map(debugTailEntry)
     const lastEntry = tail[tail.length - 1] || null
     // 与 ChatArea 传给 SessionJsonlPanel/JsonlLiveTailCard 的值保持一致：
     // 从尾部向前找最近一个带可解析时间的 entry，跳过无时间戳的元数据 entry。
-    const latestTimestamp = findLatestEntryTimestamp(jsonlEntries)
+    const latestTimestamp = findLatestEntryTimestamp(jsonlEntriesNow)
     const lastTimestampProp = latestTimestamp.value
     const parsedLastTimestampMs = parseDebugTimestamp(lastTimestampProp)
     const hasUsableTimestamp = !!parsedLastTimestampMs
@@ -2793,9 +2837,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     if (!standardVariant) reasons.push(`variant=${variant}（当前不是 standard 渲染分支）`)
     if (!alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
     if (!working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
-    if (jsonlEntries.length === 0) reasons.push('jsonlEntries 为空')
-    if (jsonlEntries.length > 0 && !lastTimestampProp) reasons.push('所有 JSONL entry 都没有可解析时间戳')
-    if (jsonlEntries.length > 0 && latestTimestamp.index !== null && latestTimestamp.index !== jsonlEntries.length - 1 && lastEntryAnyTimestamp === null) {
+    if (jsonlEntriesNow.length === 0) reasons.push('jsonlEntries 为空')
+    if (jsonlEntriesNow.length > 0 && !lastTimestampProp) reasons.push('所有 JSONL entry 都没有可解析时间戳')
+    if (jsonlEntriesNow.length > 0 && latestTimestamp.index !== null && latestTimestamp.index !== jsonlEntriesNow.length - 1 && lastEntryAnyTimestamp === null) {
       reasons.push(`最后一条 entry 无时间戳，已回退到第 ${latestTimestamp.index! + 1} 条 entry 的 ${latestTimestamp.source} 时间`)
     }
     if (cardWouldReturnNull) reasons.push('父级门槛满足，但 JsonlLiveTailCard 因 silenceSec=null 返回 null')
@@ -2809,12 +2853,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       backendAlive,
       backendWorking,
       parentGate: { standardVariant, alive, working, shouldMount },
-      jsonlCount: jsonlEntries.length,
+      jsonlCount: jsonlEntriesNow.length,
       tail,
       lastEntry,
       lastTimestampProp,
       lastTimestampEntryIndex: latestTimestamp.index,
-      lastTimestampSource: latestTimestamp.source,
+      lastTimestampSource: latestTimestamp.source as LiveDebugSnapshot['lastTimestampSource'],
       parsedLastTimestampMs,
       hasUsableTimestamp,
       lastEntryAnyTimestamp,
@@ -2822,13 +2866,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       reasons,
       generatedAt: new Date().toISOString(),
     }
-  }, [backendAlive, backendWorking, jsonlEntries, layout, sessionId])
-  liveDebugSnapshotRef.current = liveDebugSnapshot
+  }
 
   useEffect(() => {
     const previous = window.mobiusLiveDebug
     const debug = () => {
-      const snapshot = liveDebugSnapshotRef.current
+      const snapshot = buildLiveDebugRef.current?.()
       if (!snapshot) throw new Error('LIVE debug snapshot is not ready')
       const cards = Array.from(document.querySelectorAll<HTMLElement>('.jsonl-live-sweep'))
       const firstCard = cards[0]
@@ -3062,14 +3105,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const currentVscodeSubPath = (currentIssue as any)?.use_worktree && !backendWorktreeIgnored
     ? ((currentIssue as any)?.worktree_branch || (currentIssue as any)?.id)
     : null
-  // 空会话占位文案: pending(刚发消息等创建进程) / running(agent 在跑等首条输出) 时给 loading 文案,
-  // 由 JsonlView 配 spinner 显示; idle/waiting(终态空, 不会有数据自动到来) 时留空,
-  // 让 JsonlView 走静态"暂无对话内容"而非永久 spinner 误导用户"稍等就有".
-  const jsonlEmptyLoadingText = jsonlEntries.length === 0
-    ? (derivedStatus === 'pending'
-        ? (backendAlive ? '智能体进程已创建，联络中' : '正在创建智能体进程，请稍等')
-        : derivedStatus === 'running' ? '智能体工作中，等待输出…' : '')
-    : ''
+  // 空会话占位文案的规则搬进了 SessionJsonlPanel (它订阅快照, 能看到条目数); 这里只出状态输入.
   const hiddenBackendFailureAt = sessionId ? hiddenBackendFailureBefore[sessionId] : 0
   const backendFailureHiddenByKey = !!(sessionId && backendFailureKey && dismissedBackendFailureKeys[sessionId] === backendFailureKey)
   const backendFailureHiddenByTime = !!(
@@ -3995,10 +4031,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     }
   }, [currentSession?.session_id, currentTask?.task_id, loadHistory, connectEventStream])
 
-  // 卡片数量变化 (jsonlEntries.length) 时自动滚到末尾, 同时也覆盖原有 messages/stream/typing 触发.
-  // userScrolledUp=true 时不抢滚条, 改在顶部显示"新消息"按钮.
+  // 消息/流式/typing 触发的自动滚底 (条目数变化触发的滚底由 <EntriesAutoScroll> 承担,
+  // Chat 不订阅快照). userScrolledUp=true 时不抢滚条, 改在顶部显示"新消息"按钮.
   // 用 instant scroll (而非 smooth) + RAF: smooth 期间会持续触发 onScroll, 中间帧 distFromBottom>200
   // 会误把 userScrolledUp 翻成 true, 导致下一次 entry 抵达时不再自动滚.
+  // (userScrolledUp 故意不进依赖: 只在消息/typing 事件发生时读当时的值.)
   useEffect(() => {
     // 搜索结果跳转进行中时不抢滚条, 让 JsonlView 的 scrollToKey 把视图钉到命中卡片.
     if (matchTargetActiveRef.current) return
@@ -4010,7 +4047,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         if (el) el.scrollTop = el.scrollHeight
       })
     }
-  }, [messages, streamContent, isTyping, jsonlEntries.length])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, streamContent, isTyping])
 
   const handleJsonlScrollPositionChange = useCallback((nextUserScrolledUp: boolean) => {
     if (nextUserScrolledUp) {
@@ -4346,40 +4384,45 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   )
 
   const renderAdvancedSessionActions = (variant: 'default' | 'compact' | 'menu') => (
-    <AdvancedSessionActions
-      variant={variant}
-      sessionId={currentSession?.session_id || sessionId}
-      projectId={currentProjectId}
-      issueId={currentIssueId}
-      researchId={(currentSession as any)?.research_id}
-      vscodeSubPath={currentVscodeSubPath}
-      jsonlEntryCount={jsonlEntries.length}
-      showJsonlMeta={showJsonlMeta}
-      connectionReady={connectionStatus === 'connected'}
-      projectKnowledgeSending={projectKnowledgeSending}
-      onOpenFileChanges={() => setFileChangesOpen(true)}
-      onOpenBashCommands={() => setBashCommandsOpen(true)}
-      onOpenInputReplay={() => setInputReplayOpen(true)}
-      onToggleJsonlMeta={() => setShowJsonlMeta(value => !value)}
-      onRequestRunProject={sendRunProjectPortPrompt}
-      onOpenTerminal={() => setTerminalChoiceOpen(true)}
-      onOpenCooperablePc={() => setCooperablePcOpen(true)}
-      onOpenKnowledge={() => setKnowledgeEditorOpen(true)}
-      onOpenResearchGraph={currentResearchId ? () => {
-        setSearchParams((prev) => {
-          const next = new URLSearchParams(prev)
-          next.set('view', 'graph')
-          next.delete('match')
-          next.delete('ts')
-          return next
-        }, { replace: false })
-      } : undefined}
-      onSendProjectKnowledge={sendProjectKnowledgePrompt}
-      onContinueWithModel={() => setContinueModalOpen(true)}
-      onOpenSkill={() => setSkillMemoryModal('skill')}
-      onOpenMemory={() => setSkillMemoryModal('memory')}
-      onOpenGit={() => setSkillMemoryModal('git')}
-    />
+    // 计数槽: Chat 不订阅快照, 条目计数由小组件自取 (只在计数变化时重渲染这一小块).
+    <JsonlCountSlot store={historyStore}>
+      {(jsonlEntryCount) => (
+        <AdvancedSessionActions
+          variant={variant}
+          sessionId={currentSession?.session_id || sessionId}
+          projectId={currentProjectId}
+          issueId={currentIssueId}
+          researchId={(currentSession as any)?.research_id}
+          vscodeSubPath={currentVscodeSubPath}
+          jsonlEntryCount={jsonlEntryCount}
+          showJsonlMeta={showJsonlMeta}
+          connectionReady={connectionStatus === 'connected'}
+          projectKnowledgeSending={projectKnowledgeSending}
+          onOpenFileChanges={() => setFileChangesOpen(true)}
+          onOpenBashCommands={() => setBashCommandsOpen(true)}
+          onOpenInputReplay={() => setInputReplayOpen(true)}
+          onToggleJsonlMeta={() => setShowJsonlMeta(value => !value)}
+          onRequestRunProject={sendRunProjectPortPrompt}
+          onOpenTerminal={() => setTerminalChoiceOpen(true)}
+          onOpenCooperablePc={() => setCooperablePcOpen(true)}
+          onOpenKnowledge={() => setKnowledgeEditorOpen(true)}
+          onOpenResearchGraph={currentResearchId ? () => {
+            setSearchParams((prev) => {
+              const next = new URLSearchParams(prev)
+              next.set('view', 'graph')
+              next.delete('match')
+              next.delete('ts')
+              return next
+            }, { replace: false })
+          } : undefined}
+          onSendProjectKnowledge={sendProjectKnowledgePrompt}
+          onContinueWithModel={() => setContinueModalOpen(true)}
+          onOpenSkill={() => setSkillMemoryModal('skill')}
+          onOpenMemory={() => setSkillMemoryModal('memory')}
+          onOpenGit={() => setSkillMemoryModal('git')}
+        />
+      )}
+    </JsonlCountSlot>
   )
 
   return (
@@ -4510,20 +4553,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               <Sparkles className="easy-session-summary__icon" aria-hidden="true" />
               <span className="easy-session-summary__label">简易对话</span>
               <small>{easyRoundCount} 轮</small>
-              {(historyStats.totalCount > jsonlEntries.length || (jsonlEntries.length > 200 && easyExpandAllSignal === 0)) && (
-                <button
-                  type="button"
-                  className="easy-session-summary__action"
-                  disabled={easyLoadingAll}
-                  onClick={handleEasyLoadAll}
-                  title={easyLoadingAll ? '正在加载全部对话' : historyStats.totalCount > jsonlEntries.length ? `加载全部对话（${historyStats.totalCount} 条）` : `展开全部对话（${jsonlEntries.length} 条）`}
-                >
-                  {easyLoadingAll ? '加载中…' : historyStats.totalCount > jsonlEntries.length ? `加载全部 · ${historyStats.totalCount}` : `展开全部 · ${jsonlEntries.length}`}
-                </button>
-              )}
-              {jsonlEntries.length > 200 && easyExpandAllSignal > 0 && (
-                <span className="easy-session-summary__complete">已加载全部</span>
-              )}
+              <EasyLoadAllControls store={historyStore} loading={easyLoadingAll} onLoadAll={handleEasyLoadAll} expandAllSignal={easyExpandAllSignal} />
             </div>
           </div>
           <div className="flex flex-shrink-0 items-center gap-2">
@@ -4656,18 +4686,22 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               className="text-[11px] rounded-full px-2.5 py-0.5 border border-blue-500/20 text-blue-400 hover:bg-blue-500/10 transition-colors hidden md:inline-flex items-center gap-1.5 whitespace-nowrap"
             />
           )}
-          {/* … 溢出菜单: 把 "原始数据 / 隐藏次要条目" 收纳进来 */}
-          <ChatHeaderOverflowMenu
-            jsonlCount={jsonlEntries.length}
-            onOpenRaw={() => setShowRaw(true)}
-            showJsonlMeta={showJsonlMeta}
-            onToggleShowJsonlMeta={() => setShowJsonlMeta(v => !v)}
-            autoUrgentOnEnter={autoUrgentOnEnter}
-            onToggleAutoUrgentOnEnter={toggleAutoUrgentOnEnter}
-            onStop={handleStopSession}
-            canStop={!!sessionId}
-            onViewScheduledTasks={() => setScheduledTasksOpen(true)}
-          />
+          {/* … 溢出菜单: 把 "原始数据 / 隐藏次要条目" 收纳进来 (计数槽自取条数) */}
+          <JsonlCountSlot store={historyStore}>
+            {(jsonlCount) => (
+              <ChatHeaderOverflowMenu
+                jsonlCount={jsonlCount}
+                onOpenRaw={() => setShowRaw(true)}
+                showJsonlMeta={showJsonlMeta}
+                onToggleShowJsonlMeta={() => setShowJsonlMeta(v => !v)}
+                autoUrgentOnEnter={autoUrgentOnEnter}
+                onToggleAutoUrgentOnEnter={toggleAutoUrgentOnEnter}
+                onStop={handleStopSession}
+                canStop={!!sessionId}
+                onViewScheduledTasks={() => setScheduledTasksOpen(true)}
+              />
+            )}
+          </JsonlCountSlot>
         </div>
       </div>}
 
@@ -4726,22 +4760,19 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           窄屏改纵向堆叠 (见 index.css .mobius-chat-body).
           layout='stacked' 时附加 mobius-chat-body--stacked, 与视口无关地强制纵向堆叠 (代码对话模式). */}
       <div ref={chatBodyRef} className={`mobius-chat-body flex-1 flex min-h-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}`}>
-        {/* 左侧: JSONL 视图，自动占满右栏之外的剩余宽度。 */}
+        {/* 左侧: JSONL 视图，自动占满右栏之外的剩余宽度。
+            快照订阅在面板内部 (Chat 不随每条数据重渲染); 条目驱动的自动滚底由旁边的 EntriesAutoScroll 承担. */}
         <SessionJsonlPanel
           currentProjectId={currentProjectId}
           chatContainerRef={chatContainerRef}
           endRef={endRef}
-          historySnapshot={historySnapshot || EMPTY_HISTORY_SNAPSHOT_FALLBACK}
           historyStore={historyStore}
-          visibleJsonl={jsonlEntries}
-          jsonlEmptyLoadingText={jsonlEmptyLoadingText}
-          jsonlInitialLoading={jsonlInitialLoading}
+          derivedStatus={derivedStatus}
           showJsonlMeta={showJsonlMeta}
           backendAlive={backendAlive}
           backendWorking={backendWorking}
           backendPid={backendPid}
           realTimeInfo={backendRealTimeInfo}
-          lastTimestamp={liveDebugSnapshot.lastTimestampProp}
           hasNewMessages={hasNewMessages}
           onScrollPositionChange={handleJsonlScrollPositionChange}
           onJumpToBottom={jumpToJsonlBottom}
@@ -4751,6 +4782,13 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           onEasyRoundCountChange={handleEasyRoundCountChange}
           easyExpandAllSignal={easyExpandAllSignal}
           variant={layout === 'easy' ? 'easy' : 'standard'}
+        />
+        <EntriesAutoScroll
+          store={historyStore}
+          containerRef={chatContainerRef}
+          matchActiveRef={matchTargetActiveRef}
+          userScrolledUp={userScrolledUp}
+          onBlocked={() => setHasNewMessages(true)}
         />
 
         {/* 右侧: 输入区 (顶) + skill/memory editor (底). 整列竖向滚动. 窄屏整宽。 */}
@@ -5400,7 +5438,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
             <div className="px-5 py-3 border-b flex items-center gap-3 flex-shrink-0" style={{ borderColor: 'var(--border-color)' }}>
               <span className="text-[14px] font-semibold flex-1 min-w-0 flex items-baseline gap-2" style={{ color: 'var(--text-primary)' }}>
-                <span className="flex-shrink-0">原始 JSONL <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· 已载 {jsonlEntries.length}{historyStats.totalCount > jsonlEntries.length ? ` / ${historyStats.totalCount}` : ''} 条</span></span>
+                <span className="flex-shrink-0">原始 JSONL <JsonlCountSlot store={historyStore}>{(loaded, total) => (
+                  <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· 已载 {loaded}{total > loaded ? ` / ${total}` : ''} 条</span>
+                )}</JsonlCountSlot></span>
               </span>
               <JsonlCopyButton
                 copied={rawJsonlCopied}
@@ -5415,7 +5455,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                         await store.ensureGroupEntries(group.id)
                       }
                     }
-                    const entriesToCopy = historyStoreRef.current?.flattenEntries() ?? jsonlEntries
+                    const entriesToCopy = historyStoreRef.current?.flattenEntries() ?? []
                     await navigator.clipboard.writeText(entriesToCopy.map(e => JSON.stringify(e)).join('\n'))
                     setRawJsonlCopied(true)
                     setTimeout(() => setRawJsonlCopied(false), 1000)
@@ -5427,14 +5467,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 style={{ color: 'var(--text-secondary)' }}>关闭</button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              {jsonlEntries.length === 0 ? (
-                <div className="text-center text-[13px] py-8" style={{ color: 'var(--text-muted)' }}>暂无 JSONL 数据 (会话尚未产生输出)</div>
-              ) : (
-                <pre className="text-[11px] leading-relaxed p-5 m-0 whitespace-pre font-mono select-text"
-                  style={{ color: 'var(--text-secondary)' }}>
-                  {jsonlEntries.map((e, i) => `// #${i + 1}\n${JSON.stringify(e, null, 2)}`).join('\n\n')}
-                </pre>
-              )}
+              <RawJsonlList store={historyStore} />
             </div>
           </div>
         </div>

@@ -177,7 +177,9 @@ async function testChat() {
     ok(initialFrame.includes('http://mock.local/u/test-user/p/p1/i/i1'), 'web issue URL is always visible before session creation')
     stdin.write('你好'); await delay(30)
     stdin.write('\r'); await delay(80)
-    ok((lastFrame() ?? '').includes('第一个问题，正在初始化'), 'first query shows 第一个问题 instead of Working immediately after submit')
+    const firstQueryFrame = lastFrame() ?? ''
+    ok(firstQueryFrame.includes('第一个问题，正在初始化'), 'first query shows 第一个问题 instead of Working immediately after submit')
+    ok(firstQueryFrame.includes('首次处理可能耗时较长，请耐心等待'), 'first query explains that initialization may take longer')
     runtimeWorking = true
     await delay(820)   // createSession → connect → POST → emit
     runtimeWorking = false
