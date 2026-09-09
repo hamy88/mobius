@@ -1,5 +1,6 @@
 package com.mobius.momo.viewmodel
 
+import com.mobius.momo.data.ServerEntry
 import com.mobius.momo.data.TtsPlaybackMode
 import com.mobius.momo.data.Voice
 import com.mobius.momo.domain.ChatMessage
@@ -56,6 +57,7 @@ data class AuthState(
     val presetSheetOpen: Boolean = false,
     val passwordRequired: Boolean = false,
     val serverBaseUrl: String = "",
+    val serverEntries: List<ServerEntry> = emptyList(),
     val pushEnabled: Boolean = true,
     val ttsEnabled: Boolean = true,
     val ttsPlaybackMode: TtsPlaybackMode = TtsPlaybackMode.All,
@@ -166,6 +168,7 @@ fun UiState.toAuthState(): AuthState = AuthState(
     presetSheetOpen = presetSheetOpen,
     passwordRequired = passwordRequired,
     serverBaseUrl = serverBaseUrl,
+    serverEntries = serverEntries,
     pushEnabled = pushEnabled,
     ttsEnabled = ttsEnabled,
     ttsPlaybackMode = ttsPlaybackMode,

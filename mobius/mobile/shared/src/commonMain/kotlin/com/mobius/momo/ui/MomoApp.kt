@@ -165,6 +165,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.mobius.momo.data.TtsPlaybackMode
 import com.mobius.momo.data.TTS_SYSTEM_VOICE_ID
 import com.mobius.momo.data.RECOMMENDED_MOBIUS_BASE_URL
+import com.mobius.momo.data.ServerEntry
 import com.mobius.momo.data.Voice
 import com.mobius.momo.domain.ChatMessage
 import com.mobius.momo.data.formatBackendTime
@@ -839,11 +840,14 @@ private fun ProfileScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewModel
 @Composable
 private fun LoginScreen(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel) {
     val bg = if (theme.dark) theme.bgPrimary else theme.bgSecondary
+    // 0.3.0: 服务器地址列表可能有多条, 整页改为可滚动(小屏/列表长时登录按钮不被挤出屏)。
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(bg)
             .statusBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = MomoSpacing.xxl),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -881,7 +885,7 @@ private fun LoginScreen(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel
         PrimaryButton("登 录", state.loading, theme, vm::login)
         Spacer(Modifier.height(MomoSpacing.xxl))
         Text("忘记密码？请联系管理员重置", color = theme.textMuted, style = momoTextStyle(MomoTypography.subheadline))
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(MomoSpacing.xxxl))
     }
 }
 
@@ -909,6 +913,18 @@ private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: Momo
             )
         }
         Spacer(Modifier.height(MomoSpacing.sm))
+        // 已保存过服务器(登录成功自动记录)时: 选择器在上, 下方保留可编辑输入框(选中即回填)。
+        if (state.serverEntries.isNotEmpty()) {
+            ServerAddressPicker(
+                entries = state.serverEntries,
+                currentUrl = state.serverBaseUrl,
+                theme = theme,
+                onSelect = vm::selectServerEntry,
+                onRemove = vm::removeServerEntry,
+                onRename = vm::renameServerEntry,
+            )
+            Spacer(Modifier.height(MomoSpacing.md))
+        }
         MomoInput(
             value = state.serverBaseUrl,
             placeholder = RECOMMENDED_MOBIUS_BASE_URL,
@@ -919,7 +935,200 @@ private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: Momo
             onSubmit = vm::saveServerBaseUrl,
             onChange = vm::setServerBaseUrl,
         )
+        // 列表非空时给出提示: 输入框仍是权威入口(可改可存), 选择器只是快捷回填。
+        if (state.serverEntries.isNotEmpty()) {
+            Spacer(Modifier.height(MomoSpacing.xs))
+            Text(
+                "从上方列表选择, 或直接输入新地址",
+                color = theme.textMuted,
+                style = momoTextStyle(MomoTypography.caption),
+            )
+        }
     }
+}
+
+/**
+ * 登录页服务器地址选择器(0.3.0): 最近使用倒序的卡片列表。
+ * - 点击行: 选中并应用到输入框(走 vm.selectServerEntry, 与手输保存同路径)。
+ * - 左滑(SwipeToDismissBox EndToStart): 删除该地址。
+ * - 长按: 弹重命名对话框(label 备注名, 可空)。
+ */
+@Composable
+private fun ServerAddressPicker(
+    entries: List<ServerEntry>,
+    currentUrl: String,
+    theme: MomoTheme,
+    onSelect: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onRename: (String, String?) -> Unit,
+) {
+    var renameTarget by remember { mutableStateOf<ServerEntry?>(null) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(MomoCorners.medium))
+            .background(theme.inputBg)
+            .border(1.dp, theme.borderDefault, RoundedCornerShape(MomoCorners.medium)),
+    ) {
+        entries.forEachIndexed { index, entry ->
+            if (index > 0) HorizontalDivider(color = theme.borderDefault, thickness = 0.5.dp)
+            ServerAddressRow(
+                entry = entry,
+                selected = entry.url == currentUrl,
+                theme = theme,
+                onClick = { onSelect(entry.url) },
+                onRemove = { onRemove(entry.url) },
+                onRename = { renameTarget = entry },
+            )
+        }
+    }
+    renameTarget?.let { target ->
+        ServerRenameDialog(
+            entry = target,
+            theme = theme,
+            onConfirm = { label -> onRename(target.url, label) },
+            onDismiss = { renameTarget = null },
+        )
+    }
+}
+
+// 单条服务器地址行: 左滑删除 + 长按重命名, 点击选择(与 DeletableChatRow 同一交互范式)。
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ServerAddressRow(
+    entry: ServerEntry,
+    selected: Boolean,
+    theme: MomoTheme,
+    onClick: () -> Unit,
+    onRemove: () -> Unit,
+    onRename: () -> Unit,
+) {
+    val haptic = LocalHapticFeedback.current
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                onRemove()
+                true
+            } else {
+                false
+            }
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = { SwipeDeleteBackground(theme, "删除") },
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = true,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(if (selected) theme.accentPrimary.copy(alpha = 0.08f) else Color.Transparent)
+                .combinedClickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick,
+                    onLongClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onRename()
+                    },
+                )
+                .padding(horizontal = MomoSpacing.lg, vertical = MomoSpacing.md),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                if (entry.label.isNotBlank()) {
+                    Text(
+                        entry.label,
+                        color = theme.textPrimary,
+                        style = momoTextStyle(MomoTypography.body.copy(fontWeight = FontWeight.SemiBold)),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        entry.url,
+                        color = theme.textMuted,
+                        style = momoTextStyle(MomoTypography.caption),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    Text(
+                        entry.url,
+                        color = if (selected) theme.accentPrimary else theme.textPrimary,
+                        style = momoTextStyle(MomoTypography.body),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (selected) {
+                Spacer(Modifier.width(MomoSpacing.sm))
+                Text(
+                    "当前",
+                    color = theme.accentPrimary,
+                    style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)),
+                )
+            }
+        }
+    }
+}
+
+// 服务器地址重命名对话框: label 备注名可空(清空即恢复只显 URL)。
+@Composable
+private fun ServerRenameDialog(
+    entry: ServerEntry,
+    theme: MomoTheme,
+    onConfirm: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var label by remember(entry) { mutableStateOf(entry.label) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("重命名服务器", color = theme.textPrimary, style = momoTextStyle(MomoTypography.title.copy(fontWeight = FontWeight.Bold)))
+        },
+        text = {
+            Column {
+                Text(
+                    entry.url,
+                    color = theme.textMuted,
+                    style = momoTextStyle(MomoTypography.caption),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(MomoSpacing.md))
+                MomoInput(
+                    value = label,
+                    placeholder = "备注名(可空), 如: 公司测试机",
+                    theme = theme,
+                    minHeight = 44.dp,
+                    imeAction = ImeAction.Done,
+                    onSubmit = {
+                        onConfirm(label.trim())
+                        onDismiss()
+                    },
+                    onChange = { label = it },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onConfirm(label.trim())
+                onDismiss()
+            }) {
+                Text("保存", color = theme.accentPrimary, style = momoTextStyle(MomoTypography.body.copy(fontWeight = FontWeight.Bold)))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = theme.textMuted, style = momoTextStyle(MomoTypography.body))
+            }
+        },
+        containerColor = theme.bgSecondary,
+        titleContentColor = theme.textPrimary,
+        textContentColor = theme.textMuted,
+    )
 }
 
 @Composable

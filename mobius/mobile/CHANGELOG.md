@@ -3,6 +3,20 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.0] - 2026-09-09
+
+### 新增
+- **登录界面服务器地址列表选择器**（Issue e5a536be / 分身 #6）：多服务器用户切换免重输。
+  - 新增 `ServerAddressRepository`（`shared/.../data/ServerAddressRepository.kt`）：基于 `SecureStorage.savePreference/getPreference` 持久化（Android=EncryptedSharedPreferences、iOS=NSUserDefaults、desktop=java.util.prefs），刻意不引入新 expect/actual —— 三平台零样板复用同一 KV 通道；JSON 单 key 存整个列表，按 `lastUsedAt` 倒序。
+  - **登录成功后自动保存**当前服务器地址（`MomoAppViewModel.loginWith` 调 `addOrTouch`），无手动"+ 保存"按钮；再次登录同一地址仅刷新时间戳并置顶。
+  - 登录页列表非空时在服务器地址输入框上方显示 `ServerAddressPicker` 卡片列表：**点击行=选中应用**（走与手输保存相同的 `applyServerBaseUrlInput` 路径，含切换服务器清 token/重建 API）、**左滑=删除**（`SwipeToDismissBox`，与聊天列表删除同范式）、**长按=重命名**（`AlertDialog` 备注名 label，可空；设置后列表主显 label 副显 URL）。当前地址行高亮并标「当前」。
+  - 列表为空时保持原有纯输入框 UX 不变（首次使用零打扰）。
+  - 登录页整体改为 `verticalScroll + imePadding`：列表较长或小屏时账号/密码/登录按钮不被挤出屏幕。
+- 版本号：`extension.json` 0.3.0；`androidApp/build.gradle.kts` `versionCode=22` / `versionName="0.3.0"`。
+
+### 保留
+- 0.2.0 聊天长按选取复制修复（commit 271a219）不受影响；服务器地址列表行的 `combinedClickable` 复用同一 API 形态。
+
 ## [0.2.0] - 2026-09-09
 
 ### 修复

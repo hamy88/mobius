@@ -8,6 +8,8 @@ import com.mobius.momo.data.MobiusApi
 import com.mobius.momo.data.NotificationGateway
 import com.mobius.momo.data.PickedFile
 import com.mobius.momo.data.ReentrantLock
+import com.mobius.momo.data.ServerAddressRepository
+import com.mobius.momo.data.ServerEntry
 import com.mobius.momo.data.PROJECTS_LITE_MODE_KEY
 import com.mobius.momo.data.SERVER_BASE_URL_PREFERENCE
 import com.mobius.momo.data.GROUP_RELAY_OVERLAY_KEY
@@ -257,6 +259,8 @@ data class UiState(
     val ttsFetchingMessageId: String? = null,
     val passwordRequired: Boolean = false,
     val serverBaseUrl: String = "",
+    // 登录页「服务器地址列表」: 最近使用倒序。空 = 首次使用, 登录页回退为纯输入框。
+    val serverEntries: List<ServerEntry> = emptyList(),
     val streamingProcess: String? = null,
     // ===== 群聊 =====
     val conversations: List<ConversationSummary> = emptyList(),
@@ -331,6 +335,7 @@ class MomoAppViewModel(
     private val systemTtsEngine: TtsEngine = createSystemTtsEngine(),
     private val pushProvider: PushProvider = createPushProvider(),
     private val buildBaseUrl: String = platformBuildBaseUrl(),
+    private val serverAddressRepository: ServerAddressRepository = ServerAddressRepository(storage),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var currentBaseUrl = resolveMobiusBaseUrl(
@@ -422,6 +427,7 @@ class MomoAppViewModel(
     private val _state = MutableStateFlow(
         UiState(
             serverBaseUrl = currentBaseUrl,
+            serverEntries = serverAddressRepository.getAll(),
             selectedVoice = storage.getPreference(SECURE_PREF_SELECTED_VOICE) ?: TTS_SYSTEM_VOICE_ID,
             ttsPlaybackMode = TtsPlaybackMode.fromName(storage.getPreference(SECURE_PREF_TTS_PLAYBACK_MODE)),
             ttsEnabled = storage.getPreference(SECURE_PREF_TTS_ENABLED) != "0",
@@ -506,6 +512,27 @@ class MomoAppViewModel(
 
     fun saveServerBaseUrl() {
         if (applyServerBaseUrlInput()) showToast("服务器地址已保存")
+    }
+
+    // ===== 登录页「服务器地址列表」=====
+
+    /** 从列表选中一个地址: 应用为当前服务器(与手输保存同路径, 含切服清态)。 */
+    fun selectServerEntry(url: String) {
+        // 直接写 state(MutableStateFlow.value 立即可见), 保证紧随的 applyServerBaseUrlInput
+        // 读到的是新地址——setServerBaseUrl 走 _state.update 虽同为同步, 显式赋值意图更清晰。
+        _state.update { it.copy(serverBaseUrl = url, toast = null) }
+        if (applyServerBaseUrlInput()) serverAddressRepository.addOrTouch(url)
+        _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
+    }
+
+    fun removeServerEntry(url: String) {
+        serverAddressRepository.remove(url)
+        _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
+    }
+
+    fun renameServerEntry(url: String, label: String?) {
+        serverAddressRepository.rename(url, label)
+        _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
     }
 
     private fun applyServerBaseUrlInput(): Boolean {
@@ -671,6 +698,8 @@ class MomoAppViewModel(
             _state.update { it.copy(loading = true, toast = null) }
             runCatching {
                 val result = api.login(username, password)
+                // 登录成功 → 自动把当前服务器地址记入「最近使用」列表(无需手动保存)。
+                val touchedEntries = serverAddressRepository.addOrTouch(currentBaseUrl)
                 _state.update {
                     it.copy(
                         user = result.user,
@@ -678,6 +707,7 @@ class MomoAppViewModel(
                         loginStep = LoginStep.Password,
                         password = "",
                         loading = false,
+                        serverEntries = touchedEntries,
                     )
                 }
                 ensureSpeechPermission()

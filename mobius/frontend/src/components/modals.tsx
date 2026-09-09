@@ -3923,7 +3923,7 @@ function manifestToRows(manifest: DesktopManifest): DesktopDownloadRow[] {
 // Android APK 走本服务器同源静态目录 /mobile-builds/ (源目录 mobius/mobile-builds/,
 // 由 GitHub Actions build-all-formats 构建后下载回填), 登录用户直接下载;
 // 公网分发可另走 GitHub Release (mobile-v<version> pre-release, 匿名可下载)。
-const MOBILE_VERSION = '0.2.0'
+const MOBILE_VERSION = '0.3.0'
 // 同源下载前缀 (Express 静态服务直接指向 mobius/mobile-builds/)。
 const MOBILE_CDN_BASE = '/mobile-builds'
 // iOS 走 TestFlight 公开邀请链接: build 上传后在 App Store Connect → TestFlight 开启"公开链接",
@@ -3935,15 +3935,16 @@ const MOBILE_BUILDS: Array<{ label: string; sub: string; file: string; size: num
     label: 'Android',
     sub: 'arm64-v8a · 大多数现代手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-arm64.apk`,
-    size: 5024928,
-    sha256: 'cc37ffbd585a196df67bf29077827519bd485977d6af9b195325d14b3ccd934c',
+    // size/sha256 由 CI 产物落盘后回填(见 mobius/mobile-builds/manifest.json)。
+    size: 0,
+    sha256: '',
   },
   {
     label: 'Android',
     sub: 'armeabi-v7a · 老旧手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-armeabi-v7a.apk`,
-    size: 5032896,
-    sha256: 'fe82130a816b3cfb6feeac7ecd6e5e25a8914ff36d82fccb1ded23f3584763e0',
+    size: 0,
+    sha256: '',
   },
   {
     label: 'iOS',
@@ -4255,7 +4256,7 @@ export function MobileDownloadModal({ onClose }: { onClose: () => void }) {
               className="flex items-center justify-between px-4 py-3 rounded-xl transition-colors hover:opacity-90"
               style={{ background: 'var(--bg-card-hover)', border: '1px solid var(--border-color)' }}>
               <div className="flex items-center gap-3">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: theme !== 'light' ? '#cbd5e1' : '#475569' }}>
+                <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color: theme !== 'light' ? '#cbd5e1' : '#475569' }}>
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
                 </svg>
                 <div>

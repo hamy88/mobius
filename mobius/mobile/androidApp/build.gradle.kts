@@ -58,8 +58,9 @@ android {
         minSdk = 26
         targetSdk = 35
         // 0.2.0: 修复移动端聊天内容无法长按选取复制(SelectionContainer + combinedClickable)。
-        versionCode = 21
-        versionName = "0.2.0"
+        // 0.3.0: 登录界面服务器地址列表选择器(登录成功自动保存/左滑删除/长按重命名)。
+        versionCode = 22
+        versionName = "0.3.0"
         // 极光推送 AppKey / 渠道：JPush SDK 经 AndroidManifest meta-data(JPUSH_APPKEY) 读取。
         // 从 gradle.properties(或环境变量)读取；默认空串——未配置时 JPush 不注册，App 仍可正常构建运行。
         val jpushAppKey = providers.gradleProperty("MOMO_JPUSH_APPKEY")
