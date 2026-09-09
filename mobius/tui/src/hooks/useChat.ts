@@ -72,6 +72,11 @@ function entryKey(entry: AnyEntry): string | null {
 // 首次 bootstrap 拉取的末尾组数 (旧 SSE 尾部回放的等价物; 更早的组按需不拉,
 // TUI 是平铺字幕, 没有轮次展开概念, 末尾几组已覆盖活跃对话).
 const BOOTSTRAP_GROUP_COUNT = 3
+// A fresh session can spend several seconds creating the worker and loading
+// context before /status reports alive=true. Keep the first-turn indicator
+// visible during that bootstrap window instead of letting the short generic
+// hint expire and leaving the user with no feedback.
+const FIRST_TURN_BOOTSTRAP_GRACE_MS = 30_000
 
 /** Mini group store: 组序 + 水位线 (version) + 组内条目. */
 interface GroupSlot {
@@ -473,7 +478,8 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     setError(null)
     setPendingUser(body)
     statusEpochRef.current += 1
-    workingHintUntilRef.current = Date.now() + 2_000
+    const firstTurn = !sessionId && entries.length === 0
+    workingHintUntilRef.current = Date.now() + (firstTurn ? FIRST_TURN_BOOTSTRAP_GRACE_MS : 2_000)
     sendingRef.current = true
     updateTyping(true)
     setSending(true)
@@ -499,7 +505,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
       setSending(false)
       pollNowRef.current?.()
     }
-  }, [sending, ensureSession, ensureSseForSend, client, updateTyping])
+  }, [sending, sessionId, entries.length, ensureSession, ensureSseForSend, client, updateTyping])
 
   const stop = useCallback(async () => {
     if (!sessionId) return

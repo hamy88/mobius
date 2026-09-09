@@ -179,7 +179,7 @@ async function testChat() {
     stdin.write('\r'); await delay(80)
     const firstQueryFrame = lastFrame() ?? ''
     ok(firstQueryFrame.includes('第一个问题，正在初始化'), 'first query shows 第一个问题 instead of Working immediately after submit')
-    ok(firstQueryFrame.includes('首次处理可能耗时较长，请耐心等待'), 'first query explains that initialization may take longer')
+    ok(firstQueryFrame.includes('第一个问题，正在初始化+全平台同步中，请稍候'), 'first query keeps the initialization status text visible')
     runtimeWorking = true
     await delay(820)   // createSession → connect → POST → emit
     runtimeWorking = false
@@ -198,6 +198,44 @@ async function testChat() {
     ok(createdSessionBody?.pc_client_metadata?.work_mode === 'pc', 'TUI sessions always default to pc work mode')
     ok(/^tui-/.test(createdSessionBody?.pc_client_metadata?.aimux_id || ''), 'session metadata uses the TUI AIMUX identifier')
     ok(createdSessionBody?.pc_client_metadata?.local_path === process.cwd(), 'session metadata includes the TUI current directory')
+  } finally { restoreFetch() }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TEST 2b — first-turn bootstrap keeps its indicator while the worker is not
+// yet observable through the authoritative status endpoint.
+// ════════════════════════════════════════════════════════════════════════════
+async function testFirstTurnBootstrapIndicator() {
+  console.log('\n[UI 2b] First-turn bootstrap indicator')
+  sseController = null
+  const client = new MobiusClient('http://mock.local', 'mock-jwt-token')
+  const ready: ReadyState = {
+    project: { id: 'p1', name: '测试项目' },
+    issue: { id: 'i1', project_id: 'p1', title: '测试任务' },
+    prefs: { model: 'codex', language: 'zh', excluded_skill_ids: [], excluded_memory_ids: [] },
+  }
+  installMock((url, init) => {
+    if (url.includes('/events')) {
+      const stream = new RS({
+        start(c: any) { sseController = c; c.enqueue(enc.encode('event: subscribed\ndata: {"event":"subscribed","session":{}}\n\n')) },
+      })
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    if (url.endsWith('/messages') && init?.method === 'POST') return jsonResponse({ ok: true, session_id: 's1', turn_number: 1 })
+    if (url.endsWith('/api/sessions/s1/status')) return jsonResponse({ session_id: 's1', alive: false, working: false })
+    if (url.includes('/sessions') && init?.method === 'POST') return jsonResponse({ session_id: 's1' })
+    return jsonResponse({ error: 'no mock' }, 404)
+  })
+  try {
+    const { stdin, lastFrame, unmount } = render(
+      <ChatScreen client={client} ready={ready} webUserId="u" onClear={() => {}} onResume={() => {}} onQuit={() => {}} onLogout={() => {}} onReconfigure={() => {}} onConfigCancel={() => {}} />,
+    )
+    await delay(40)
+    stdin.write('首问初始化'); await delay(30); stdin.write('\r')
+    await delay(3_000)
+    const out = lastFrame() ?? ''
+    unmount()
+    ok(out.includes('第一个问题，正在初始化+全平台同步中，请稍候'), 'first-turn indicator remains visible during delayed worker bootstrap')
   } finally { restoreFetch() }
 }
 
@@ -1186,6 +1224,7 @@ async function testVersionSlash() {
 async function main() {
   await testLogin()
   await testChat()
+  await testFirstTurnBootstrapIndicator()
   await testResumedWorkingStatus()
   testMarkdownCodeRendering()
   testFirstUserEntryDedupe()
