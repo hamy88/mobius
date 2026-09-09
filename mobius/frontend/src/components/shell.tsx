@@ -1251,6 +1251,29 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
           )}
           {/* 极简 ⇄ 专家 切换入口已合并到「外观」菜单内的简易模式开关 (shell.tsx 中 easy-mode-switch),
               顶栏不再保留独立按钮。 */}
+          {/* 极简态"切回完整模式"直达入口 — 盲区修复: 完整态的简易模式开关藏在「外观」菜单,
+              而「外观」按钮在极简态被隐藏 (下方 !easyUI 分支), 切进极简后界面没有任何入口切回。
+              行为与 easy-mode-switch 对称: 会话页内只改呈现密度(原地恢复专业呈现, 不卸载组件);
+              其余页面(含 easy_mode 页)切全局模式, 由 EasyModePage 的 layoutMode 同步 effect
+              携当前会话上下文导航回完整 Issue/Research 页。 */}
+          {easyUI && (
+            <TopNavActionElement
+              type="button"
+              onClick={() => {
+                if (inSessionContext) {
+                  setSessionDensity('professional')
+                  return
+                }
+                setLayoutMode('normal_mode')
+              }}
+              title="切换回完整模式"
+              aria-label="切换回完整模式"
+              data-testid="easy-mode-exit"
+            >
+              <LayoutPanelTop className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+              <span className="text-[12px] font-medium whitespace-nowrap">完整模式</span>
+            </TopNavActionElement>
+          )}
           {/* 极简态的管理中心直达入口 (仅管理员可见; 专家态藏在用户菜单里) */}
           {easyUI && user?.role === 'admin' && (
             <TopNavActionElement
