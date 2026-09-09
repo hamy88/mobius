@@ -2,6 +2,8 @@
     org.jetbrains.compose.resources.ExperimentalResourceApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class,
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    // combinedClickable(0.2.0 聊天长按选取复制)属 ExperimentalFoundationApi。
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
 )
 
 package com.mobius.momo.ui

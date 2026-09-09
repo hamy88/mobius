@@ -91,6 +91,9 @@ temp/
 assets
 !mobius/backend/assets/
 !mobius/backend/assets/desktop-page-actions.js
+# mobile androidApp 的 agconnect 配置需随 APK 打包(HMS Push 运行时读取), 必须入库
+!mobius/mobile/androidApp/src/androidMain/assets/
+!mobius/mobile/androidApp/src/androidMain/assets/agconnect-services.json
 
 # Local external checkouts / machine-specific helpers
 /jsoncrack
