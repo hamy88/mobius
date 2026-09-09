@@ -204,11 +204,32 @@ async function runOnce() {
 }
 
 let timer = null;
+// ---- 北京时间派发窗口 08:00–22:00（显式 UTC+8，不依赖系统 TZ）----
+function beijingHour(now) {
+  return (now.getUTCHours() + 8) % 24;
+}
+function isInWindow(now) {
+  const h = beijingHour(now);
+  return h >= 8 && h < 22;
+}
+function nextWindowStart(now) {
+  // 下一个北京时间 08:00 = 当天或次日 00:00 UTC
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (Date.now() >= d.getTime()) d.setUTCDate(d.getUTCDate() + 1); // 已过当日 00:00 UTC(BJT 08:00)，顺延到次日
+  return d.getTime();
+}
 function scheduleNext() {
   if (timer) clearTimeout(timer);
-  const delayMin = 30 + Math.floor(Math.random() * 81); // 30~110 分钟
-  console.log(LOG_PREFIX, `next dispatch in ${delayMin} min`);
-  timer = setTimeout(runOnce, delayMin * 60 * 1000);
+  if (isInWindow(new Date())) {
+    const delayMin = 30 + Math.floor(Math.random() * 81); // 30~110 分钟
+    console.log(LOG_PREFIX, `next dispatch in ${delayMin} min`);
+    timer = setTimeout(runOnce, delayMin * 60 * 1000);
+  } else {
+    const delayMs = nextWindowStart(new Date()) - Date.now();
+    const delayMin = Math.ceil(delayMs / 60000);
+    console.log(LOG_PREFIX, `outside BJT 08:00-22:00 window, sleep until next 08:00 BJT (${delayMin} min)`);
+    timer = setTimeout(runOnce, delayMs);
+  }
 }
 
 console.log(LOG_PREFIX, 'scheduler started (system-level, survives restarts)');
