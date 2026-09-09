@@ -119,6 +119,30 @@ export function isLikelyFilesystemPath(href: string): boolean {
   return FS_PATH_PREFIXES.some(p => href.startsWith(p))
 }
 
+// 打包/二进制产物扩展名: agent 消息里的这类文件链接 ([netwatch.fpk](/data/...))
+// 对用户的价值是"保存到本地"而不是"在线编辑"。统一改写成 GET /api/download
+// (downloadAuth, token 走 query), 浏览器原生触发下载 — 手机浏览器点开 VSCode Web
+// 编辑器对二进制包毫无意义。代码/文本类扩展名不在此列, 保留跳转 VSCode 的行为。
+const DOWNLOADABLE_EXTS = [
+  '.fpk', '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+  '.apk', '.ipa', '.deb', '.rpm', '.exe', '.msi', '.dmg', '.pkg',
+  '.iso', '.img', '.bin', '.fpk', '.whl', '.jar', '.war',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.epub',
+  '.mp3', '.mp4', '.wav', '.flac', '.mov', '.mkv', '.avi',
+]
+export function isDownloadableFilePath(href: string): boolean {
+  if (!isLikelyFilesystemPath(href)) return false
+  const clean = href.split('?')[0].split('#')[0].toLowerCase()
+  return DOWNLOADABLE_EXTS.some(ext => clean.endsWith(ext))
+}
+
+// 绝对路径文件 → 浏览器可直接下载的 URL (与 FileManager / resolveMediaSrc 同款:
+// /api/download + query token, downloadAuth 只服务用户可读路径)。
+export function fileDownloadUrl(absPath: string): string {
+  const token = typeof window !== 'undefined' ? (localStorage.getItem('cc-token') || '') : ''
+  return `/api/download?path=${encodeURIComponent(absPath)}${token ? `&token=${encodeURIComponent(token)}` : ''}`
+}
+
 // 把一个外链 http(s) / 协议相对 // 媒体 URL 改写成走同源后端代理.
 // 浏览器直连 <img src="https://外链"> 在图床做防盗链(Referer 校验)/不可达/
 // 混合内容拦截/CORS 时普遍 onError, 卡片只剩死占位. 改由后端服务端 fetch

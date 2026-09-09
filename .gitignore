@@ -189,3 +189,9 @@ mobius/mobile/.env
 mobius/mobile/.env.*
 mobius/mobile/iosApp/Frameworks/
 mobius/mobile/iosApp/*.xcodeproj/
+
+# local secrets & build artifacts (2026-09-09)
+mobius/backend/https-proxy-certs/*.key
+/app/core
+/download/*.apk
+/download/*.crt

@@ -1,18 +1,23 @@
 import { useContext, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
-import { VSCodeOpenContext, isLikelyFilesystemPath, resolveMediaSrc } from './jsonl-vscode-link'
+import { VSCodeOpenContext, fileDownloadUrl, isDownloadableFilePath, isLikelyFilesystemPath, resolveMediaSrc } from './jsonl-vscode-link'
 
 function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNode }) {
   const ctx = useContext(VSCodeOpenContext)
+  // 打包/二进制产物 (.fpk/.zip/.apk/...) → 直下载: 裸路径 href 在浏览器 404,
+  // 跳 VSCode 编辑器对二进制也没意义。改写为 /api/download 让浏览器原生保存。
+  const downloadHref = href && isDownloadableFilePath(href) ? fileDownloadUrl(href) : null
+  const effectiveHref = downloadHref || href
   const onClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (downloadHref) { e.preventDefault(); window.location.href = downloadHref; return }
     if (!href || !ctx || !isLikelyFilesystemPath(href)) return
     const url = ctx.openLocalPath(href)
     if (!url) return // meta not ready yet → let default happen this once
     e.preventDefault()
     window.open(url, '_blank', 'noopener,noreferrer')
   }
-  return <a href={href} target="_blank" rel="noreferrer" onClick={onClick}>{children}</a>
+  return <a href={effectiveHref} target="_blank" rel="noreferrer" onClick={onClick}>{children}</a>
 }
 
 function MarkdownTable({ children, node: _node, ...props }: ComponentPropsWithoutRef<'table'> & { node?: unknown }) {

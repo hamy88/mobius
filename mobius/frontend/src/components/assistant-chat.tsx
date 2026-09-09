@@ -21,6 +21,7 @@ import {
   type VoiceTranscribeResponse,
   VOICE_RECORDING_MAX_MS,
 } from '../services/assistant-voice'
+import { fileDownloadUrl, isDownloadableFilePath } from './jsonl-vscode-link'
 
 // =====================================================================
 // AssistantChat — 小莫轻量助手
@@ -257,10 +258,13 @@ const FALLBACK_CLONE_MODEL_OPTIONS: SessionModelOption[] = [
 ]
 
 function MarkdownAnchor({ href, children, node: _node, ...props }: ComponentPropsWithoutRef<'a'> & { node?: unknown }) {
+  // 打包/二进制产物链接 ([netwatch.fpk](/data/...)): 裸路径对当前 host 请求必 404。
+  // 改写成 /api/download (downloadAuth, query token) 让浏览器原生下载。
+  const effectiveHref = href && isDownloadableFilePath(href) ? fileDownloadUrl(href) : href
   return (
     <a
       {...props}
-      href={href}
+      href={effectiveHref}
       target={href ? '_blank' : undefined}
       rel={href ? 'noreferrer' : undefined}
     >

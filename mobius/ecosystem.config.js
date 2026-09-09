@@ -131,6 +131,23 @@ module.exports = {
       },
     },
     {
+      // shunot 定时撰稿调度器: 每 30~110 分钟随机派发撰稿 session (用户授权 2026-09-08)
+      name: 'mobius-system-shunot-scheduler',
+      cwd: mobiusDir,
+      script: path.join(mobiusDir, 'backend', 'shunot-scheduler.js'),
+      exec_mode: 'fork',
+      instances: '1',
+      autorestart: true,
+      kill_timeout: 5000,
+      max_memory_restart: '128M',
+      out_file: path.join(LOG_DIR, 'mobius-shunot-scheduler.log'),
+      error_file: path.join(LOG_DIR, 'mobius-shunot-scheduler-error.log'),
+      merge_logs: true,
+      env: {
+        ...inheritedEnv,
+      },
+    },
+    {
       // 局域网 HTTPS 反代: 0.0.0.0:443 → 127.0.0.1:33316 (自签证书, 见 backend/https-proxy-certs/)
       name: 'mobius-system-https',
       cwd: mobiusDir,
