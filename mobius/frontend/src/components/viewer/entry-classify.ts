@@ -29,8 +29,8 @@ export function isTokenCountEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'token_count'
 }
 
-// Codex 在会话/线程配置生效后写入的生命周期事件。它不是 token 统计或系统注入噪声，
-// 应在 JSONL 查看器中保留为可浏览的事件卡片。
+// Codex 在会话/线程配置生效后写入的生命周期事件 (每轮开头一条), 与 task_started 同级
+// 的轮次生命周期标记, 对浏览对话内容无价值 → 整卡隐藏. (简易模式的活动行不受本谓词影响.)
 export function isThreadSettingsAppliedEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'thread_settings_applied'
 }
@@ -142,9 +142,18 @@ export function isTaskStartedEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'task_started'
 }
 
+// MCP 工具调用完成生命周期事件只记录调用参数、耗时和结果元数据, 结果本身已由
+// 对应的工具回执/工具卡展示, 单独渲染会造成重复噪声.
+export function isMcpToolCallEndEvent(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg' && entry?.payload?.type === 'mcp_tool_call_end'
+}
+
 // jsonl 卡片视图里"整卡过滤隐藏"的噪声 entry 集合: 对浏览对话内容无价值的系统注入/元数据噪声.
 // 集中在此一处, viewer/JsonlView 的 visibleItems 过滤只调本谓词, 以后新增噪声类型往这里加即可.
 //   - 非白名单类型        : file-history-snapshot / last-prompt / mode / permission-mode / ai-title / queue-operation ...
+//   - task_started        : codex 任务启动生命周期标记 (event_msg)
+//   - mcp_tool_call_end   : MCP 工具调用完成生命周期标记 (event_msg)
+//   - thread_settings_applied: codex 线程配置生效生命周期标记 (event_msg)
 //   - token_count         : codex 每轮 token 用量统计 (event_msg)
 //   - environment_context : codex 每轮注入的 <environment_context> 系统 user 消息
 //   - session_meta        : codex 会话首条元数据 (含巨大 base_instructions 系统提示词)
@@ -160,6 +169,8 @@ export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
   return (
     !MAJOR_JSONL_TYPES.has(entry?.type as string) ||
     isTaskStartedEvent(entry) ||
+    isMcpToolCallEndEvent(entry) ||
+    isThreadSettingsAppliedEvent(entry) ||
     isTokenCountEvent(entry) ||
     isEnvironmentContextEntry(entry) ||
     isSessionMetaEntry(entry) ||

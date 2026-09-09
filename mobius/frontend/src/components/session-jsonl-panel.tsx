@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useMemo, type RefObject } from 'react'
+import { lazy, memo, Suspense, useMemo, useRef, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import type { SessionHistoryStore } from '../services/agent-history-store'
@@ -99,16 +99,27 @@ function SessionJsonlPanelInner({
         : derivedStatus === 'running' ? '智能体工作中，等待输出…' : '')
     : ''
   const lastTimestamp = useMemo(() => findLatestEntryTimestamp(visibleJsonl).value, [visibleJsonl])
+  // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
+  const lastScrollTopRef = useRef<number | null>(null)
 
   return (
     <div data-tour="session-jsonl-view" className="mobius-chat-history flex min-w-0 flex-1 flex-col">
       <div
-        className="flex-1 overflow-y-auto relative"
+        className="flex-1 overflow-y-auto overflow-x-clip relative"
         ref={chatContainerRef}
         onScroll={(e) => {
           const el = e.currentTarget
-          const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-          onScrollPositionChange(distFromBottom > 200)
+          const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+          // 方向性解除判定 (调参台定稿, 配套 EntriesAutoScroll 的 lerp 追赶):
+          // 只有"向上滚"才算用户解除钉底 — lerp 追赶与程序钉底全是向下的, 追高卡
+          // 途中 dist 再大也不误判; 手动滚回贴底 (dist<4) 恢复钉底. 内容切换时
+          // scrollTop 被 clamp 到边缘的跳变不算用户滚动.
+          const prev = lastScrollTopRef.current
+          lastScrollTopRef.current = el.scrollTop
+          const clampedToEdge = el.scrollTop <= 0 || el.scrollTop >= el.scrollHeight - el.clientHeight - 0.5
+          const movedUp = prev !== null && prev - el.scrollTop > 2 && !clampedToEdge
+          if (movedUp && dist > 200) onScrollPositionChange(true)
+          else if (dist < 4) onScrollPositionChange(false)
         }}
       >
         <div className="px-5 py-5" style={variant === 'easy' ? { paddingBottom: 176 } : undefined}>

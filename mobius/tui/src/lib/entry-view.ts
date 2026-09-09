@@ -113,7 +113,7 @@ function extractLocalCommandParts(entry: AnyEntry): LocalCommandPart[] {
 }
 
 /**
- * 整卡隐藏的噪声: 对齐 web entry-classify.ts isHiddenJsonlNoiseEntry 的 7 类
+ * 整卡隐藏的噪声: 对齐 web entry-classify.ts isHiddenJsonlNoiseEntry 的 8 类
  *   - token_count         : codex 每轮 token 用量统计 (event_msg)
  *   - environment_context : codex 每轮注入的 <environment_context> 纯系统 user 消息
  *   - session_meta        : codex 会话首条元数据
@@ -121,10 +121,12 @@ function extractLocalCommandParts(entry: AnyEntry): LocalCommandPart[] {
  *   - turn_duration       : Claude Code 每轮结束注入的 system 耗时统计
  *   - skill_listing       : Claude Code 注入的可用 Skill 清单
  *   - agent_listing_delta : Claude Code 注入的可用 subagent 清单
+ *   - mcp_tool_call_end   : MCP 工具调用完成生命周期标记
  * 注: context_compacted 不在此列 (对齐 web — 它保留为可见事件, TUI 显示成 system 行).
  */
 export function isHiddenNoise(entry: AnyEntry): boolean {
   if (entry?.type === 'event_msg' && entry?.payload?.type === 'token_count') return true
+  if (entry?.type === 'event_msg' && entry?.payload?.type === 'mcp_tool_call_end') return true
   if (entry?.type === 'session_meta') return true
   if (entry?.type === 'turn_context') return true
   if (entry?.type === 'system' && entry?.subtype === 'turn_duration') return true

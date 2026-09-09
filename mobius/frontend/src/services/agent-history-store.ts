@@ -172,6 +172,21 @@ const EMPTY_SNAPSHOT: HistorySnapshot = {
   groupRuntime: new Map(), error: null, negotiated: false,
 }
 
+// SSE 新鲜度标记: ③ 事件追加的条目进 WeakSet, 卡片首次挂载时消费 (查后即删).
+// 用途: 入场动画只播给"数据新到达"的卡 — ② 加载的历史卡与滚动复挂 (虚拟列表卸载重挂)
+// 都查不到标记, 静默出现. 打在数据对象上而非组件状态上, 复挂天然不重播.
+const sseFreshEntries = new WeakSet<object>()
+
+/** 卡片挂载时调用一次: 是 SSE 新到的条目则返回 true (并消费掉, 之后复挂不再算新). */
+export function consumeFreshEntry(entry: any): boolean {
+  if (!entry || typeof entry !== 'object') return false
+  if (sseFreshEntries.has(entry)) {
+    sseFreshEntries.delete(entry)
+    return true
+  }
+  return false
+}
+
 export class SessionHistoryStore {
   readonly sid: string
   private rev = 0
@@ -518,6 +533,8 @@ export class SessionHistoryStore {
     const localVersion = this.groupVersions.get(gid) || 0
     if (version <= localVersion) return  // 水位线: 唯一并发法则
     const incoming = Array.isArray(msg.entries) ? msg.entries : []
+    // 入场动画新鲜度: 只标 ③ SSE 追加的条目 (② 历史加载不标, 见 consumeFreshEntry).
+    for (const e of incoming) { if (e && typeof e === 'object') sseFreshEntries.add(e) }
     if (this.entriesByGroup.has(gid)) {
       // 数据驻留 (无论开合): 追加 (uuid 去重), 写时穿透.
       this.entriesByGroup.set(gid, this.mergeEntries(gid, incoming))

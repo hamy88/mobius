@@ -37,6 +37,7 @@ import {
   INITIAL_THEME,
 } from './themes'
 import { formatTs } from './utils'
+import { consumeFreshEntry } from '../../services/agent-history-store'
 import {
   extractCodeEdit,
   extractWriteToolCall,
@@ -298,6 +299,8 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const canCompact = headerSummary.canCompact
   // 展开后默认: 可计划 → 计划模式; 可初始 → 初始模式; 可代码 → 代码模式; 可图片 → 图片模式; 可精简 → 精简模式; 其它 → 字段模式
   const [mode, setMode] = useState<CardMode>(canPlan ? 'plan' : canInitial ? 'initial' : canCode ? 'code' : canImage ? 'image' : canCompact ? 'compact' : 'field')
+  // 入场动画只播给 SSE 新到的条目 (挂载时消费一次性标记; ② 历史加载与滚动复挂不播).
+  const [isSseFresh] = useState(() => consumeFreshEntry(entry))
 
   // 卡片展开态受控于本地 state, 跨父组件重渲染 (实时轮询追加 entry) 保持不变.
   // 展开优先级集中在上方的 resolveDesiredOpen: field(字段模式) > forceOpen(搜索) >
@@ -388,7 +391,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
       data-density={dense ? 'dense' : undefined}
       open={open}
       onToggle={(e) => { userToggledRef.current = true; setOpen((e.currentTarget as HTMLDetailsElement).open) }}
-      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm card-enter ${theme.border} ${theme.bg}`}>
+      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm ${isSseFresh ? 'card-enter' : ''} ${theme.border} ${theme.bg}`}>
       <summary className={`jsonl-entry-summary cursor-pointer ${dense ? 'px-1 pt-0.5 gap-1' : 'px-3 pt-1.5 gap-2'} ${open ? 'pb-0.5' : dense ? 'pb-0.5' : 'pb-1.5'} flex items-center select-text${hasHeaderAction ? ' pr-[120px]' : ''}`}>
         {showMeta && typeof lineNo === 'number' && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">#{lineNo}</span>}
         {showMeta && ts && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">{ts}</span>}

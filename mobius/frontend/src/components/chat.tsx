@@ -126,7 +126,16 @@ function JsonlCountSlot({ store, children }: { store: SessionHistoryStore | null
   return <>{children(loaded, total)}</>
 }
 
-// 新条目到达自动滚底 (null 渲染): 只随已加载条数变化; 消息/typing 触发的滚底仍由 Chat 自己的 effect 负责.
+// 新条目到达自动滚底 (null 渲染): 方案 2 — 帧同步增量跟随.
+// lerp 跟随系数 (调参台定稿 0.06, 见 tmp/frontend_unit_mock): 每帧走"距底剩余距离"的比例.
+const LERP_FOLLOW_K = 0.06
+
+// 两个触发源 (条数变化 / 内容长高) 共用同一个自续 RAF 追赶环: 每帧只走剩余距离的
+// LERP_FOLLOW_K — 落后越多追得越快, 逼近底部自动减速, 高卡/批量呈现为先快后慢的
+// 缓动, 小增量轻带即到; 底部在长高中途变化也自然 retarget. 系数按 60Hz 手感调的,
+// 高刷屏会略快. 不用 behavior:'smooth' (重发会打断进行中的动画). 配套: 解除钉底
+// 改为方向性判定 (仅"向上滚"才算用户, 见 session-jsonl-panel), 追赶途中 dist 再大
+// 也不误判. 消息/typing 触发的滚底仍由 Chat 自己的 effect 负责.
 function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp, onBlocked }: {
   store: SessionHistoryStore | null
   containerRef: React.RefObject<HTMLDivElement | null>
@@ -137,17 +146,45 @@ function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp
   const count = useLoadedEntryCount(store)
   const stateRef = useRef({ userScrolledUp, onBlocked })
   stateRef.current = { userScrolledUp, onBlocked }
+
+  // lerp 追赶环: 触发只是"点火" (环没转就点一帧); 环每帧走剩余距离的 6%,
+  // 没追平 (delta > 0.5px) 就自续下一帧, 追平即停 — 两个触发源共用一个环.
+  const rafRef = useRef(0)
+  const chase = () => {
+    rafRef.current = 0
+    if (matchActiveRef.current || stateRef.current.userScrolledUp) return
+    const el = containerRef.current
+    if (!el) return
+    const delta = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (delta <= 0.5) return
+    el.scrollTop += delta * LERP_FOLLOW_K
+    rafRef.current = requestAnimationFrame(chase)
+  }
+  const schedulePin = () => { if (!rafRef.current) rafRef.current = requestAnimationFrame(chase) }
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }, [])
+
+  // 触发源 1: 条数变化 (新条目到达). 用户已上滚 → 亮"新消息"按钮, 不抢滚条.
   useEffect(() => {
     if (matchActiveRef.current) return
     if (stateRef.current.userScrolledUp) {
       stateRef.current.onBlocked()
-    } else {
-      requestAnimationFrame(() => {
-        const el = containerRef.current
-        if (el) el.scrollTop = el.scrollHeight
-      })
+      return
     }
-  }, [count, containerRef, matchActiveRef])
+    schedulePin()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count])
+
+  // 触发源 2: 内容长高 (F-a 追滚) — 一次性快照滚底追不上异步长高,
+  // 盯内容根的 ResizeObserver 让钉底态持续跟随. 搜索跳转进行中不干扰.
+  useEffect(() => {
+    const el = containerRef.current
+    const contentRoot = el?.firstElementChild
+    if (!el || !(contentRoot instanceof HTMLElement)) return
+    const ro = new ResizeObserver(schedulePin)
+    ro.observe(contentRoot)
+    return () => ro.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerRef, matchActiveRef])
   return null
 }
 

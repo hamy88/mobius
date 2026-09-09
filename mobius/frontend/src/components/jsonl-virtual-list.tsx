@@ -41,7 +41,11 @@ function MeasuredVirtualBlock({
     const node = ref.current
     if (!node) return
     const measure = () => {
-      const height = node.getBoundingClientRect().height
+      // offsetHeight = 纯布局高度, 不含 transform — 入场动画 (card-enter 等若用 scale)
+      // 期间量高不受影响; getBoundingClientRect 会把 transform 算进去, 缩放中的卡会
+      // 量出错误高度, 污染前缀和导致整列错位. (scrollRelativeTop 的定位计算仍用
+      // getBoundingClientRect — 那里要的正是视觉位置.)
+      const height = node.offsetHeight
       if (height > 0) onSize(blockKey, height)
     }
     measure()
