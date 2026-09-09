@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useMemo, useRef, type RefObject } from 'react'
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import type { SessionHistoryStore } from '../services/agent-history-store'
@@ -85,6 +85,23 @@ function SessionJsonlPanelInner({
 }: SessionJsonlPanelProps) {
   // 订阅下沉: 快照/摊平条目/派生值都在本组件内算, Chat 只递 store.
   const historySnapshot = useHistorySnapshotOf(historyStore)
+  // URL 中的 match/ts 会在首次精确滚动完成后被上层清理，命中视觉反馈不能随之消失。
+  // 面板本地保留本次目标，直到切换到另一份 historyStore（即离开当前会话）。
+  const [highlightTarget, setHighlightTarget] = useState<{ uuid: string | null; ts: string | null } | null>(null)
+  useEffect(() => {
+    if (scrollToEntryUuid || scrollToMatchTs) {
+      setHighlightTarget({ uuid: scrollToEntryUuid || null, ts: scrollToMatchTs || null })
+    }
+  }, [scrollToEntryUuid, scrollToMatchTs])
+  const previousStoreRef = useRef(historyStore)
+  useEffect(() => {
+    if (previousStoreRef.current !== historyStore) {
+      previousStoreRef.current = historyStore
+      setHighlightTarget(null)
+    }
+  }, [historyStore])
+  const effectiveScrollToEntryUuid = scrollToEntryUuid || highlightTarget?.uuid || null
+  const effectiveScrollToMatchTs = scrollToMatchTs || highlightTarget?.ts || null
   const visibleJsonl = useMemo(
     () => (historyStore ? historyStore.flattenEntries() : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -132,8 +149,8 @@ function SessionJsonlPanelInner({
                   initialLoading={jsonlInitialLoading}
                   working={!!(backendAlive && backendWorking)}
                   liveText={realTimeInfo}
-                  scrollToEntryUuid={scrollToEntryUuid}
-                  scrollToMatchTs={scrollToMatchTs}
+                  scrollToEntryUuid={effectiveScrollToEntryUuid}
+                  scrollToMatchTs={effectiveScrollToMatchTs}
                   onScrollResolved={onMatchScrollResolved}
                   onRoundCountChange={onEasyRoundCountChange}
                   expandAllSignal={easyExpandAllSignal}
@@ -147,8 +164,8 @@ function SessionJsonlPanelInner({
                 emptyLoadingText={jsonlEmptyLoadingText}
                 initialLoading={jsonlInitialLoading}
                 showMeta={showJsonlMeta}
-                scrollToEntryUuid={scrollToEntryUuid}
-                scrollToMatchTs={scrollToMatchTs}
+                scrollToEntryUuid={effectiveScrollToEntryUuid}
+                scrollToMatchTs={effectiveScrollToMatchTs}
                 onScrollResolved={onMatchScrollResolved}
               />
             )}

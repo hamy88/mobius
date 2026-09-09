@@ -153,8 +153,8 @@ function resolveDesiredOpen(opts: {
   isErrorType: boolean
   toolError: boolean
 }): boolean {
-  if (opts.mode === 'field') return false       // 字段模式永远不自动展开, 压过其它规则
-  if (opts.forceOpen) return true       // ① 搜索命中
+  if (opts.forceOpen) return true       // 搜索命中是显式查看, 压过字段模式与其它折叠规则
+  if (opts.mode === 'field') return false       // 字段模式永远不自动展开
   if (opts.parentOrderedCollapse) return false   // ② forgotten-flag
   // ③ 本地展开条件: patch_apply / 计划 / 初始 / 纯文本卡(可精简·可图片·error 类型, 且非代码卡)
   if (opts.isPatchApply || opts.canPlan || opts.canInitial || (!opts.canCode && (opts.canCompact || opts.canImage || opts.isErrorType))) return true
@@ -329,11 +329,11 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const userToggledRef = useRef(false)
   const [open, setOpen] = useState<boolean>(desiredOpen)
 
-  // 自动信号跟随 — ratchet (只掀开不折回; 字段模式保持折叠) + 尊重用户手动:
-  //   · forceOpen (搜索): 非字段模式下即使用户曾手动折叠也强制掀开 (显式查看优先).
+  // 自动信号跟随 — ratchet (只掀开不折回) + 尊重用户手动:
+  //   · forceOpen (搜索): 即使用户曾手动折叠或当前是字段模式也强制掀开 (显式查看优先).
   //   · 其它信号: 用户手动操作过则锁定不动.
   useEffect(() => {
-    if (forceOpen && mode !== 'field') { setOpen(true); return }
+    if (forceOpen) { setOpen(true); return }
     if (!userToggledRef.current && desiredOpen) setOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forceOpen, desiredOpen])
@@ -391,7 +391,9 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
       data-density={dense ? 'dense' : undefined}
       open={open}
       onToggle={(e) => { userToggledRef.current = true; setOpen((e.currentTarget as HTMLDetailsElement).open) }}
-      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm ${isSseFresh ? 'card-enter' : ''} ${theme.border} ${theme.bg}`}>
+      data-search-hit={forceOpen ? 'true' : undefined}
+      aria-label={forceOpen ? '搜索命中条目' : undefined}
+      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm ${isSseFresh ? 'card-enter' : ''} ${theme.border} ${theme.bg} ${forceOpen ? 'ring-2 ring-red-500/95 border-red-500/95 shadow-[0_0_0_3px_rgba(239,68,68,0.3),0_0_24px_rgba(239,68,68,0.32)]' : ''}`}>
       <summary className={`jsonl-entry-summary cursor-pointer ${dense ? 'px-1 pt-0.5 gap-1' : 'px-3 pt-1.5 gap-2'} ${open ? 'pb-0.5' : dense ? 'pb-0.5' : 'pb-1.5'} flex items-center select-text${hasHeaderAction ? ' pr-[120px]' : ''}`}>
         {showMeta && typeof lineNo === 'number' && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">#{lineNo}</span>}
         {showMeta && ts && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">{ts}</span>}

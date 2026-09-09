@@ -175,12 +175,14 @@ function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky 
   const autoOpen = isLast || isSecondLast
   // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
+    // 搜索命中是显式导航，必须压过此前把该轮锁定为 sticky/closed 的状态。
+    if (forceOpen) { if (!open) onAutoOpen(); return }
     if (sticky) return
-    if (onlyGroup || forceOpen || autoOpen) { if (!open) onAutoOpen(); return }
+    if (onlyGroup || autoOpen) { if (!open) onAutoOpen(); return }
     if (open) onAutoClose()
   }, [sticky, autoOpen, onlyGroup, forceOpen, open, onAutoOpen, onAutoClose])
   // 首帧防闪: store 还没来得及转移时, 按"应展开"先行绘制 (视觉态), effect 随后对齐真实态.
-  const openVisual = open || (!sticky && (onlyGroup || forceOpen || autoOpen))
+  const openVisual = open || forceOpen || (!sticky && (onlyGroup || autoOpen))
 
   const toggle = () => onUserToggle()
 
@@ -200,13 +202,19 @@ function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky 
         data-round-header-palette={headerPalette.id}
         aria-keyshortcuts="Control+Shift+K"
         title={`轮次背景：${headerPalette.name} · Ctrl+Shift+K 切换`}
-        className={`round-group-trigger w-full h-8 min-h-8 flex items-center gap-2 px-2 py-0 rounded-lg border text-left group ${onlyGroup ? 'cursor-default' : 'cursor-pointer'}`}
+        data-search-hit-group={forceOpen ? 'true' : undefined}
+        className={`round-group-trigger w-full h-8 min-h-8 flex items-center gap-2 px-2 py-0 rounded-lg border text-left group ${onlyGroup ? 'cursor-default' : 'cursor-pointer'} ${forceOpen ? 'ring-2 ring-red-500/95 border-red-500/95 bg-red-500/15 shadow-[0_0_0_3px_rgba(239,68,68,0.24),0_0_22px_rgba(239,68,68,0.3)]' : ''}`}
         style={{
           '--round-header-background': headerPalette.background,
           '--round-header-background-size': headerPalette.backgroundSize,
-          '--round-header-border': headerPalette.border,
-          '--round-header-border-hover': headerPalette.borderHover,
-          '--round-header-accent': headerPalette.accent,
+          // round-group-trigger 的基础 CSS 会从这些变量写入 border-color；命中态
+          // 用变量覆盖而不是只依赖 Tailwind border 类，确保不会被基础样式盖掉。
+          '--round-header-border': forceOpen ? 'rgba(239,68,68,0.95)' : headerPalette.border,
+          '--round-header-border-hover': forceOpen ? 'rgba(248,113,113,1)' : headerPalette.borderHover,
+          '--round-header-accent': forceOpen ? 'rgba(239,68,68,1)' : headerPalette.accent,
+          boxShadow: forceOpen
+            ? 'inset 3px 0 0 rgba(239,68,68,1), inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 3px rgba(239,68,68,0.24), 0 0 22px rgba(239,68,68,0.3)'
+            : undefined,
         } as CSSProperties}
       >
         <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-[var(--round-header-accent)]" />
@@ -217,6 +225,12 @@ function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky 
           {/* 展开后用户问题由下方编号为 roundNum 的卡片完整呈现, header 不再重复摘要 (仅折叠态显示作轮次标识) */}
           {openVisual ? '' : (userSummary || '(空)')}
         </span>
+        {forceOpen && (
+          <span className="inline-flex items-center gap-1 rounded-full border border-red-400/80 bg-red-500/25 px-1.5 py-0.5 text-[10px] font-semibold text-red-100 flex-shrink-0" title="搜索命中所在轮次">
+            <Search className="h-3 w-3" strokeWidth={2.4} aria-hidden="true" />
+            搜索命中
+          </span>
+        )}
         {!openVisual && agentCount > 0 && (
           <span className="text-[10px] text-[var(--text-muted)] flex-shrink-0 font-mono">
             +{agentCount}
