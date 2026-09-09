@@ -397,8 +397,27 @@ function unpackLaunch(opts: ClaudeDispatchOpts): { model: string | null; setting
   }
 }
 
+// 写 running.flag 时 pid 必须是 agent 子进程 (tmux pane 里跑的 claude) 的真实 PID,
+// 绝不允许用后端主进程 process.pid 兜底 — 主进程不死, flag 语义就永远无法被
+// "进程已死" 类判定消费 (曾把 mobius-system 主进程 PID 写进 flag, 误导排障方向).
+// 取不到 pane PID 时显式写 0, 让诊断日志一眼看出异常而不是伪装成合法 PID.
 function markRunning(root: string | null | undefined, sessionId: string) {
-  return safeWriteRunningFlag(root, sessionId, {}, 'tmux-claude-code')
+  return safeWriteRunningFlag(root, sessionId, { backend: 'tmux-claude-code', pid: panePidOfWindow(sessionId) || 0 }, 'tmux-claude-code')
+}
+
+// 查询 window 名对应 pane 的 PID (pane 里 exec 的 claude 进程). window 不存在/查询
+// 失败返回 0. 走实时查询而非 listWindowsRowsCached 缓存 — markRunning 只在 spawn /
+// dispatch 后调用, 频次低, 不在 /status 轮询热路径上.
+function panePidOfWindow(sessionId: string): number {
+  try {
+    const r = tmux(['list-windows', '-t', HUB, '-F', '#{window_name}|#{pane_pid}'])
+    if (r.status !== 0) return 0
+    for (const line of (r.stdout || '').split('\n')) {
+      const [name, pid] = line.trim().split('|')
+      if (name === sessionId) return Number(pid) || 0
+    }
+  } catch {}
+  return 0
 }
 
 function clearRunning(root: string | null | undefined, sessionId: string) {

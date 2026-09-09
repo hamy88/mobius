@@ -65,8 +65,11 @@ function writeRunningFlag(root: string | null | undefined, sessionId: string | n
   const body: FlagBody = {
     session: sessionId,
     runId,
+    // 默认写调用方进程 PID; agent 后端 (如 tmux-claude-code) 会显式传入真实
+    // agent 子进程 PID 覆盖此值 — pid 的语义是"跑任务的进程", 不是"写文件的进程".
     pid: String(process.pid),
     startedAt,
+    // fields 排在 pid 之后展开, 调用方显式传入的 pid/backend 等覆盖默认值.
     ...Object.fromEntries(
       Object.entries(fields).map(([k, v]) => [k, v === undefined || v === null ? '' : String(v)]),
     ),
