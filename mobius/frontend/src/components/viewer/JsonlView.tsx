@@ -70,26 +70,32 @@ function roundKeyOf(groupId: string): string {
 
 // 搜索命中的 (uuid, ts) 在已渲染的组条目里定位条目; 找不到返回 null.
 function findItemInRounds(rounds: Round[], uuid: string | null | undefined, ts: string | null | undefined): JsonlViewItem | null {
+  const matches = (entry: AnyEntry | undefined): boolean => {
+    if (!entry) return false
+    if (uuid && (entry.uuid === uuid || entry.id === uuid)) return true
+    if (!ts) return false
+    const value = entryTimestamp(entry)
+    if (value === ts) return true
+    const targetMs = Date.parse(ts)
+    return Number.isFinite(targetMs) && Date.parse(value) === targetMs
+  }
+  const itemMatches = (it: JsonlViewItem): boolean => {
+    if (matches(it?.entry)) return true
+    // tool_result 条目在展示流水线中会合并并隐藏，搜索命中仍应回到承载结果的
+    // tool_use 卡片，而不是只滚到轮次标题。
+    return [...(it?.bashResults || []), ...(it?.readResults || [])].some((result: any) => matches(result?.entry))
+  }
   if (uuid) {
     for (const r of rounds) {
       for (const it of r?.items || []) {
-        if (it?.entry?.uuid === uuid || it?.entry?.id === uuid) return it
+        if (itemMatches(it)) return it
       }
     }
   }
   if (ts) {
     for (const r of rounds) {
       for (const it of r?.items || []) {
-        if ((it?.entry?.timestamp || it?.entry?.created_at) === ts) return it
-      }
-    }
-    const targetTime = Date.parse(ts)
-    if (Number.isFinite(targetTime)) {
-      for (const r of rounds) {
-        for (const it of r?.items || []) {
-          const value = it?.entry?.timestamp || it?.entry?.created_at || ''
-          if (Date.parse(value) === targetTime) return it
-        }
+        if (itemMatches(it)) return it
       }
     }
   }
@@ -97,10 +103,39 @@ function findItemInRounds(rounds: Round[], uuid: string | null | undefined, ts: 
 }
 
 // 组条目 → 渲染流水线 (与旧版整列表流水线相同, 逐组独立跑; lineNo = 组基址 + 组内序).
-function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo: number): Round {
-  const windowed = entries.length > GROUP_ENTRY_WINDOW ? entries.slice(-GROUP_ENTRY_WINDOW) : entries
+function entryTimestamp(entry: AnyEntry): string {
+  return String(entry?.timestamp || entry?.created_at || entry?.message?.created_at || entry?.payload?.timestamp || '')
+}
+
+function targetIndexOf(entries: AnyEntry[], uuid?: string | null, ts?: string | null): number {
+  if (uuid) {
+    const index = entries.findIndex((entry) => entry?.uuid === uuid || entry?.id === uuid)
+    if (index >= 0) return index
+  }
+  if (ts) {
+    const exact = entries.findIndex((entry) => entryTimestamp(entry) === ts)
+    if (exact >= 0) return exact
+    const targetMs = Date.parse(ts)
+    if (Number.isFinite(targetMs)) {
+      return entries.findIndex((entry) => Date.parse(entryTimestamp(entry)) === targetMs)
+    }
+  }
+  return -1
+}
+
+function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo: number, targetUuid?: string | null, targetTs?: string | null): Round {
+  let windowStart = Math.max(0, entries.length - GROUP_ENTRY_WINDOW)
+  // 搜索命中可能在很早的条目里。保留命中条目周围的窗口，既不把整轮全部挂载，
+  // 又保证 UUID/时间戳定位能找到真实卡片而不是只落到轮次标题。
+  const targetIndex = targetIndexOf(entries, targetUuid, targetTs)
+  if (targetIndex >= 0 && entries.length > GROUP_ENTRY_WINDOW) {
+    windowStart = Math.max(0, Math.min(targetIndex - Math.floor(GROUP_ENTRY_WINDOW / 2), entries.length - GROUP_ENTRY_WINDOW))
+  }
+  const windowed = entries.length > GROUP_ENTRY_WINDOW
+    ? entries.slice(windowStart, windowStart + GROUP_ENTRY_WINDOW)
+    : entries
   const deduped = filterDisplayDuplicates(windowed)
-  const merged = mergeBashToolResultItems(deduped, baseLineNo)
+  const merged = mergeBashToolResultItems(deduped, baseLineNo + windowStart)
   const visible = merged.filter((item) => !isHiddenJsonlNoiseEntry(item.entry))
   return { roundNum, items: visible.map((item, index) => ({ ...item, relIdx: index })) }
 }
@@ -108,7 +143,7 @@ function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo
 // 每组渲染结果按 entries 数组身份记忆 (SSE 只让收数据的组换数组身份):
 // 快照每变一次, 只有真正收到新数据的组重跑流水线, 其余组直接复用上一代的 Round —
 // 连带 toolStatusMap/taskPlans 等下游 WeakMap 缓存与卡片 memo 的 prop 身份全部保持稳定.
-interface CachedRound { seq: number; base: number; round: Round }
+interface CachedRound { seq: number; base: number; targetKey: string; round: Round }
 const roundByEntries = new WeakMap<AnyEntry[], CachedRound>()
 const EMPTY_GROUP_ENTRIES: AnyEntry[] = []
 
@@ -202,6 +237,7 @@ export function JsonlView({
   // 逐组缓存 (roundByEntries): 命中条件 = 同一 entries 数组 + 同 seq + 同基址
   // (前面某组条数变了会推 base, 后续组 lineNo 失效 → 自动重建).
   const rounds = useMemo(() => {
+    const targetKey = `${scrollToEntryUuid || ''}:${scrollToMatchTs || ''}`
     let baseLineNo = 0
     return groups.map((meta) => {
       const entries = snapshot.entriesByGroup.get(meta.id) || EMPTY_GROUP_ENTRIES
@@ -211,17 +247,17 @@ export function JsonlView({
         round = { roundNum: meta.seq, items: [] as any[] }
       } else {
         const hit = roundByEntries.get(entries)
-        if (hit && hit.seq === meta.seq && hit.base === baseLineNo) {
+        if (hit && hit.seq === meta.seq && hit.base === baseLineNo && hit.targetKey === targetKey) {
           round = hit.round
         } else {
-          round = buildRoundFromEntries(entries, meta.seq, baseLineNo)
-          roundByEntries.set(entries, { seq: meta.seq, base: baseLineNo, round })
+          round = buildRoundFromEntries(entries, meta.seq, baseLineNo, scrollToEntryUuid, scrollToMatchTs)
+          roundByEntries.set(entries, { seq: meta.seq, base: baseLineNo, targetKey, round })
         }
       }
       baseLineNo += entries.length
       return { meta, round, state, entries }
     })
-  }, [snapshot]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [snapshot, scrollToEntryUuid, scrollToMatchTs])
 
   const headerTitle = title === undefined ? 'JSONL' : title
   const loadedGroups = rounds.filter((r) => r.entries.length > 0).length

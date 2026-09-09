@@ -116,16 +116,22 @@ function EasySkeleton() {
 }
 
 function findMatchLine(items: JsonlViewItem[], uuid?: string | null, ts?: string | null): number | null {
+  const matches = (entry: any): boolean => {
+    if (!entry) return false
+    if (uuid && (entry.uuid === uuid || entry.id === uuid)) return true
+    if (!ts) return false
+    const value = entry?.timestamp || entry?.created_at || entry?.message?.created_at || entry?.payload?.timestamp
+    const target = Date.parse(ts)
+    return value === ts || (Number.isFinite(target) && Date.parse(value || '') === target)
+  }
+  const itemMatches = (item: JsonlViewItem): boolean => matches(item.entry)
+    || [...(item.bashResults || []), ...(item.readResults || [])].some((result: any) => matches(result?.entry))
   if (uuid) {
-    const match = items.find(item => item.entry?.uuid === uuid || item.entry?.id === uuid)
+    const match = items.find(itemMatches)
     if (match) return match.lineNo
   }
   if (ts) {
-    const target = Date.parse(ts)
-    const exact = items.find(item => {
-      const value = item.entry?.timestamp || item.entry?.created_at
-      return value === ts || (Number.isFinite(target) && Date.parse(value || '') === target)
-    })
+    const exact = items.find(itemMatches)
     if (exact) return exact.lineNo
   }
   return null
@@ -171,7 +177,10 @@ export default function EasyJsonlView({
     if (targetHandledRef.current === targetKey || initialLoading || entries.length === 0) return
     const lineNo = findMatchLine(visibleItems, scrollToEntryUuid, scrollToMatchTs)
     if (lineNo == null) {
-      if (!showAll) setShowAll(true)
+      // 首屏只取最近窗口时，命中条目可能在本地已加载数据的更早部分。
+      // 先展开本地全部条目，等待 visibleItems/easyRounds 更新后再定位；不能在这里
+      // 立即清掉 URL，否则下一帧即使找到了命中也失去目标。
+      if (!showAll) { setShowAll(true); return }
       if (hasRemoteMore) onScrollUnresolved?.()
       else onScrollResolved?.()
       return
