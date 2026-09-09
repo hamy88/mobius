@@ -27,6 +27,9 @@ jobs:
     defaults:
       run:
         shell: bash
+        # mobile 工程在仓库内 mobius/mobile/ 子目录(仓库根对应整个 /app 而非 mobius/)。
+        # 所有 ./gradlew、iosApp/、shared/、androidApp/ 相对路径均以 mobius/mobile 为基准。
+        working-directory: mobius/mobile
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -108,8 +111,10 @@ jobs:
               ;;
             ios-simulator-app)
               # .app is a directory; zip it for artifact upload
+              # (artifacts/ 建在 working-directory 即 mobius/mobile/ 下, 不能再用
+              #  $GITHUB_WORKSPACE 绝对路径——那指向仓库根, 目录不存在会导致 zip 失败)
               ( cd iosApp/build/Build/Products/Debug-iphonesimulator && \
-                zip -qry "$GITHUB_WORKSPACE/artifacts/iosApp.zip" *.app )
+                zip -qry "$PWD/../../../../../artifacts/iosApp.zip" *.app )
               ;;
           esac
           # Linux has sha256sum; macOS only has shasum.
@@ -121,5 +126,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: artifacts/
+          # uses: step 不受 defaults.run.working-directory 影响, path 必须写全
+          # 相对仓库根的路径, 否则 if-no-files-found: error 会让所有 job 在上传步骤失败。
+          path: mobius/mobile/artifacts/
           if-no-files-found: error
