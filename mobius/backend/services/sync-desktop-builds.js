@@ -200,6 +200,23 @@ async function syncDesktopBuilds(options = {}) {
   };
 }
 
+/** 从 tag 或 APK 文件名里提取版本号("mobile-v0.3.0" / "mobius-mobile-0.3.0-android-arm64.apk" → "0.3.0")。 */
+function compareVersionOf(name) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(name || ""));
+  return m ? `${m[1]}.${m[2]}.${m[3]}` : null;
+}
+
+/** 语义化版本比较: a>b 返回 1, a<b 返回 -1, 相等/不可比返回 0。 */
+function compareVersions(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
 /**
  * 按 tag 前缀查最新 Release (releases/latest 只返回全局最新, mobile 与 desktop 各自独立发版).
  * 列出全部 releases (per_page=20), 取 tag_name 以 prefix 开头且非 draft/prerelease 的第一个 (列表按创建时间倒序).
@@ -275,10 +292,20 @@ async function syncMobileBuilds(options = {}) {
   }
 
   // 清理旧版本 APK (mobius-mobile-*.apk 且不在当前 release 中; 备份目录 _backup-* 不动)
+  // 版本感知(2026-09-09): 只清理比当前 release 版本更旧的 APK。本地若有"更新"版本的 APK
+  // (例如本机 fork CI 构建的 0.3.0, 而上游最新正式 release 是 0.1.19), 不视为旧文件——
+  // 否则周期同步会把本机自建的新版 APK 反复删掉。版本号取文件名 mobile-v 后的第一段。
   const currentApkNames = new Set(apkAssets.map((a) => a.name));
+  const currentVersion = compareVersionOf(release.tag_name);
   try {
     for (const entry of fs.readdirSync(MOBILE_BUILDS_DIR)) {
       if (entry.startsWith("mobius-mobile-") && entry.endsWith(".apk") && !currentApkNames.has(entry)) {
+        const localVersion = compareVersionOf(entry);
+        // 本地版本更新(或无法比较)时保留, 只清理确定更旧的。
+        if (localVersion && currentVersion && compareVersions(localVersion, currentVersion) > 0) {
+          log(`[mobile-sync]   ⏩ kept newer local: ${entry} (local ${localVersion} > release ${currentVersion})`);
+          continue;
+        }
         fs.unlinkSync(path.join(MOBILE_BUILDS_DIR, entry));
         log(`[mobile-sync]   ✕ removed old: ${entry}`);
       }
