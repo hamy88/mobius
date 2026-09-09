@@ -23,6 +23,7 @@ import { useProxyForSession, withSessionProxyState } from '../services/session-p
 // @ts-ignore — service 仍是 .js
 import * as agents from '../agents';
 import { computeSessionRuntimeStatus, syncAgentStatusIfChanged } from '../utils/session-runtime-status';
+import { sanitizeEntrySecrets } from '../services/secret-guard';
 // @ts-ignore — repository 仍是 .js
 import { Projects } from '../repositories/projects';
 // @ts-ignore — repository 仍是 .js (通过 skills-fs / memories-fs 兼容层)
@@ -476,7 +477,8 @@ async function sendSseJsonlHistory(
   };
 
   for (const entry of entries) {
-    let encoded: string;
+    // 出口消毒: Bash 命令/工具参数中的明文密码 → 加密占位符 (前端渲染 🔒)
+    try { sanitizeEntrySecrets(entry); } catch { /* 消毒失败不阻塞历史回灌 */ }    let encoded: string;
     try { encoded = JSON.stringify(entry); } catch { continue; }
     const entryBytes = Buffer.byteLength(encoded);
     if (chunk.length > 0 && (chunk.length >= maxEntries || chunkBytes + entryBytes > maxBytes)) {
@@ -932,6 +934,8 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
     unsub = backend.getAgentRawThoughtStream(
       sessionId,
       (entry: any) => {
+        // 实时流出口消毒: agent 生成命令中的明文密码 → 加密占位符 (前端渲染 🔒)
+        try { sanitizeEntrySecrets(entry); } catch { /* 消毒失败原样发送 */ }
         writeSse(res, 'jsonl_entry', { event: 'jsonl_entry', session_id: sessionId, entry }).catch(() => cleanup());
         if (isTurnCompleteEntry(entry)) {
           writeSse(res, 'typing', { event: 'typing', active: false }).catch(() => cleanup());

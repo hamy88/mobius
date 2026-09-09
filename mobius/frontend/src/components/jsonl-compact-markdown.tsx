@@ -2,6 +2,7 @@ import { useContext, useState, type ComponentPropsWithoutRef, type ReactNode } f
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
 import { VSCodeOpenContext, fileDownloadUrl, isDownloadableFilePath, isLikelyFilesystemPath, resolveMediaSrc } from './jsonl-vscode-link'
+import { maskEncryptedPlaceholders } from '../services/text-redaction'
 
 function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNode }) {
   const ctx = useContext(VSCodeOpenContext)
@@ -61,6 +62,9 @@ function MarkdownImage({ src, alt, node: _node, ...rest }: ComponentPropsWithout
 }
 
 export default function JsonlCompactMarkdown({ text, variant = 'compact' }: { text: string; variant?: 'compact' | 'conversation' }) {
+  // 🔒 密文占位符 (后端 secret-guard 消毒产物) 在 markdown 渲染入口统一遮罩,
+  // 防止代码块/行内高亮把占位符原样裸露。
+  const safeText = maskEncryptedPlaceholders(text)
   // conversation 变体: 用于极简聊天的最终回复正文 — 复用专业聊天 .prose-chat 的完整
   // 排版 (标题层级/列表缩进/表格滚动/引用块), 而非 11px 的紧凑卡片样式。
   if (variant === 'conversation') {
@@ -74,7 +78,7 @@ export default function JsonlCompactMarkdown({ text, variant = 'compact' }: { te
             table: MarkdownTable as any,
             img: MarkdownImage as any,
           }}>
-          {text}
+          {safeText}
         </ReactMarkdown>
       </div>
     )
@@ -89,7 +93,7 @@ export default function JsonlCompactMarkdown({ text, variant = 'compact' }: { te
           table: MarkdownTable as any,
           img: MarkdownImage as any,
         }}>
-        {text}
+        {safeText}
       </ReactMarkdown>
     </div>
   )

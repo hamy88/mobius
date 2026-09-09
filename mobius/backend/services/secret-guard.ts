@@ -82,6 +82,42 @@ const SHAPED_SECRET_PATTERNS: SecretPattern[] = [
     match: collect(/(?:^|[^\w-])(sk-[A-Za-z0-9_-]{16,})/g, 1),
   },
   {
+    // 命令行内嵌密码: sshpass -p 'xxx' / docker login -p xxx / mysql -pXXX / curl -u user:pass
+    // agent 生成的 Bash 命令常带这些形态, 是工具卡明文泄露的主通道。
+    name: 'cli-password',
+    match: (text: string) => {
+      const out: Array<[string, string]> = [];
+      // sshpass -p <值> / -p<值> (引号或裸值); docker/curl -u; mysql -p紧贴
+      const patterns: Array<RegExp> = [
+        // sshpass -p 'val' | "val" | val (前导分隔含左括号, 覆盖 "(sshpass -p xxx" 回显形态)
+        /(?:^|[\s;&|(])(sshpass\s+(?:-p\s*|--pw\s+|env\s+SSHPASS=))('([^'\s]{4,})'|"([^"\s]{4,})"|([^\s)]{4,}))/gm,
+        // mysql/mysqldump -pVAL (紧贴无空格; -p 后直接跟密码, 前面可带"选项 值"对)
+        /(?:^|\s)(mysql|mysqldump)(?:\s+(?:-[a-zA-Z][^\s]*|"[^"]*"|\S+))*?\s+-p([^\s'"]{4,})/gm,
+        // docker login -p val / --password val / --password-stdin 之外的明文
+        /(?:^|[\s;&|])(docker\s+login\s+(?:[^\n]*?\s+)?(?:-p|--password)[ =])('([^'\s]{4,})'|"([^"\s]{4,})"|([^\s]{4,}))/gm,
+        // curl -u user:password / --user user:password (只取 :password 段)
+        /(?:^|[\s;&|])(curl\s+[^\n]*?(?:-u|--user)\s+)([^\s:@/]{1,64}):([^\s@/]{4,})/gm,
+        // psql postgresql://user:pass@host
+        /(:\/\/)([^\s:@/]{1,64}):([^\s@/]{4,})@/gm,
+      ];
+      for (const re of patterns) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          // 取"值"捕获组 (最后一个非 undefined 组)
+          let value = '';
+          for (let g = m.length - 1; g >= 1; g -= 1) {
+            if (m[g] != null) { value = m[g]; break; }
+          }
+          if (value && value.trim().length >= 4 && !value.startsWith('$')) {
+            out.push([value, value.trim()]);
+          }
+        }
+      }
+      return out.length ? out : null;
+    },
+  },
+  {
     // AWS AccessKeyId
     name: 'aws-key',
     match: collect(/(?:^|[^\w-])(AKIA[0-9A-Z]{16})/g, 1),
@@ -309,4 +345,40 @@ export function maskEncryptedForDisplay(text: string): string {
 export function _resetKeyCacheForTest() {
   cachedKey = null;
   cachedKeyOnce = false;
+}
+
+// ── agent 输出 (jsonl entry) 的出口消毒 ────────────────────────────────────
+// agent 生成的 Bash 命令 / 工具参数 / 结果回显里可能带明文密码 (如 sshpass -p 'xxx')。
+// 这些内容在发给前端展示前, 递归扫描 entry 的字符串字段, 把命中的敏感片段加密成
+// 占位符 — 前端统一渲染为 🔒。深度与数组长度有上限, 防恶意超大 entry 拖垮请求。
+
+const SANITIZE_MAX_DEPTH = 8;
+const SANITIZE_MAX_ITEMS = 400;
+
+/**
+ * 递归消毒 jsonl entry (或任意 JSON 值): 字符串字段中的敏感片段 → 加密占位符。
+ * 原地修改并返回同一对象 (调用方持有的引用同步更新)。
+ */
+export function sanitizeEntrySecrets(entry: any, depth = 0): any {
+  if (entry == null || depth > SANITIZE_MAX_DEPTH) return entry;
+  if (typeof entry === 'string') {
+    if (!entry || entry.length > 200_000) return entry; // 超长串跳过 (性能保护)
+    const r = detectAndEncrypt(entry);
+    return r.encryptedCount > 0 ? r.text : entry;
+  }
+  if (Array.isArray(entry)) {
+    const n = Math.min(entry.length, SANITIZE_MAX_ITEMS);
+    for (let i = 0; i < n; i += 1) entry[i] = sanitizeEntrySecrets(entry[i], depth + 1);
+    return entry;
+  }
+  if (typeof entry === 'object') {
+    const keys = Object.keys(entry);
+    const n = Math.min(keys.length, SANITIZE_MAX_ITEMS);
+    for (let i = 0; i < n; i += 1) {
+      const k = keys[i];
+      try { entry[k] = sanitizeEntrySecrets(entry[k], depth + 1); } catch { /* 单字段失败不影响其余 */ }
+    }
+    return entry;
+  }
+  return entry;
 }

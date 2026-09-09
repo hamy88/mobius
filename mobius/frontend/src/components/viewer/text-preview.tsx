@@ -7,6 +7,7 @@
  */
 import { useMemo } from 'react'
 import { splitDiffValue } from './utils'
+import { maskEncryptedPlaceholders } from '../../services/text-redaction'
 
 // 多行脚本/文件/结果首屏只露前 N 行, 余下 details 折叠. Write 预览 / Bash 命令 / 工具返回结果共用此阈值.
 export const WRITE_PREVIEW_LINE_LIMIT = 40
@@ -19,7 +20,7 @@ export function CodePreviewRows({ lines, startLine = 1 }: { lines: string[]; sta
           <span className="code-diff-line-number select-none border-r border-[var(--border-color)]/50 px-2 text-right">
             {startLine + idx}
           </span>
-          <code className="whitespace-pre px-2 text-inherit">{line || ' '}</code>
+          <code className="whitespace-pre px-2 text-inherit">{maskEncryptedPlaceholders(line) || ' '}</code>
         </div>
       ))}
     </>
