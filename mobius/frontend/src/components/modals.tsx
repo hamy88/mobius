@@ -3935,16 +3935,15 @@ const MOBILE_BUILDS: Array<{ label: string; sub: string; file: string; size: num
     label: 'Android',
     sub: 'arm64-v8a · 大多数现代手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-arm64.apk`,
-    // size/sha256 由 CI 产物落盘后回填(见 mobius/mobile-builds/manifest.json)。
-    size: 0,
-    sha256: '',
+    size: 5024928,
+    sha256: 'aa08e109bb7b08d04c56e275707d64ede321a0287b147bcc9a327a2589ada8d8',
   },
   {
     label: 'Android',
     sub: 'armeabi-v7a · 老旧手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-armeabi-v7a.apk`,
-    size: 0,
-    sha256: '',
+    size: 5032896,
+    sha256: '64a0b9d86e1c3ddb92636401b889f63de3287525ef1988aa064a210ac39766e8',
   },
   {
     label: 'iOS',
