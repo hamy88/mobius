@@ -130,3 +130,55 @@ jobs:
           # 相对仓库根的路径, 否则 if-no-files-found: error 会让所有 job 在上传步骤失败。
           path: mobius/mobile/artifacts/
           if-no-files-found: error
+
+  # 4 平台全部成功后, 把 artifacts 发布为 GitHub Release (pre-release)。
+  # Release asset 匿名可下载, 供服务器侧 sync-mobile-builds 与用户直链分发;
+  # 本机无 GitHub PAT 时这是唯一能把 CI 产物取下来的通道。
+  release:
+    name: Publish artifacts to GitHub Release
+    needs: build
+    if: success()
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Stage release files (rename to distribution names)
+        id: ver
+        run: |
+          set -euo pipefail
+          VER="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' mobius/mobile/androidApp/build.gradle.kts | head -1)"
+          echo "version: $VER"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          mkdir -p release
+          # Android splits-abi APK → mobius-mobile-<ver>-android-<abi>.apk 分发名 (与 0.1.19 对齐)
+          for apk in all-artifacts/android-apk/*.apk; do
+            base="$(basename "$apk" .apk)"
+            case "$base" in
+              *arm64*)  cp "$apk" "release/mobius-mobile-${VER}-android-arm64.apk" ;;
+              *v7a*)    cp "$apk" "release/mobius-mobile-${VER}-android-armeabi-v7a.apk" ;;
+              *)        cp "$apk" "release/${base}-${VER}.apk" ;;
+            esac
+          done
+          # 其余平台产物原样分发
+          find all-artifacts/windows-exe -name '*.exe' -exec cp {} release/ \; 2>/dev/null || true
+          find all-artifacts/macos-dmg -name '*.dmg' -exec cp {} release/ \; 2>/dev/null || true
+          [ -d all-artifacts/ios-simulator-app ] && cp all-artifacts/ios-simulator-app/iosApp.zip "release/mobius-mobile-${VER}-ios-simulator-app.zip" || true
+          ( cd release && sha256sum * > sha256.txt )
+          ls -la release/
+
+      - name: Create pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mobile-v${{ steps.ver.outputs.ver }}
+          name: Mobius Mobile v${{ steps.ver.outputs.ver }} (CI build)
+          prerelease: true
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
