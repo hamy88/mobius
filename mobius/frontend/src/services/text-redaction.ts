@@ -32,6 +32,16 @@ type AttributeState = {
 
 const REDACTED_ATTRIBUTES = ['title', 'aria-label', 'placeholder', 'alt']
 
+// ── 内置规则: 后端 secret-guard 密文占位符 → 🔒已加密 ──
+// 与用户自定义关键词规则不同, 这条内置遮罩始终生效 (不受脱敏开关控制):
+// 占位符本身虽是密文, 但裸露展示既难看又可能泄露长度信息, 统一遮为徽标文案。
+const ENC_SECRET_PLACEHOLDER_RE = /<MOBIUS-ENC:v1:[A-Za-z0-9_-]+>/g
+
+export function maskEncryptedPlaceholders(value: string): string {
+  if (!value || !value.includes('<MOBIUS-ENC')) return value
+  return value.replace(ENC_SECRET_PLACEHOLDER_RE, '🔒已加密')
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -284,9 +294,10 @@ export function exportTextRedactionRulesCsv(rules: TextRedactionRule[]) {
 }
 
 function redactValue(value: string, rules: TextRedactionRule[]) {
-  if (!value || rules.length === 0) return value
-
-  let next = value
+  if (!value) return value
+  // 内置: 密文占位符遮罩不依赖用户规则, 始终应用 (含 rules 为空/开关关闭时)
+  let next = maskEncryptedPlaceholders(value)
+  if (rules.length === 0) return next
   for (const rule of rules) {
     if (!rule.keyword) continue
     next = next.split(rule.keyword).join(rule.replacement)
@@ -317,12 +328,14 @@ function wireDisplayRulesCacheInvalidation() {
 export function redactDisplayText(value: string): string {
   try {
     if (!value) return value
+    // 内置密文占位符遮罩始终生效 (canvas 等非 DOM 文本出口同理)
+    const masked = maskEncryptedPlaceholders(value)
     if (displayRulesCache == null) {
       displayRulesCache = readTextRedactionEnabled() ? activeRules(readTextRedactionRules()) : []
       wireDisplayRulesCacheInvalidation()
     }
-    if (displayRulesCache.length === 0) return value
-    return redactValue(value, displayRulesCache)
+    if (displayRulesCache.length === 0) return masked
+    return redactValue(masked, displayRulesCache)
   } catch (_) {
     return value
   }

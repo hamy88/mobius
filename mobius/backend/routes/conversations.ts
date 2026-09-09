@@ -3,6 +3,7 @@ import { auth, authOrQuery } from '../middleware/auth';
 import { Conversations } from '../repositories/conversations';
 import type { MemberInput, MemberType } from '../repositories/conversations';
 import { runSessionMessage } from '../services/session-message-runner';
+import { detectAndEncrypt, maskEncryptedForDisplay } from '../services/secret-guard';
 // 群消息推送: 给离线(无 SSE)成员远程推送
 import { pushToUser as pushToUserExt } from '../services/extension-push';
 import { Sessions } from '../repositories/sessions';
@@ -400,7 +401,10 @@ router.post('/:id/messages', auth, (req: express.Request, res: express.Response)
     res.status(403).json({ error: '你不是该群成员' });
     return;
   }
-  const content = String(req.body?.content || '').trim();
+  // 隐秘数据自动加密: 群消息中的密码/密钥/token 落库前替换为 AES-256-GCM 占位符,
+  // 库表与后续 agent 转发只见密文; 远程推送文案额外做尾4位遮罩 (连密文都不出)。
+  const guarded = detectAndEncrypt(String(req.body?.content || '').trim());
+  const content = guarded.text;
   if (!content) {
     res.status(400).json({ error: '内容不能为空' });
     return;
@@ -433,7 +437,7 @@ router.post('/:id/messages', auth, (req: express.Request, res: express.Response)
       void pushToUserExt({
         username: String(m.member_id),
         title: convName,
-        body: `${senderName}: ${content}`,
+        body: maskEncryptedForDisplay(`${senderName}: ${content}`),
         deepLink: `momo://group/${id}`,
       });
     }

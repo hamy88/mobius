@@ -195,3 +195,5 @@ mobius/backend/https-proxy-certs/*.key
 /app/core
 /download/*.apk
 /download/*.crt
+# secret-guard 消息加密主密钥 (本地 /data, 绝不入库)
+/data/secret-guard.key

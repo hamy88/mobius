@@ -17,6 +17,7 @@ import { JsonlCopyButton } from './viewer/JsonlCopyButton'
 import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
 import { AnnouncePcButton } from './announce-pc-button'
+import { renderWithSecretChips } from './encrypted-secrets'
 import { isGuidedDemoSession, patchGuidedDemoSessionCompleted } from '../services/guided-demo'
 import { readJsonlCacheSync, readJsonlCacheFromIdb, writeJsonlCache } from '../services/session-jsonl-cache'
 import {
@@ -1581,6 +1582,9 @@ export function MessageBubble({
 
   const renderContent = () => {
     const content = m.content || ''
+    // 🔒 密文占位符 (后端 secret-guard 加密的密码/密钥): 用户气泡内联渲染 🔒徽标,
+    // 点击可按需 reveal 原文 (仅本人消息, 后端校验); 助手侧一般只出现在引用中, 同样徽标化。
+    const secretNodes = renderWithSecretChips(content, m.id)
     const quoteMatch = content.match(/^((?:> .*\n?)+)\n(.+)/s)
     if (quoteMatch && !isUser) {
       const quoted = quoteMatch[1].replace(/^> /gm, '')
@@ -1600,11 +1604,14 @@ export function MessageBubble({
           <>
             <div className="border-l-2 pl-3 mb-2 text-[12px] italic line-clamp-2"
               style={{ borderColor: isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)', color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }}>{quoted}</div>
-            <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{rest}</p>
+            <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{secretNodes ?? rest}</p>
           </>
         )
       }
-      return <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{content}</p>
+      return <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{secretNodes ?? content}</p>
+    }
+    if (secretNodes) {
+      return <div className="prose-chat"><p className="whitespace-pre-wrap">{secretNodes}</p></div>
     }
     return <div className="prose-chat"><ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}>{content}</ReactMarkdown></div>
   }

@@ -19,6 +19,7 @@ import { syncSkillsToWorkspace } from './session-skills-sync';
 import { formatBackendSendFailure } from './session-errors';
 import { transferReferencePrompt } from './session-transfer';
 import { canOperateSession } from './access-control';
+import { detectAndEncrypt } from './secret-guard';
 import {
   normalizeAgentMentions,
   sessionMentionMetadata,
@@ -148,9 +149,16 @@ async function runSessionMessage({
   //        content    = "[附件]\n- [文件] /data/report.pdf\n\n分析这个文件"   ← 拼上了附件块
 
   const normalizedSessionId = String(sessionId || '').trim();
-  const normalizedContent = typeof content === 'string' ? content : '';
+  // ── 隐秘数据自动加密 ──
+  // 用户消息里夹带的密码/API key/token 等, 在进入任何落库/落盘/下发路径之前
+  // 就替换为 <MOBIUS-ENC:v1:...> AES-256-GCM 占位符: DB(messages_v2)、jsonl
+  // 输入卡、下发 prompt 均只见密文。fail-open: 加密异常不阻塞消息发送。
+  const guardContent = detectAndEncrypt(typeof content === 'string' ? content : '');
+  const normalizedContent = guardContent.text;
   const normalizedRequestId = typeof requestId === 'string' ? requestId : null;
-  const normalizedInputText = hasInputText ? String(inputText || '') : '';
+  const normalizedInputText = hasInputText
+    ? detectAndEncrypt(String(inputText || '')).text
+    : '';
 
   if (!user?.id) throw httpError('用户不可用', 401);
 
