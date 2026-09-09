@@ -283,7 +283,11 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
           workingHintUntilRef.current = Date.now() + 1_500
           updateTyping(true)
         } else {
-          workingHintUntilRef.current = 0
+          // A fresh turn uses a longer bootstrap grace period.  Some agents
+          // emit an early typing=false edge before their worker is observable;
+          // do not let that transient edge erase the first-turn indicator.
+          const remaining = workingHintUntilRef.current - Date.now()
+          if (remaining < 5_000) workingHintUntilRef.current = 0
         }
         pollNowRef.current?.()
       },

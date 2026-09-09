@@ -221,7 +221,11 @@ async function testFirstTurnBootstrapIndicator() {
       })
       return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
     }
-    if (url.endsWith('/messages') && init?.method === 'POST') return jsonResponse({ ok: true, session_id: 's1', turn_number: 1 })
+    if (url.endsWith('/messages') && init?.method === 'POST') {
+      // A premature false edge must not hide the first-turn bootstrap status.
+      setTimeout(() => emit('typing', { active: false }), 120)
+      return jsonResponse({ ok: true, session_id: 's1', turn_number: 1 })
+    }
     if (url.endsWith('/api/sessions/s1/status')) return jsonResponse({ session_id: 's1', alive: false, working: false })
     if (url.includes('/sessions') && init?.method === 'POST') return jsonResponse({ session_id: 's1' })
     return jsonResponse({ error: 'no mock' }, 404)
