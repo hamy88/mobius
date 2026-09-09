@@ -3920,12 +3920,12 @@ function manifestToRows(manifest: DesktopManifest): DesktopDownloadRow[] {
 }
 
 // 移动端构建清单 — 镜像桌面 DESKTOP_BUILDS。
-// Android APK 走公网 CDN (serve.nutshellai.cn, 源站 gptac-zs nginx 静态目录
-// /home/fuqingxu/publish/auto/mobius-mobile/), 任何人无需登录 Mobius 服务器即可下载;
-// 同源 /mobile-builds/ 仍保留兜底。size / sha256 由 build.py --build-mobile 回填。
-const MOBILE_VERSION = '0.1.19'
-// 公网 CDN 前缀; 上传脚本: python3 /tmp/upload_mobile_cdn.py mobius-mobile <apk...> (参考 Issue 999efcd9)
-const MOBILE_CDN_BASE = 'https://serve.nutshellai.cn/publish/auto/mobius-mobile'
+// Android APK 走本服务器同源静态目录 /mobile-builds/ (源目录 mobius/mobile-builds/,
+// 由 GitHub Actions build-all-formats 构建后下载回填), 登录用户直接下载;
+// 公网分发可另走 GitHub Release (mobile-v<version> pre-release, 匿名可下载)。
+const MOBILE_VERSION = '0.2.0'
+// 同源下载前缀 (Express 静态服务直接指向 mobius/mobile-builds/)。
+const MOBILE_CDN_BASE = '/mobile-builds'
 // iOS 走 TestFlight 公开邀请链接: build 上传后在 App Store Connect → TestFlight 开启"公开链接",
 // 把 https://testflight.apple.com/join/<CODE> 里的 <CODE> 填到下面 IOS_TESTFLIGHT_CODE。
 // 仍是占位时, iOS 行显示"未上线"; 填入真实 code 后自动变成 TestFlight 下载按钮。
@@ -3935,15 +3935,15 @@ const MOBILE_BUILDS: Array<{ label: string; sub: string; file: string; size: num
     label: 'Android',
     sub: 'arm64-v8a · 大多数现代手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-arm64.apk`,
-    size: 4992156,
-    sha256: 'fc0cfae8b5260877fce3cadfa9f6cfc8bedb14218701719f6bb7435821bdf055',
+    size: 5024928,
+    sha256: 'cc37ffbd585a196df67bf29077827519bd485977d6af9b195325d14b3ccd934c',
   },
   {
     label: 'Android',
     sub: 'armeabi-v7a · 老旧手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-armeabi-v7a.apk`,
-    size: 5000124,
-    sha256: '409002c6f507f0dc1b0faabc7c6f314b1af5824de415f55dd95ae5f228ff6a43',
+    size: 5032896,
+    sha256: 'fe82130a816b3cfb6feeac7ecd6e5e25a8914ff36d82fccb1ded23f3584763e0',
   },
   {
     label: 'iOS',
