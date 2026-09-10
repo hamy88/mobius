@@ -34,6 +34,33 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Provision Android release keystore (optional)
+        if: matrix.target == 'android-apk'
+        env:
+          MOMO_ANDROID_KEYSTORE_B64: ${{ secrets.MOMO_ANDROID_KEYSTORE_B64 }}
+          MOMO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.MOMO_ANDROID_KEYSTORE_PASSWORD }}
+          MOMO_ANDROID_KEY_ALIAS: ${{ secrets.MOMO_ANDROID_KEY_ALIAS }}
+          MOMO_ANDROID_KEY_PASSWORD: ${{ secrets.MOMO_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # 仅当 4 个 secret 全部配置时才启用 release 签名;
+          # 任一缺失则降级为 debug 签名(Gradle 自动从 signingConfigs.debug 读取),
+          # 避免阻塞现有的 CI 流程。
+          if [ -z "$MOMO_ANDROID_KEYSTORE_B64" ] \
+             || [ -z "$MOMO_ANDROID_KEYSTORE_PASSWORD" ] \
+             || [ -z "$MOMO_ANDROID_KEY_ALIAS" ] \
+             || [ -z "$MOMO_ANDROID_KEY_PASSWORD" ]; then
+            echo "::warning::MOMO_ANDROID_KEYSTORE_* secrets not fully configured; falling back to debug signing for this run."
+            exit 0
+          fi
+          echo "$MOMO_ANDROID_KEYSTORE_B64" | base64 -d > /tmp/mobius-release.keystore
+          ls -la /tmp/mobius-release.keystore
+          echo "MOMO_ANDROID_KEYSTORE_PATH=/tmp/mobius-release.keystore" >> "$GITHUB_ENV"
+          echo "MOMO_ANDROID_KEYSTORE_PASSWORD=$MOMO_ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "MOMO_ANDROID_KEY_ALIAS=$MOMO_ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "MOMO_ANDROID_KEY_PASSWORD=$MOMO_ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+          echo "Release keystore provisioned; signingConfig.release will be activated by Gradle."
+
       - name: Build Android APK
         if: matrix.target == 'android-apk'
         run: ./gradlew --no-daemon :androidApp:assembleRelease
