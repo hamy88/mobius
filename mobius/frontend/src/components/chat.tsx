@@ -12,6 +12,7 @@ import { NewSessionModal } from './modals'
 import { FileTreeLevel, OpenInVSCodeButton, type DirState, type Entry } from './project-files'
 import { WebTerminalModal, type WebTerminalMode } from './web-terminal-modal'
 import { SessionJsonlPanel } from './session-jsonl-panel'
+import { scrollDebug } from './scroll-debug'
 import { JsonlCopyButton } from './viewer/JsonlCopyButton'
 import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
@@ -151,15 +152,21 @@ function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp
   // lerp 追赶环: 触发只是"点火" (环没转就点一帧); 环每帧走剩余距离的 6%,
   // 没追平 (delta > 0.5px) 就自续下一帧, 追平即停 — 两个触发源共用一个环.
   const rafRef = useRef(0)
+  const chaseFrameRef = useRef(0)
   const chase = () => {
     rafRef.current = 0
     // userScrolledUpRef 是同步可变 ref (事件处理器里直接改它), 追底每帧直接读,
     // 不用等 React 重渲染, 避免"第一次 wheel 上滚仍被拽回一帧".
-    if (matchActiveRef.current || userScrolledUpRef.current) return
+    if (matchActiveRef.current) { scrollDebug('chase: skip (matchActive)'); return }
+    if (userScrolledUpRef.current) { scrollDebug('chase: STOP (userScrolledUp=true)'); return }
     const el = containerRef.current
     if (!el) return
     const delta = el.scrollHeight - el.scrollTop - el.clientHeight
-    if (delta <= 0.5) return
+    if (delta <= 0.5) { scrollDebug('chase: done (delta<=0.5)'); return }
+    if (chaseFrameRef.current % 30 === 0) {
+      scrollDebug('chase: lerp', { delta: delta.toFixed(1), scrollTop: Math.round(el.scrollTop), scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, userScrolledUp: userScrolledUpRef.current })
+    }
+    chaseFrameRef.current += 1
     el.scrollTop += delta * LERP_FOLLOW_K
     rafRef.current = requestAnimationFrame(chase)
   }
@@ -170,9 +177,11 @@ function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp
   useEffect(() => {
     if (matchActiveRef.current) return
     if (userScrolledUpRef.current) {
+      scrollDebug('count-effect: count=', count, 'userScrolledUp=true → onBlocked (不追底, 亮"新消息")')
       onBlockedRef.current()
       return
     }
+    scrollDebug('count-effect: count=', count, 'userScrolledUp=false → schedulePin (追底)')
     schedulePin()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [count])
@@ -4084,11 +4093,14 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     // 搜索结果跳转进行中时不抢滚条, 让 JsonlView 的 scrollToKey 把视图钉到命中卡片.
     if (matchTargetActiveRef.current) return
     if (userScrolledUpRef.current) {
+      scrollDebug('message-effect: userScrolledUp=true → setHasNewMessages (不滚底)')
       setHasNewMessages(true)
     } else {
+      scrollDebug('message-effect: userScrolledUp=false → 排队 RAF 滚底')
       requestAnimationFrame(() => {
         // 滚底回调执行前再查一次: 排队期间用户上滚了就别再抢滚条.
-        if (userScrolledUpRef.current || matchTargetActiveRef.current) return
+        if (userScrolledUpRef.current) { scrollDebug('message-effect RAF: 执行前 userScrolledUp=true → 放弃滚底'); return }
+        if (matchTargetActiveRef.current) { scrollDebug('message-effect RAF: 执行前 matchActive → 放弃滚底'); return }
         const el = chatContainerRef.current
         if (el) el.scrollTop = el.scrollHeight
       })
@@ -4098,11 +4110,16 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
 
   const handleJsonlScrollPositionChange = useCallback((nextUserScrolledUp: boolean) => {
     // 同步改 ref, 让正在跑的追底 RAF 下一帧立刻停下.
+    const prev = userScrolledUpRef.current
+    if (prev !== nextUserScrolledUp) {
+      scrollDebug(`flag: ${prev} → ${nextUserScrolledUp}`)
+    }
     userScrolledUpRef.current = nextUserScrolledUp
     if (!nextUserScrolledUp) setHasNewMessages(false)
   }, [])
 
   const jumpToJsonlBottom = useCallback(() => {
+    scrollDebug('jumpToBottom: flag → false, 滚到 scrollHeight')
     userScrolledUpRef.current = false
     const el = chatContainerRef.current
     if (el) el.scrollTop = el.scrollHeight

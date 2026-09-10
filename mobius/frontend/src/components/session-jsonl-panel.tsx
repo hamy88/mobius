@@ -3,6 +3,7 @@ import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import type { SessionHistoryStore } from '../services/agent-history-store'
 import { useHistorySnapshotOf } from '../services/agent-history-store'
+import { scrollDebug } from './scroll-debug'
 
 const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
 
@@ -132,6 +133,7 @@ function SessionJsonlPanelInner({
 
     // wheel 上滚 (deltaY<0) 才算向上翻; 向下滚留 onScroll 贴底判定恢复钉底.
     const onWheel = (e: WheelEvent) => {
+      scrollDebug('wheel event: deltaY=', e.deltaY, e.deltaY < 0 ? '(上滚→flag true)' : '(下滚, 交给 onScroll)')
       if (e.deltaY < 0) onScrollPositionChange(true)
     }
     // 手指下移 (clientY 增大) = 内容上滚 (向上翻); 反之回底部交给 onScroll 恢复.
@@ -139,12 +141,18 @@ function SessionJsonlPanelInner({
     const onTouchMove = (e: TouchEvent) => {
       const t = e.touches[0]
       if (!t) return
-      if (lastTouchY !== null && t.clientY > lastTouchY) onScrollPositionChange(true)
+      if (lastTouchY !== null && t.clientY > lastTouchY) {
+        scrollDebug('touchmove: 手指下移(内容上翻) → flag true')
+        onScrollPositionChange(true)
+      }
       lastTouchY = t.clientY
     }
     // 仅"向上翻"类按键视为接管; 输入区与滚动容器是兄弟节点, 输入框方向键不会冒泡到此.
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') onScrollPositionChange(true)
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') {
+        scrollDebug('keydown:', e.key, '→ flag true')
+        onScrollPositionChange(true)
+      }
     }
 
     el.addEventListener('wheel', onWheel, { passive: true })
@@ -173,8 +181,13 @@ function SessionJsonlPanelInner({
           lastScrollTopRef.current = el.scrollTop
           const clampedToEdge = el.scrollTop <= 0 || el.scrollTop >= el.scrollHeight - el.clientHeight - 0.5
           const movedUp = prev !== null && prev - el.scrollTop > 2 && !clampedToEdge
-          if (movedUp && dist > 200) onScrollPositionChange(true)
-          else if (dist < 4) onScrollPositionChange(false)
+          if (movedUp && dist > 200) {
+            scrollDebug('onScroll: movedUp=true, dist=', dist, '>200 → flag true')
+            onScrollPositionChange(true)
+          } else if (dist < 4) {
+            scrollDebug('onScroll: dist=', dist.toFixed(1), '<4 → flag false (恢复钉底)')
+            onScrollPositionChange(false)
+          }
         }}
       >
         <div className="px-5 py-5" style={variant === 'easy' ? { paddingBottom: 176 } : undefined}>
