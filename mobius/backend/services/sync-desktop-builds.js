@@ -251,9 +251,80 @@ function fetchLatestReleaseByTagPrefix(prefix, token) {
 }
 
 /**
- * 移动端同步: 从 tag 前缀 mobile-v 的 Release 拉取 APK + manifest.json 到 mobius/mobile-builds/.
- * 与桌面端同构: 幂等 (size 一致跳过), manifest 每次覆盖, 旧 APK 清理仅限 mobius-mobile-* 模式.
- * Release 不存在时静默跳过 (移动端发版晚于桌面端属正常), 不影响桌面端结果.
+ * 解析移动端同步源仓库: MOBILE_SYNC_REPO 显式指定 > 本仓库 git origin (fork 部署自产自销
+ * 自己 CI 的 mobile release) > 上游官方仓。
+ * fork 部署的 mobile release 是自家 CI 发的 pre-release (softprops/action-gh-release 默认
+ * prerelease=true), 与上游"正式版才对外分发"的语义不同, 因此非默认仓时把 prerelease 也纳入
+ * 候选, 并按最大版本号(而非创建顺序)选择, 避免旧 pre-release 抢位。
+ */
+function resolveMobileSyncRepo() {
+  const explicit = (process.env.MOBILE_SYNC_REPO || "").trim();
+  if (explicit) return { repo: explicit, includePrerelease: true, source: "env MOBILE_SYNC_REPO" };
+  try {
+    // 从 services 目录向上找 git 仓库根的 .git/config (仓库根可能是本目录, 也可能是更上层)
+    let gitConfig = null;
+    for (let dir = path.join(__dirname, "..", ".."); ; dir = path.dirname(dir)) {
+      const cfg = path.join(dir, ".git", "config");
+      if (fs.existsSync(cfg)) { gitConfig = fs.readFileSync(cfg, "utf8"); break; }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+    }
+    if (!gitConfig) throw new Error("no .git/config found");
+    // 在 [remote "origin"] section 内找 url 行 (section 内键顺序不保证, 逐行扫描到下一个 section 为止)
+    const lines = gitConfig.split("\n");
+    let inOrigin = false;
+    for (const line of lines) {
+      const sec = /^\s*\[/.exec(line);
+      if (sec) { inOrigin = /\[remote "origin"\]/.test(line); continue; }
+      if (!inOrigin) continue;
+      const m = /^\s*url\s*=\s*(?:git@github\.com:|https:\/\/github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\s*$/.exec(line);
+      if (m && m[1] && m[1] !== REPO) {
+        return { repo: m[1], includePrerelease: true, source: "git origin" };
+      }
+    }
+  } catch (_) { /* .git 不存在 (纯部署拷贝) → 回落上游 */ }
+  return { repo: REPO, includePrerelease: false, source: "default upstream" };
+}
+
+/** 列出某仓库全部 releases (per_page=20, 匿名可达; token 可选提额)。 */
+function listReleases(repo, token) {
+  return new Promise((resolve, reject) => {
+    const headers = { "User-Agent": "Mobius-Desktop-Sync/1.0", "Accept": "application/vnd.github+json" };
+    if (token) headers["Authorization"] = `token ${token}`;
+
+    const url = `${GITHUB_API}/repos/${repo}/releases?per_page=20`;
+    https.get(url, { headers }, (res) => {
+      if (res.statusCode !== 200) {
+        let body = "";
+        res.on("data", (d) => body += d);
+        res.on("end", () => reject(new Error(`GitHub API ${res.statusCode}: ${body.slice(0, 200)}`)));
+        return;
+      }
+      let body = "";
+      res.on("data", (d) => body += d);
+      res.on("end", () => {
+        try { resolve(JSON.parse(body)); }
+        catch (e) { reject(new Error(`Invalid JSON: ${e.message}`)); }
+      });
+    }).on("error", reject);
+  });
+}
+
+/**
+ * 移动端同步: 从 mobile-v Release 拉取 APK + manifest.json 到 mobius/mobile-builds/.
+ * 与桌面端同构: 幂等 (size 一致跳过), 旧 APK 清理仅限 mobius-mobile-* 模式。
+ * Release 不存在时静默跳过 (移动端发版晚于桌面端属正常), 不影响桌面端结果。
+ *
+ * 与桌面端的差异 (fork 部署 2026-09-10 治本):
+ * 1. 仓库源: resolveMobileSyncRepo() — fork 部署同步自己 CI 的 release, 不再固定上游
+ *    (此前上游 0.1.19 每小时覆盖回本地, fork 的 0.2.0/0.3.0 反而被当旧文件删掉)。
+ * 2. 单调性保护: 候选 release 版本 < 本地已有最大 APK 版本 → 本轮跳过下载与清理,
+ *    本地状态只进不退 (防配置回退/上游滞后把旧版拉回来)。
+ * 3. manifest.json 不再盲目覆盖: release 带的 manifest 只在上游默认源且本地无自维护
+ *    版本时落地; 本目录 manifest 由部署侧维护多版本清单, release manifest 不含 sha256
+ *    且只有单版本, 覆盖会丢失 0.2.0/0.3.0 行。
+ * 4. 清理白名单: manifest.json builds[] 里列出的文件永不删 (保留哪些版本是运营决策,
+ *    sync 只负责清孤儿文件)。
  */
 async function syncMobileBuilds(options = {}) {
   const {
@@ -262,19 +333,51 @@ async function syncMobileBuilds(options = {}) {
   } = options;
 
   const startTime = Date.now();
+  const { repo, includePrerelease, source: repoSource } = resolveMobileSyncRepo();
+
   let release;
   try {
-    release = await fetchLatestReleaseByTagPrefix("mobile-v", ghToken);
+    const list = await listReleases(repo, ghToken);
+    const candidates = (Array.isArray(list) ? list : []).filter(
+      (r) => !r.draft && (!r.prerelease || includePrerelease)
+        && typeof r.tag_name === "string" && r.tag_name.startsWith("mobile-v")
+    );
+    // 按最大版本号选 (创建顺序最新的 pre-release 不一定是最高版本)
+    release = candidates.reduce((best, r) => {
+      if (!best) return r;
+      const rv = compareVersionOf(r.tag_name) || "0";
+      const bv = compareVersionOf(best.tag_name) || "0";
+      return compareVersions(rv, bv) > 0 ? r : best;
+    }, null);
+    if (!release) throw new Error(`No release with tag prefix 'mobile-v' in ${repo}`);
   } catch (e) {
     log(`[mobile-sync] skip: ${e.message}`);
     return { ok: true, skipped: true, reason: e.message };
   }
   const assets = release.assets || [];
-  log(`[mobile-sync] Latest: ${release.tag_name}, ${assets.length} assets`);
+  log(`[mobile-sync] Latest: ${release.tag_name} from ${repo} (${repoSource}), ${assets.length} assets`);
 
-  const apkAssets = assets.filter((a) => a.name.endsWith(".apk") || a.name === "manifest.json");
+  const apkAssets = assets.filter((a) => a.name.endsWith(".apk"));
   if (apkAssets.length === 0) {
-    return { ok: true, skipped: true, reason: "No apk/manifest assets in release" };
+    return { ok: true, skipped: true, reason: "No apk assets in release" };
+  }
+
+  // 单调性保护: 本地已有更高版本 APK 时, 本轮不下载/不清理/不动 manifest。
+  const releaseVersion = compareVersionOf(release.tag_name);
+  let maxLocalVersion = null;
+  try {
+    for (const entry of fs.readdirSync(MOBILE_BUILDS_DIR)) {
+      if (!entry.startsWith("mobius-mobile-") || !entry.endsWith(".apk")) continue;
+      const v = compareVersionOf(entry);
+      if (v && (!maxLocalVersion || compareVersions(v, maxLocalVersion) > 0)) maxLocalVersion = v;
+    }
+  } catch (_) { /* 目录不存在 → 无本地版本 */ }
+  if (maxLocalVersion && releaseVersion && compareVersions(maxLocalVersion, releaseVersion) > 0) {
+    log(`[mobile-sync]   ⏩ local ${maxLocalVersion} > release ${releaseVersion} (${repo}), skip whole cycle`);
+    return {
+      ok: true, skipped: true, reason: `local ${maxLocalVersion} newer than release ${releaseVersion}`,
+      tag: release.tag_name, repo, maxLocalVersion,
+    };
   }
 
   fs.mkdirSync(MOBILE_BUILDS_DIR, { recursive: true });
@@ -292,14 +395,26 @@ async function syncMobileBuilds(options = {}) {
   }
 
   // 清理旧版本 APK (mobius-mobile-*.apk 且不在当前 release 中; 备份目录 _backup-* 不动)
-  // 版本感知(2026-09-09): 只清理比当前 release 版本更旧的 APK。本地若有"更新"版本的 APK
-  // (例如本机 fork CI 构建的 0.3.0, 而上游最新正式 release 是 0.1.19), 不视为旧文件——
-  // 否则周期同步会把本机自建的新版 APK 反复删掉。版本号取文件名 mobile-v 后的第一段。
+  // 规则(2026-09-10 治本重写):
+  //   a) manifest.json builds[] 列出的文件是运营侧保留清单 → 永不删;
+  //   b) 比当前 release 版本更新的本地 APK (自建新版) → 保留;
+  //   c) 其余 = 孤儿旧文件 → 删。
+  // 上游 0.1.19 之所以曾被反复拉回: 源仓库固定上游 + 非 prerelease 过滤, 上游 0.1.19 恰是
+  // 唯一命中; 换 fork 源后 0.1.19 不再被下载, 若本地留着且在 manifest 白名单里也不会被清。
+  const manifestKeep = new Set();
+  try {
+    const localManifest = JSON.parse(fs.readFileSync(path.join(MOBILE_BUILDS_DIR, "manifest.json"), "utf8"));
+    for (const b of localManifest.builds || []) if (b.file) manifestKeep.add(b.file);
+  } catch (_) { /* manifest 缺失/损坏 → 空白名单 */ }
   const currentApkNames = new Set(apkAssets.map((a) => a.name));
   const currentVersion = compareVersionOf(release.tag_name);
   try {
     for (const entry of fs.readdirSync(MOBILE_BUILDS_DIR)) {
       if (entry.startsWith("mobius-mobile-") && entry.endsWith(".apk") && !currentApkNames.has(entry)) {
+        if (manifestKeep.has(entry)) {
+          log(`[mobile-sync]   ⏩ kept (manifest-listed): ${entry}`);
+          continue;
+        }
         const localVersion = compareVersionOf(entry);
         // 本地版本更新(或无法比较)时保留, 只清理确定更旧的。
         if (localVersion && currentVersion && compareVersions(localVersion, currentVersion) > 0) {
@@ -311,6 +426,50 @@ async function syncMobileBuilds(options = {}) {
       }
     }
   } catch (_) { /* 清理失败不影响 */ }
+
+  // 自动补 manifest 行: 新落盘的 APK 若不在本地 manifest 里, 追加条目 (含实测 size/sha256),
+  // 并把顶层 version 推进到更高版本。只增不删, 既有行 (含人工维护的 source/versionCode) 不动。
+  // 目的: 0.4.0 发布后 cron 自动拉 APK + 自动登记, 无需人工改 manifest。
+  try {
+    const manifestPath = path.join(MOBILE_BUILDS_DIR, "manifest.json");
+    let manifest = null;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch (_) { manifest = null; }
+    if (!manifest || !Array.isArray(manifest.builds)) {
+      manifest = { version: releaseVersion || "", platform: "android", generatedAt: new Date().toISOString(), builds: [] };
+    }
+    const listed = new Set(manifest.builds.map((b) => b.file));
+    const crypto = require("node:crypto");
+    let added = 0;
+    for (const r of results) {
+      if (r.error || listed.has(r.file)) continue;
+      try {
+        const p = path.join(MOBILE_BUILDS_DIR, r.file);
+        const buf = fs.readFileSync(p);
+        const v = compareVersionOf(r.file) || releaseVersion || "";
+        manifest.builds.push({
+          platform: "android",
+          arch: /armeabi/.test(r.file) ? "armeabi-v7a" : "arm64",
+          format: "apk",
+          file: r.file,
+          size: buf.length,
+          version: v,
+          sha256: crypto.createHash("sha256").update(buf).digest("hex"),
+          source: `github-release ${release.tag_name} auto-synced`,
+        });
+        added++;
+      } catch (_) { /* 单文件失败不影响 */ }
+    }
+    if (added > 0 || (releaseVersion && compareVersions(releaseVersion, manifest.version || "0") > 0)) {
+      if (releaseVersion && compareVersions(releaseVersion, manifest.version || "0") > 0) manifest.version = releaseVersion;
+      manifest.generatedAt = new Date().toISOString();
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      log(`[mobile-sync]   ✓ manifest.json: +${added} entries, version → ${manifest.version}`);
+    }
+  } catch (e) {
+    log(`[mobile-sync]   ⚠ manifest.json auto-update failed: ${e.message}`);
+  }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const downloaded = results.filter((r) => !r.error && !r.skipped).length;
