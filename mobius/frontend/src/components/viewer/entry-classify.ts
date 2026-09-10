@@ -13,6 +13,7 @@ import {
   isFunctionCallPayload,
   isFunctionCallOutputPayload,
 } from './entry-extract'
+import { extractInitialContext } from './initial-context'
 
 // 该 entry 是否为 "assistant 发起的 Edit tool_use" (即 message.content 里有 type==='tool_use' 且 name==='Edit').
 export function isEditToolUse(entry: AnyEntry): boolean {
@@ -65,6 +66,15 @@ export function isEnvironmentContextEntry(entry: AnyEntry): boolean {
   if (!text) return false
   const stripped = text.replace(ENVIRONMENT_CONTEXT_TAG_PATTERN, '')
   return stripped.trim().length === 0 && stripped !== text
+}
+
+// codex 的 response_item.message[role=user] 是"人类输入被 agent 消费"时写进 rollout 的
+// user 消息镜像 (与 event_msg.user_message / type:user 属同一次输入的多形态落盘).
+// 用户提问本身已在输入区/会话 UI 可见, 这条镜像在 jsonl 卡片视图里属浏览噪声,
+// 与 event_msg 同级整卡过滤隐藏 —— 但"初始模式"卡片 (extractInitialContext 命中,
+// 即首轮被后端包装成 引导语+上下文段+问题的用户消息) 例外, 必须保留展示.
+export function isCodexUserResponseItemEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'response_item' && entry?.payload?.type === 'message' && entry?.payload?.role === 'user'
 }
 
 // codex 会话首条的 session_meta: payload 含 session_id/cwd/git/model_provider, 以及巨大的
@@ -160,6 +170,7 @@ export function isEventMessageEntry(entry: AnyEntry): boolean {
 //   - 非白名单类型        : file-history-snapshot / last-prompt / mode / permission-mode / ai-title / queue-operation ...
 //   - event_msg           : Codex 生命周期/镜像元数据 (包含 agent_message 等所有 payload.type)
 //   - environment_context : codex 每轮注入的 <environment_context> 系统 user 消息
+//   - response_item user  : codex 的 response_item.message[role=user] 用户消息镜像 (初始模式卡片除外)
 //   - session_meta        : codex 会话首条元数据 (含巨大 base_instructions 系统提示词)
 //   - turn_duration       : Claude Code 每轮结束注入的 system 耗时/消息数统计
 //   - skill_listing       : Claude Code 注入的可用 Skill 清单 (巨量 skill 描述文本)
@@ -179,6 +190,7 @@ export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
     isThreadSettingsAppliedEvent(entry) ||
     isTokenCountEvent(entry) ||
     isEnvironmentContextEntry(entry) ||
+    (isCodexUserResponseItemEntry(entry) && !extractInitialContext(entry)) ||
     isSessionMetaEntry(entry) ||
     isTurnContextEntry(entry) ||
     isTurnDurationSystemEntry(entry) ||
