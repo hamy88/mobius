@@ -171,6 +171,11 @@ async function latestArticleGid() {
 
 async function runOnce() {
   const state = loadState();
+  if (!isInWindow(new Date())) {
+    console.log(LOG_PREFIX, 'outside BJT 08:00-22:00 window at runOnce entry, defer');
+    scheduleNext();
+    return;
+  }
   if (await isAnyWriterRunning()) {
     console.log(LOG_PREFIX, 'writer still running, skip this tick');
     scheduleNext();
