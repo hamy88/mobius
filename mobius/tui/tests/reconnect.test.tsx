@@ -2,17 +2,18 @@
  * Reconnect regression — "TUI 输入经常显示两次" (input often renders twice).
  *
  * Root cause: the optimistic `pendingUser` placeholder is cleared on the live
- * `jsonl_entry` path but NOT when the same message is delivered via a reconnect's
- * `jsonl_history` replay. Behind a reverse proxy (nginx idle timeout) the SSE
- * stream drops mid-turn and auto-reconnects; the reconnect replays the session
- * tail — which now contains the just-sent user message — so it lands in `entries`
- * while `pendingUser` is still set, and the user's input is shown twice. If the
- * whole turn finished while disconnected, no live entry ever arrives to clear the
- * placeholder, so the duplication persists until the next send.
+ * `entries` path but NOT when the same message is delivered via a reconnect's
+ * history reconciliation. Behind a reverse proxy (nginx idle timeout) the SSE
+ * stream drops mid-turn and auto-reconnects; the reconnect's stateless 对账
+ * (① groups → ② refetch of version-changed groups) picks up the just-sent user
+ * message, so it lands in `entries` while `pendingUser` is still set, and the
+ * user's input is shown twice. If the whole turn finished while disconnected, no
+ * live entry ever arrives to clear the placeholder, so the duplication persists
+ * until the next send.
  *
  * This test drops the SSE stream right after the user sends "good" and has the
- * reconnect replay history containing that user entry, then asserts "good" is
- * rendered exactly once. Without the fix it renders twice.
+ * reconnect's reconciliation deliver that user entry, then asserts "good" is
+ * rendered exactly once. Without the retire-on-reconcile fix it renders twice.
  *
  * Run:  npm run test:reconnect
  */
@@ -41,26 +42,36 @@ function ok(c: boolean, m: string) { c ? (pass++, console.log(`  ✓ ${m}`)) : (
 
 const PID = 'proj-1', IID = 'issue-1', SID = 'sess-1'
 let connectCount = 0
-// Entries the next SSE connect should replay as jsonl_history (simulates the
-// server's tail snapshot on reconnect containing the just-persisted user turn).
-let pendingHistory: any[] = []
+// agent-history mock 状态: 一个组, 发消息后 version 抬升并带上该条 user 条目.
+// 重连的 stateless 对账 (① groups → version 变了 → ② 整组重拉) 会把它补进
+// transcript — 这是旧 "history 回放" 的协议等价物.
+let groupVersion = 0
+let groupEntries: any[] = []
 
 function mockFetch(url: string, init?: RequestInit): Response {
-  // ── SSE: a fresh stream per connect. Reconnects (connect >= 2) replay history. ─
+  // ── SSE: a fresh stream per connect. Live entries stay silent; the only
+  //    delivery path for the sent turn is the reconnect's ①② reconciliation. ──
   if (url.includes('/events')) {
-    const n = ++connectCount
+    ++connectCount
     return new Response(new RS({
       start(c: any) {
         sseController = c
         c.enqueue(enc.encode('event: subscribed\ndata: {"event":"subscribed"}\n\n'))
-        if (n >= 2 && pendingHistory.length) {
-          const payload = JSON.stringify({ event: 'jsonl_history', entries: pendingHistory, done: true })
-          c.enqueue(enc.encode(`event: jsonl_history\ndata: ${payload}\n\n`))
-        }
       },
     }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
   }
   const method = init?.method ?? 'GET'
+  if (url.endsWith(`/api/sessions/${SID}/groups`)) {
+    return json({
+      session_version: groupVersion,
+      groups: groupEntries.length
+        ? [{ id: 'g1', seq: 1, opener_ts: null, user_summary: 'good', version: groupVersion, entry_count: groupEntries.length }]
+        : [],
+    })
+  }
+  if (url.includes(`/api/sessions/${SID}/groups/`)) {
+    return json({ group_id: 'g1', version: groupVersion, entries: groupEntries })
+  }
   if (url.endsWith('/api/auth/config')) return json({ password_required: false })
   if (url.endsWith('/api/auth/me')) return json({ id: 'tester', display_name: 'Test User', role: 'admin', work_dir: '/tmp' })
   if (url.endsWith('/api/auth/login')) return json({ token: 'mock-jwt-token', user: { id: 'tester', display_name: 'Test User', role: 'admin' } })
@@ -71,10 +82,12 @@ function mockFetch(url: string, init?: RequestInit): Response {
   }
   if (url.includes('/sessions') && url.includes('/issues') && method === 'POST') return json({ session_id: SID })
   if (url.includes('/sessions') && url.includes('/issues') && method === 'GET') return json([])
-  // Sending a message: persist it, then DROP the live stream so the only delivery
-  // path is the reconnect's history replay (the exact scenario that double-rendered).
+  // Sending a message: persist it into the history store (version bump), then DROP
+  // the live stream so the only delivery path is the reconnect's reconciliation
+  // (the exact scenario that used to double-render).
   if (url.endsWith('/messages') && method === 'POST') {
-    pendingHistory = [{ type: 'user', uuid: 'user-good-1', message: { role: 'user', content: 'good' } }]
+    groupEntries = [{ type: 'user', uuid: 'user-good-1', message: { role: 'user', content: 'good' } }]
+    groupVersion = 1
     setTimeout(() => { try { sseController?.close() } catch { /* ignore */ } }, 150)
     return json({ ok: true, session_id: SID, turn_number: 1 })
   }

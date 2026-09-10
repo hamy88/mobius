@@ -193,14 +193,23 @@ export interface ResourceAccess {
 // ════════════════════════════════════════════════════════════════════════════
 export type AnyEntry = Record<string, any>
 
+// ── agent-history 组元数据 (协议 ① 的载荷) ───────────────────────────────────
+export interface HistoryGroup {
+  id: string
+  seq: number
+  opener_ts: string | null
+  user_summary: string
+  version: number
+  entry_count: number
+}
+
 // ── SSE envelope events (GET /api/sessions/:id/events) ───────────────────────
 // Each SSE frame's data is a JSON object with an `event` discriminator.
 export type SseEvent =
   | { event: 'subscribed'; session: Session }
   | { event: 'history'; messages: any[]; total?: number }
-  | { event: 'jsonl_meta'; session_id: string; total?: number; total_approximate?: number; tail_count?: number; jsonl_path?: string }
-  | { event: 'jsonl_history'; reset?: boolean; done?: boolean; chunk_index?: number; count?: number; entries: AnyEntry[] }
-  | { event: 'jsonl_entry'; session_id: string; entry: AnyEntry }
+  | { event: 'group_created'; session_id: string; group: HistoryGroup }
+  | { event: 'entries'; session_id: string; group_id: string; group_id_version: number; entries: AnyEntry[] }
   | { event: 'typing'; active: boolean }
   | { event: 'error'; message?: string; category?: string }
   | { event: 'server_error'; message?: string }

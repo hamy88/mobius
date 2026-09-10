@@ -29,10 +29,10 @@ const crypto = require('crypto')
 const { AgentBackend } = require('./base')
 import type { HistorySnapshot, QueryOpts } from './base'
 const {
-  appendMobiusCoreEntry,
-  readMergedJsonlHistory,
-  watchMergedJsonl,
-} = require('../services/mobius-jsonl')
+  getHistorySnapshot,
+  writeMobiusCoreEntry,
+} = require('../services/mobius-agent-history')
+const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
   timeConsumeWaterfallFromBackend,
   clearTimeConsumeWaterfallForBackend,
@@ -606,13 +606,15 @@ class TmuxClaudeCodeBackend extends AgentBackend {
   }
 
   // 每个 session 起一个 jsonl-watcher (后端唯一), 新行 → _emitRaw 给所有订阅者.
-  // 已活则不重起. startOffset=current size 因为初始内容由 getHistory 提供 (sentinel).
+  // 已活则不重起. startOffset=current size: 只推增量 (初始内容由历史存储补齐).
   _ensureWatcher(sessionId: string) {
     const entry = this.runtime.get(sessionId)
     if (!entry?.jsonlPath || entry.watch) return
-    entry.watch = watchMergedJsonl({
+    let startOffset = 0
+    try { startOffset = fs.existsSync(entry.jsonlPath) ? fs.statSync(entry.jsonlPath).size : 0 } catch {}
+    entry.watch = watchJsonlFile({
       path: entry.jsonlPath,
-      startSentinel: null,
+      startOffset,
       onEntry: (raw: any) => this._emitRaw(sessionId, raw),
       onError: (e: unknown) => console.warn(`[tmux-claude-code/watch ${sessionId}] ${(e as Error)?.message || e}`),
     })
@@ -620,13 +622,23 @@ class TmuxClaudeCodeBackend extends AgentBackend {
 
   // ── 公开方法 (基类锁包装) ─────────────────────────────
   createNewSession(opts: ClaudeDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._createImpl(opts))
   }
   pauseCurrentAndResumeFromSession(opts: ClaudeDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._pauseImpl(opts))
   }
   noPauseCurrentAndQueueQueryAtSession(opts: ClaudeDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
+  }
+
+  // opener 提前: dispatch 一进来 (进锁/spawn 之前) 就把用户卡写库开轮,
+  // 不然 spawn 期间首趟 sync 抢先入库, 启动前导会落进 "第0轮".
+  _writeMobiusPromptEarly(opts: ClaudeDispatchOpts) {
+    if (!opts?.sessionId || !opts?.mobiusPromptRecord) return
+    try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
   terminateSession(sessionId: string) {
     return this._withLock(sessionId, () => this._terminateImpl(sessionId))
@@ -845,14 +857,9 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         || null
   }
 
-  // 历史 + sentinel: 上层用 sentinel 串到 live 流, 不重复.
-  getHistory(sessionId: string, opts: QueryOpts = {}): HistorySnapshot {
-    const jsonlPath = this._resolveJsonlPath(sessionId)
-    if (!jsonlPath) {
-      return { entries: [], total: 0, truncated: false, sentinel: 0 }
-    }
-    const r = readMergedJsonlHistory(jsonlPath, opts)
-    return { entries: r.entries, total: r.total, totalApproximate: r.totalApproximate, truncated: r.truncated, sentinel: r.sentinel }
+  // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
+  getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId)) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
@@ -863,50 +870,28 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     return clearTimeConsumeWaterfallForBackend(this, sessionId, opts)
   }
 
-  // 订阅 raw 流: opts.fromSentinel 指定字节 offset → 起独立 watcher 从那点 tail.
-  // 不传 sentinel = 走基类的 EventEmitter (用后端共享 watcher emit 的 live 流).
+  // 订阅 raw 流: 基类 EventEmitter (后端共享 watcher emit 的 live 流).
+  // 历史补齐由 agent-history-store 负责, 不再有 fromSentinel 续读语义.
   getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, opts: QueryOpts = {}) {
-    if (opts && opts.fromSentinel != null) {
-      const jsonlPath = this._resolveJsonlPath(sessionId)
-      if (!jsonlPath) {
-        // 没 jsonl 路径 (session 没起过) → 退回基类 (live event-emitter)
-        return super.getAgentRawThoughtStream(sessionId, listener, opts)
-      }
-      // 独立 watcher, 从 sentinel 开始 tail. 这样多个 stream 并发各自从各自 sentinel 拿,
-      // 互不影响, 也不会跟后端共享 watcher (_ensureWatcher) 重复 emit.
-      // 注意: 独立 watcher 会跟共享 watcher 同时 tail 同一文件 — 这是 OK 的, fs.watch
-      // 多个 listener 互不干扰. 后端共享 watcher 喂 base.emitter, 这个独立 watcher 直
-      // 接喂用户的 listener.
-      const w = watchMergedJsonl({
-        path: jsonlPath,
-        startSentinel: opts.fromSentinel as number | null,
-        onEntry: (raw: any) => listener(raw),
-        onError: (e: unknown) => console.warn(`[tmux-claude-code/sub ${sessionId}] ${(e as Error)?.message || e}`),
-      })
-      return () => { try { w.stop() } catch {} }
-    }
     return super.getAgentRawThoughtStream(sessionId, listener, opts)
   }
 
-  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined) {
+  // 发送链路写入 user_input/compact 卡 = 开新轮 (写进 agent-history-store, 不再落文件).
+  // 不要求 runtime 已绑定 jsonl 路径: 调用点已提前到 dispatch 入口, 新会话 spawn 期间路径未知也要先开轮; 路径留 null, 由首次 sync 认领.
+  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined, cwdHint?: string) {
     if (!mobiusPromptRecord) return false
     const entry = this.runtime.get(sessionId)
-    if (!entry?.jsonlPath) {
-      console.warn(`[tmux-claude-code] mobius jsonl skipped (${sessionId}): original jsonl path missing`)
-      return false
-    }
     try {
-      appendMobiusCoreEntry({
-        jsonlPath: entry.jsonlPath,
+      return writeMobiusCoreEntry({
         sessionId,
-        agentSessionId: entry.agentSessionId || null,
-        cwd: entry.cwd || null,
+        agentSessionId: entry?.agentSessionId || null,
+        cwd: entry?.cwd || cwdHint || null,
         backendName: this.name,
+        primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
       })
-      return true
     } catch (e) {
-      console.warn(`[tmux-claude-code] mobius jsonl append failed (${sessionId}): ${(e as Error)?.message || e}`)
+      console.warn(`[tmux-claude-code] mobius core entry failed (${sessionId}): ${(e as Error)?.message || e}`)
       return false
     }
   }
@@ -989,7 +974,6 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         enableGulingMcp,
       })
     }
-    this.harnessWriteMobiusCoreEntry(sessionId, mobiusPromptRecord)
     await this._sendMaybeInitialContextPrompt(sessionId, prompt, isInitialContextPrompt)
     const entry = this.runtime.get(sessionId)
     if (!suppressRunningFlag) markRunning(flagRoot || entry?.flagRoot || entry?.cwd || cwd, sessionId)

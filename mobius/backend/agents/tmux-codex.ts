@@ -31,10 +31,10 @@ function resolveAimuxBin() {
 const { AgentBackend } = require('./base')
 import type { HistorySnapshot, QueryOpts } from './base'
 const {
-  appendMobiusCoreEntry,
-  readMergedJsonlHistory,
-  watchMergedJsonl,
-} = require('../services/mobius-jsonl')
+  getHistorySnapshot,
+  writeMobiusCoreEntry,
+} = require('../services/mobius-agent-history')
+const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
   timeConsumeWaterfallFromBackend,
   clearTimeConsumeWaterfallForBackend,
@@ -702,28 +702,40 @@ class TmuxCodexBackend extends AgentBackend {
   _ensureWatcher(sessionId: string, startOffset: any = null) {
     const entry = this.runtime.get(sessionId)
     if (!entry?.jsonlPath || entry.watch) return
-    const startSentinel = startOffset == null
-      ? null
-      : { primary: startOffset, mobius: startOffset === 0 ? 0 : undefined }
-    entry.watch = watchMergedJsonl({
+    // startOffset: null = 从当前文件尾起 (只推增量); 0 = 从头 (重建 working 状态用).
+    let from = Math.max(0, Math.floor(Number(startOffset) || 0))
+    if (startOffset == null) {
+      try { from = fs.existsSync(entry.jsonlPath) ? fs.statSync(entry.jsonlPath).size : 0 } catch { from = 0 }
+    }
+    entry.watch = watchJsonlFile({
       path: entry.jsonlPath,
-      startSentinel,
+      startOffset: from,
       onEntry: (raw: any) => {
         this._emitRaw(sessionId, raw)
+        this._updateWorkingFromEntry(entry, raw)
       },
-      onPrimaryEntry: (raw: any) => this._updateWorkingFromEntry(entry, raw),
       onError: (e: unknown) => console.warn(`[tmux-codex/watch ${sessionId}] ${(e as Error)?.message || e}`),
     })
   }
 
   createNewSession(opts: CodexDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._createImpl(opts))
   }
   pauseCurrentAndResumeFromSession(opts: CodexDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._pauseImpl(opts))
   }
   noPauseCurrentAndQueueQueryAtSession(opts: CodexDispatchOpts) {
+    this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
+  }
+
+  // opener 提前: dispatch 一进来 (进锁/启动 CLI 之前) 就把用户卡写库开轮.
+  // 若等 spawn+绑定路径 (~10s) 再写, 首趟 sync 会抢先把启动前导落进 "第0轮".
+  _writeMobiusPromptEarly(opts: CodexDispatchOpts) {
+    if (!opts?.sessionId || !opts?.mobiusPromptRecord) return
+    try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
   terminateSession(sessionId: string) {
     return this._withLock(sessionId, () => this._terminateImpl(sessionId))
@@ -904,13 +916,9 @@ class TmuxCodexBackend extends AgentBackend {
         || null
   }
 
-  getHistory(sessionId: string, opts: QueryOpts = {}): HistorySnapshot {
-    const jsonlPath = this._resolveJsonlPath(sessionId)
-    if (!jsonlPath) {
-      return { entries: [], total: 0, truncated: false, sentinel: 0 }
-    }
-    const r = readMergedJsonlHistory(jsonlPath, opts)
-    return { entries: r.entries, total: r.total, totalApproximate: r.totalApproximate, truncated: r.truncated, sentinel: r.sentinel }
+  // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
+  getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId)) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: any = {}) {
@@ -921,40 +929,29 @@ class TmuxCodexBackend extends AgentBackend {
     return clearTimeConsumeWaterfallForBackend(this, sessionId, opts)
   }
 
+  // 订阅 raw 流: 基类 EventEmitter (后端共享 watcher emit 的 live 流).
+  // 历史补齐由 agent-history-store 负责, 不再有 fromSentinel 续读语义.
   getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, opts: QueryOpts = {}) {
-    if (opts && opts.fromSentinel != null) {
-      const jsonlPath = this._resolveJsonlPath(sessionId)
-      if (!jsonlPath) return super.getAgentRawThoughtStream(sessionId, listener, opts)
-      const w = watchMergedJsonl({
-        path: jsonlPath,
-        startSentinel: opts.fromSentinel,
-        onEntry: (raw: any) => listener(raw),
-        onError: (e: unknown) => console.warn(`[tmux-codex/sub ${sessionId}] ${(e as Error)?.message || e}`),
-      })
-      return () => { try { w.stop() } catch {} }
-    }
     return super.getAgentRawThoughtStream(sessionId, listener, opts)
   }
 
-  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined) {
+  // 发送链路写入 user_input/compact 卡 = 开新轮 (写进 agent-history-store, 不再落文件).
+  // 不要求 runtime 已绑定 jsonl 路径: 调用点已提前到 dispatch 入口, 新会话 spawn 期间
+  // 路径未知也要先开轮; 路径留 null, 由首次 sync 认领.
+  harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined, cwdHint?: string) {
     if (!mobiusPromptRecord) return false
     const entry = this.runtime.get(sessionId)
-    if (!entry?.jsonlPath) {
-      console.warn(`[tmux-codex] mobius jsonl skipped (${sessionId}): original jsonl path missing`)
-      return false
-    }
     try {
-      appendMobiusCoreEntry({
-        jsonlPath: entry.jsonlPath,
+      return writeMobiusCoreEntry({
         sessionId,
-        agentSessionId: entry.agentSessionId || null,
-        cwd: entry.cwd || null,
+        agentSessionId: entry?.agentSessionId || null,
+        cwd: entry?.cwd || cwdHint || null,
         backendName: this.name,
+        primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
       })
-      return true
     } catch (e) {
-      console.warn(`[tmux-codex] mobius jsonl append failed (${sessionId}): ${e.message}`)
+      console.warn(`[tmux-codex] mobius core entry failed (${sessionId}): ${e.message}`)
       return false
     }
   }
@@ -1060,10 +1057,6 @@ class TmuxCodexBackend extends AgentBackend {
     const bindSinceMs = spawnInfo?.startedAt || Date.now()
     const entry = this.runtime.get(sessionId)
     if (entry) entry.working = true
-    let mobiusPromptWritten = false
-    if (entry?.jsonlPath) {
-      mobiusPromptWritten = this.harnessWriteMobiusCoreEntry(sessionId, mobiusPromptRecord)
-    }
     await this._sendPromptToWindow(sessionId, prompt)
     if (!suppressRunningFlag) markRunning(flagRoot || entry?.flagRoot || entry?.cwd || cwd, sessionId)
     if (!this.runtime.get(sessionId)?.agentSessionId) {
@@ -1082,9 +1075,6 @@ class TmuxCodexBackend extends AgentBackend {
         knownThreadIds: bindKnownThreadIds,
         allowUpdatedThreadFallback,
       })
-      if (!mobiusPromptWritten) {
-        mobiusPromptWritten = this.harnessWriteMobiusCoreEntry(sessionId, mobiusPromptRecord)
-      }
     }
   }
 

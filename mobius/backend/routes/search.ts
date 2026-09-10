@@ -29,7 +29,7 @@ import * as modelRegistry from '../services/model-registry';
 // @ts-ignore — agents registry 仍是 .js
 import * as agents from '../agents';
 // @ts-ignore — service 仍是 .js
-import { mobiusJsonlPathOf } from '../services/mobius-jsonl';
+import { deprecatedMobiusJsonlPathOf as mobiusJsonlPathOf } from '../services/mobius-agent-history-deprecated';
 // @ts-ignore — service 仍是 .js
 import { canReadSession } from '../services/access-control';
 import { is_mobius_attached_content } from '../services/search-content';
@@ -191,7 +191,7 @@ async function scanSession(sessionId: string, model: any, matcher: Matcher, maxF
   const paths: string[] = [];
   if (primaryPath) {
     paths.push(primaryPath);
-    const mob = mobiusJsonlPathOf(primaryPath);
+    const mob = mobiusJsonlPathOf(primaryPath); // [deprecated-compat] 冻结旧文件搜索, 待 FTS 替代
     if (mob) paths.push(mob);
   }
   if (paths.length === 0) return [];

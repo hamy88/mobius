@@ -152,8 +152,7 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
 
   // First query of a fresh session triggers the full backend bootstrap (lazy
   // session creation, worker spawn, context load) before any output streams.
-  // Label that phase "第一个问题，正在初始化+全平台同步中，请稍候" instead of "Working"
-  // so it reads as startup rather than a stuck agent. Once the first assistant
+  // Label that phase as startup rather than a stuck agent. Once the first assistant
   // output is observed (or the session is a resumed one with prior history),
   // the indicator falls back to the normal Working label for every turn.
   const firstQueryInFlight = !resumeSessionId && !chat.entries.some(isAssistantOutput)

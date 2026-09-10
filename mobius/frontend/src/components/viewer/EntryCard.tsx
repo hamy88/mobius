@@ -37,6 +37,7 @@ import {
   INITIAL_THEME,
 } from './themes'
 import { formatTs } from './utils'
+import { consumeFreshEntry } from '../../services/agent-history-store'
 import {
   extractCodeEdit,
   extractWriteToolCall,
@@ -65,8 +66,8 @@ import {
   jsonEntryTourTarget,
 } from './entry-classify'
 import { buildHeaderSummary, resolveTaskHeaderSummary } from './header-summary'
-import { deriveToolCallStatus, TOOL_STATUS_META } from './tool-status'
-import type { ResolvedCallMap, ToolStatus } from './tool-status'
+import { TOOL_STATUS_META } from './tool-status'
+import type { ToolStatus } from './tool-status'
 import { estimateRenderChars, estimateToolResultsChars, clampNodeForRender, clampToolResults } from './oversized'
 import { KeyNode } from './KeyNode'
 import { JsonEntryCodeDiff } from './CodeDiff'
@@ -132,7 +133,7 @@ function ToolStatusIcon({ status }: { status: ToolStatus }) {
  * 单卡 open 的"系统期望值" — 所有展开/折叠条件合并到此一处判定, 优先级 (高 → 低):
  *   ① 字段模式       始终默认折叠 — 字段树不能被任何自动展开信号掀开.
  *   ② forceOpen       搜索命中        — 用户显式查看, 压过 parentOrderedCollapse.
- *   ③ parentOrderedCollapse    forgotten-flag  — 默认折叠; 压过本地展开条件.
+ *   ③ parentOrderedCollapse    上下文折叠规则 (forgotten-flag / 加密 reasoning) — 默认折叠; 压过本地展开条件.
  *   ④ 本地展开条件     patch_apply / 计划(canPlan) / 纯文本卡(可精简·可图片·error 类型, 且非代码卡).
  *   ⑤ toolError       工具失败        — "折叠不藏错误"; 被 ①抑制.
  *   ⑥ 兜底            折叠.
@@ -152,9 +153,9 @@ function resolveDesiredOpen(opts: {
   isErrorType: boolean
   toolError: boolean
 }): boolean {
-  if (opts.mode === 'field') return false       // 字段模式永远不自动展开, 压过其它规则
-  if (opts.forceOpen) return true       // ① 搜索命中
-  if (opts.parentOrderedCollapse) return false   // ② forgotten-flag
+  if (opts.forceOpen) return true       // 搜索命中是显式查看, 压过字段模式与其它折叠规则
+  if (opts.mode === 'field') return false       // 字段模式永远不自动展开
+  if (opts.parentOrderedCollapse) return false   // ② 上下文折叠规则
   // ③ 本地展开条件: patch_apply / 计划 / 初始 / 纯文本卡(可精简·可图片·error 类型, 且非代码卡)
   if (opts.isPatchApply || opts.canPlan || opts.canInitial || (!opts.canCode && (opts.canCompact || opts.canImage || opts.isErrorType))) return true
   if (opts.toolError) return true       // ④ 工具失败
@@ -164,12 +165,12 @@ function resolveDesiredOpen(opts: {
 /**
  * 单条 entry 卡片. type 决定颜色, 摘要行展示关键内容 (供快速扫).
  */
-function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], resolvedMap, taskPlan }: {
+function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], toolStatus, taskPlan }: {
   entry: AnyEntry
   lineNo?: number
   // forceOpen: 搜索命中该卡 — 用户显式查看, 优先级最高, 压过 parentOrderedCollapse 与用户曾手动折叠.
   forceOpen?: boolean
-  // parentOrderedCollapse: forgotten-flag 收尾卡 (agent 被 forgotten-flag 系统提醒触发的机械删 flag 链路) —
+  // parentOrderedCollapse: 上下文折叠规则命中的卡片 (forgotten-flag 收尾链路 / 加密 reasoning) —
   // 默认折叠, 压过本地展开条件, 但被 forceOpen 压过. 用户仍可手动展开 (onToggle 写回 state, userToggledRef 阻止自动掀开).
   parentOrderedCollapse?: boolean
   showMeta?: boolean
@@ -178,7 +179,9 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   dense?: boolean
   bashResults?: BashToolResult[]
   readResults?: BashToolResult[]
-  resolvedMap?: ResolvedCallMap | null
+  // 已派生的每卡工具状态 ('running' | 'success' | 'error' | null). 父层 toolStatusOf
+  // 按 (entry, map) 记忆后传入 — primitive prop, SSE 新数据不再让内容未变的卡重渲染.
+  toolStatus?: ToolStatus | null
   // 任务工具 (TaskCreate/TaskUpdate) 的跨条目累积快照 (JsonlView 顶层扫描产出,
   // anchor uuid → PlanUpdate). 与 update_plan / task_reminder 共用计划卡片视图.
   taskPlan?: PlanUpdate | null
@@ -296,15 +299,16 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const canCompact = headerSummary.canCompact
   // 展开后默认: 可计划 → 计划模式; 可初始 → 初始模式; 可代码 → 代码模式; 可图片 → 图片模式; 可精简 → 精简模式; 其它 → 字段模式
   const [mode, setMode] = useState<CardMode>(canPlan ? 'plan' : canInitial ? 'initial' : canCode ? 'code' : canImage ? 'image' : canCompact ? 'compact' : 'field')
+  // 入场动画只播给 SSE 新到的条目 (挂载时消费一次性标记; ② 历史加载与滚动复挂不播).
+  const [isSseFresh] = useState(() => consumeFreshEntry(entry))
 
   // 卡片展开态受控于本地 state, 跨父组件重渲染 (实时轮询追加 entry) 保持不变.
   // 展开优先级集中在上方的 resolveDesiredOpen: field(字段模式) > forceOpen(搜索) >
-  // parentOrderedCollapse(forgotten-flag) > localExpand(本地展开条件) > toolError(工具失败) > 兜底折叠.
+  // parentOrderedCollapse(上下文规则) > localExpand(本地展开条件) > toolError(工具失败) > 兜底折叠.
   // 用户手动折叠 → onToggle 写回 state, 此后重渲染不再强制掀开 (字段模式也不会被自动掀开).
   const tourTarget = jsonEntryTourTarget(entry)
 
-  // 工具调用状态: 由 "该 tool_use 的结果是否已落地" 推导 (running = 已发起未回结果).
-  const toolStatus = deriveToolCallStatus(entry, resolvedMap)
+  // 工具调用状态: 父层预算好的每卡状态 (原为组级 map + 此处派生, 身份传染已消除).
 
   // 系统期望 open — 所有展开/折叠条件集中在上方的 resolveDesiredOpen 判定.
   const desiredOpen = resolveDesiredOpen({
@@ -325,11 +329,11 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const userToggledRef = useRef(false)
   const [open, setOpen] = useState<boolean>(desiredOpen)
 
-  // 自动信号跟随 — ratchet (只掀开不折回; 字段模式保持折叠) + 尊重用户手动:
-  //   · forceOpen (搜索): 非字段模式下即使用户曾手动折叠也强制掀开 (显式查看优先).
+  // 自动信号跟随 — ratchet (只掀开不折回) + 尊重用户手动:
+  //   · forceOpen (搜索): 即使用户曾手动折叠或当前是字段模式也强制掀开 (显式查看优先).
   //   · 其它信号: 用户手动操作过则锁定不动.
   useEffect(() => {
-    if (forceOpen && mode !== 'field') { setOpen(true); return }
+    if (forceOpen) { setOpen(true); return }
     if (!userToggledRef.current && desiredOpen) setOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forceOpen, desiredOpen])
@@ -387,7 +391,9 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
       data-density={dense ? 'dense' : undefined}
       open={open}
       onToggle={(e) => { userToggledRef.current = true; setOpen((e.currentTarget as HTMLDetailsElement).open) }}
-      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm card-enter ${theme.border} ${theme.bg}`}>
+      data-search-hit={forceOpen ? 'true' : undefined}
+      aria-label={forceOpen ? '搜索命中条目' : undefined}
+      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm ${isSseFresh ? 'card-enter' : ''} ${theme.border} ${theme.bg} ${forceOpen ? 'ring-2 ring-red-500/95 border-red-500/95 shadow-[0_0_0_3px_rgba(239,68,68,0.3),0_0_24px_rgba(239,68,68,0.32)]' : ''}`}>
       <summary className={`jsonl-entry-summary cursor-pointer ${dense ? 'px-1 pt-0.5 gap-1' : 'px-3 pt-1.5 gap-2'} ${open ? 'pb-0.5' : dense ? 'pb-0.5' : 'pb-1.5'} flex items-center select-text${hasHeaderAction ? ' pr-[120px]' : ''}`}>
         {showMeta && typeof lineNo === 'number' && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">#{lineNo}</span>}
         {showMeta && ts && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">{ts}</span>}
@@ -542,7 +548,34 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   )
 }
 
+// ── memo 判等辅助: 引用先比, 内容后比 ──────────────────────────────────────
+// bashResults/readResults/taskPlan 每代流水线都重建对象 (merge 从零分配), 引用判等会
+// 让内容未变的卡全量重渲染; 这里做深度受限的内容判等 (记录字段是扁平结构, 值多为
+// 直接取自 entry 的引用, 引用快路径通常直接命中).
+function contentEqual(a: unknown, b: unknown, depth: number): boolean {
+  if (a === b) return true
+  if (depth <= 0 || a === null || b === null) return false
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) { if (!contentEqual(a[i], b[i], depth - 1)) return false }
+    return true
+  }
+  if (typeof a !== 'object' || typeof b !== 'object') return false
+  const ka = Object.keys(a as object)
+  const kb = Object.keys(b as object)
+  if (ka.length !== kb.length) return false
+  for (const k of ka) { if (!contentEqual((a as any)[k], (b as any)[k], depth - 1)) return false }
+  return true
+}
+
+function toolResultsEqual(a: BashToolResult[] | undefined, b: BashToolResult[] | undefined): boolean {
+  if (a === b) return true
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) { if (!contentEqual(a[i], b[i], 3)) return false }
+  return true
+}
+
 export const JsonEntryCard = memo(
   JsonEntryCardInner,
-  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && prev.bashResults === next.bashResults && prev.readResults === next.readResults && prev.resolvedMap === next.resolvedMap && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && prev.taskPlan === next.taskPlan,
+  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && toolResultsEqual(prev.bashResults, next.bashResults) && toolResultsEqual(prev.readResults, next.readResults) && prev.toolStatus === next.toolStatus && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && contentEqual(prev.taskPlan, next.taskPlan, 4),
 )

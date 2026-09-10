@@ -937,6 +937,21 @@ body::after {
   will-change: background-position;
 }
 
+/* 空会话的进程状态必须保持高对比度；其父级颜色在部分主题下会让
+   currentColor 渐变接近透明，单独固定到主题主文字色确保可读。 */
+.mobius-status-marquee--readable {
+  --mobius-status-color: var(--text-primary);
+  color: var(--text-primary);
+  background: none;
+  background-image: none;
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  -webkit-text-fill-color: var(--text-primary);
+  animation: none;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mobius-status-marquee {
     animation: none;
@@ -5027,10 +5042,12 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
 .msg-enter { animation: slide-up .28s ease-out; }
 @keyframes slide-up { from { opacity: 0; transform: translateY(10px); } }
 
-/* JsonlEntryCard 新条目入场: 蓝色 glow + 上移渐入, 1.2s 后消退 */
+/* JsonlEntryCard 新条目入场: 蓝色 glow + 右侧平移渐入, 1.2s 后消退.
+   位移 16px 刻意控制在容器横向内边距 (px-5=20px) 之内 — transform 会撑大可滚动区,
+   超出即闪横向滚动条; 滚动容器另配 overflow-x: clip 双保险. */
 .card-enter { animation: card-enter 1.2s ease-out; }
 @keyframes card-enter {
-  0%   { opacity: 0; transform: translateY(6px); box-shadow: 0 0 0 2px rgba(96,165,250,0.45); }
+  0%   { opacity: 0; transform: translateX(16px); box-shadow: 0 0 0 2px rgba(96,165,250,0.45); }
   35%  { opacity: 1; transform: none;            box-shadow: 0 0 0 2px rgba(96,165,250,0.45); }
   100% { opacity: 1; transform: none;            box-shadow: 0 0 0 0 rgba(96,165,250,0); }
 }

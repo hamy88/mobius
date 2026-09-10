@@ -11,7 +11,7 @@
 import type { AnyEntry, RoundItem } from './types'
 import { isFunctionCallPayload } from './entry-extract'
 import { deriveToolCallStatus } from './tool-status'
-import type { ResolvedCallMap } from './tool-status'
+import type { ToolStatusMap } from './tool-status'
 
 // 探索类工具名 (只读/搜索): 默认聚合折叠. Edit/Write/Bash 等有副作用的工具不在其列.
 // 统一小写并去掉 -/_ 让 WebFetch/web_fetch 都命中.
@@ -42,7 +42,7 @@ export type ExploreRenderItem =
   | { kind: 'explore'; items: RoundItem[]; hasError: boolean }
 
 // 把一轮内的 items 按连续 explore 类聚合成渲染节点序列.
-export function groupExploreItems(items: RoundItem[], resolvedMap: ResolvedCallMap | null | undefined): ExploreRenderItem[] {
+export function groupExploreItems(items: RoundItem[], toolStatusMap: ToolStatusMap | null | undefined): ExploreRenderItem[] {
   const out: ExploreRenderItem[] = []
   let bucket: RoundItem[] = []
   const flush = () => {
@@ -50,7 +50,7 @@ export function groupExploreItems(items: RoundItem[], resolvedMap: ResolvedCallM
     if (bucket.length === 1) {
       out.push({ kind: 'single', item: bucket[0] })
     } else {
-      const hasError = bucket.some((it) => deriveToolCallStatus(it.entry, resolvedMap) === 'error')
+      const hasError = bucket.some((it) => deriveToolCallStatus(it.entry, toolStatusMap) === 'error')
       out.push({ kind: 'explore', items: bucket, hasError })
     }
     bucket = []

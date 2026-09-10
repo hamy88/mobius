@@ -37,16 +37,13 @@ import { recordAdminAuditIfCrossUser } from '../services/admin-audit';
 import { gitTopLevel, isGitRepoRoot, resolveSessionWorkspace } from '../services/workspace';
 // @ts-ignore — service 仍是 .js
 import {
-  countMergedJsonl,
-  readMergedJsonlSlice,
-  readMobiusSpine,
-  readPrimaryTsSlice,
-  appendMobiusErrorEntry,
-  readLastMobiusEntryType,
-  DEFAULT_HISTORY_TAIL,
-  MOBIUS_HISTORY_TAIL,
-  MAX_HISTORY_FETCH,
-} from '../services/mobius-jsonl';
+  syncSession as syncHistoryStore,
+  getGroups as getHistoryGroups,
+  getGroupEntries as getHistoryGroupEntries,
+  writeMobiusErrorEntry,
+  deleteSessionData as deleteHistoryData,
+  subscribeSessionEvents,
+} from '../services/mobius-agent-history';
 // @ts-ignore — service 仍是 .js
 import { readSessionInputs } from '../services/session-inputs';
 // @ts-ignore — service 仍是 .js
@@ -427,69 +424,6 @@ function writeSseComment(res: express.Response | null, text: string): boolean {
   return res.write(`: ${text}\n\n`);
 }
 
-interface JsonlHistory {
-  entries?: any[];
-  total?: number;
-  totalApproximate?: boolean;
-  truncated?: boolean;
-  sentinel?: any;
-}
-
-async function sendSseJsonlHistory(
-  res: express.Response,
-  sessionId: string,
-  hist: JsonlHistory,
-): Promise<boolean> {
-  const entries = Array.isArray(hist?.entries) ? hist.entries! : [];
-  const baseMeta = {
-    event: 'jsonl_history',
-    session_id: sessionId,
-    total: hist?.total ?? entries.length,
-    total_approximate: !!hist?.totalApproximate,
-    truncated: !!hist?.truncated,
-  };
-
-  if (entries.length === 0) {
-    return writeSse(res, 'jsonl_history', { ...baseMeta, reset: true, done: true, chunk_index: 0, entries: [] });
-  }
-
-  const maxEntries = 250;
-  const maxBytes = 512 * 1024;
-  let chunkIndex = 0;
-  let chunkBytes = 0;
-  let chunk: any[] = [];
-
-  const flush = async (done: boolean): Promise<boolean> => {
-    if (!chunk.length && !done) return true;
-    const payload = {
-      ...baseMeta,
-      reset: chunkIndex === 0,
-      done: !!done,
-      chunk_index: chunkIndex,
-      count: chunk.length,
-      entries: chunk,
-    };
-    chunkIndex += 1;
-    chunkBytes = 0;
-    chunk = [];
-    return writeSse(res, 'jsonl_history', payload);
-  };
-
-  for (const entry of entries) {
-    let encoded: string;
-    try { encoded = JSON.stringify(entry); } catch { continue; }
-    const entryBytes = Buffer.byteLength(encoded);
-    if (chunk.length > 0 && (chunk.length >= maxEntries || chunkBytes + entryBytes > maxBytes)) {
-      const ok = await flush(false);
-      if (!ok) return false;
-    }
-    chunk.push(entry);
-    chunkBytes += entryBytes + 1;
-  }
-
-  return flush(true);
-}
-
 
 router.patch('/:id', auth, (req: express.Request, res: express.Response) => {
   const id = String(req.params.id);
@@ -678,6 +612,7 @@ router.delete('/:id', auth, async (req: express.Request, res: express.Response) 
     }));
 
   Sessions.permanentDelete(sid);
+  try { deleteHistoryData(sid); } catch {}
   // 仅分身(web: 前缀)清理群成员; 主小莫(assistant-question: 前缀)不清理——交给方案A(@ 时回退到当前主小莫)。
   if (!isAssistantSession(session)) {
     try { Conversations.removeAgentMembers(sid); } catch {}
@@ -719,6 +654,7 @@ router.delete('/:id/permanent', auth, async (req: express.Request, res: express.
       terminated: closed.terminated,
     }));
   Sessions.permanentDelete(id);
+  try { deleteHistoryData(id); } catch {}
   if (!isAssistantSession(session)) {
     try { Conversations.removeAgentMembers(id); } catch {}
   }
@@ -886,64 +822,94 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
       return;
     }
 
-    // count-then-tail: 先发 cheap total (不 parse, 只数 \n), 让前端立刻显示 "N entries / X 轮".
-    // 然后只回灌末尾 DEFAULT_HISTORY_TAIL 条; 用户点 "展开全部" 时再走 REST 补齐.
-    // 默认 full=0; ?full=1 走旧路径 (一次性回灌全部, 最多 maxLines).
-    const fullHistory = String(req.query.full || '') === '1';
-    let metaTotal = 0;
-    let metaApproximate = false;
-    if (!fullHistory) {
-      try {
-        const histPath = typeof backend._resolveJsonlPath === 'function'
-          ? backend._resolveJsonlPath(sessionId)
-          : null;
-        if (histPath) {
-          const counted = countMergedJsonl(histPath);
-          metaTotal = counted.total;
-          metaApproximate = counted.totalApproximate;
-          const metaSent = await writeSse(res, 'jsonl_meta', {
-            event: 'jsonl_meta',
-            session_id: sessionId,
-            total: metaTotal,
-            total_approximate: metaApproximate,
-            tail_count: DEFAULT_HISTORY_TAIL,
-            // 特殊规则: .mobius.jsonl 轨尾部阈值 (不受 tail_count 限制)
-            mobius_tail_count: MOBIUS_HISTORY_TAIL,
-            jsonl_path: counted?.paths?.primary || histPath || null,
-          });
-          if (!metaSent || closed) { endStream(); return; }
+    // ── 历史存储 (agent-history-store): 订阅即补齐, 事件 = 落库结果的投影 ──
+    // 协议 ③: 前端另行 GET ① 拿组元数据、按需 GET ② 拿组条目; SSE 只推增量事件
+    // (group_created / entries). agent 原生 raw 流仅当低延迟触发器: 一条新行 →
+    // 触发一次 store 增量 sync (首条立即, 后续 300ms 合批), sync 提交后由 store 广播.
+    //
+    // 新会话陷阱: jsonl 路径要等首条消息 dispatch 绑定 runtime 后才查得到 (codex 的
+    // rollout 绑定就在 dispatch 里; claude-code 是竞态), 而 SSE 打开常更早. 若只在
+    // 连接时解析一次, 开局的 null 会把整段订阅块跳过, 这条连接就永远收不到事件.
+    // 对策: 订阅无条件挂; 路径每次要用时现问, 晚绑定也能自然追上.
+    // resolvePrimary = 现问一次"这个会话的 jsonl 在哪". 适配器内部三级查表:
+    // 内存 runtime Map → 运行时登记 (hub-runtime) → 历史存档 (hub-archive);
+    // 新会话三者皆空 → null; typeof 防御个别后端未实现该方法.
+    const resolvePrimary = () => (typeof backend._resolveJsonlPath === 'function'
+      ? backend._resolveJsonlPath(sessionId)
+      : null);
+    {
+      // 开门补齐: 连接建立时把库读到文件末尾; 新会话路径未绑定 → 跳过不报错, 后续 runSync 追上.
+      const initialPath = resolvePrimary();
+      let storeSyncError = '';
+      if (initialPath) {
+        try {
+          const synced = syncHistoryStore(sessionId, initialPath);
+          // 结构化失败 (书签错乱等): 取返回里的 error 文案.
+          if (!synced.ok) storeSyncError = synced.error || 'history store sync failed';
+        } catch (e) {
+          // 抛异常 (非结构化失败): 同样按失败处理.
+          storeSyncError = (e as Error).message || String(e);
         }
-      } catch (e) {
-        console.warn(`[sessions/events] jsonl_meta count failed (${sessionId}): ${(e as Error).message}`);
+      }
+      // 开门补齐失败 → 告知前端并收线不订阅; error 标记粘性, 重连也一样.
+      if (storeSyncError) {
+        const sent = await writeSse(res, 'server_error', {
+          event: 'error',
+          message: storeSyncError,
+          category: 'history_store',
+        });
+        // 帧没写出去 = 连接已断 → 收线终止.
+        if (!sent || closed) { endStream(); return; }
+      } else {
+        // 事件源 1 — store 广播: 开组/新条目落库即发, 原样转发.
+        const unsubStore = subscribeSessionEvents(sessionId, (ev) => {
+          writeSse(res, ev.type, { event: ev.type, session_id: sessionId, ...ev.payload })
+            .catch(() => cleanup());
+        });
+        let syncTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastSyncAt = 0;
+        const runSync = () => {
+          lastSyncAt = Date.now();
+          // 每次现问路径: 未绑定 → 安静跳过等下一趟; 绑定后开始真正同步.
+          const primaryPath = resolvePrimary();
+          if (!primaryPath) return;
+          // 异常吞掉: 结构化 error 机制兜底.
+          try { syncHistoryStore(sessionId, primaryPath); } catch {}
+        };
+        // 300ms 合批: agent 高频写文件时, 一条 raw 行最多引起一次 sync.
+        const scheduleSync = () => {
+          const since = Date.now() - lastSyncAt;
+          // 距上次 sync 已 ≥300ms → 立即跑.
+          if (since >= 300) { runSync(); return; }
+          // 否则定时到 300ms 点跑; 已挂定时器不重复挂 (后续行蹭这班车).
+          if (!syncTimer) {
+            syncTimer = setTimeout(() => { syncTimer = null; runSync(); }, 300 - since);
+          }
+        };
+        // 事件源 2 — agent 原生 raw 流: 只当低延迟触发器, 不转发内容本身.
+        const unsubRaw = backend.getAgentRawThoughtStream(
+          sessionId,
+          (entry: any) => {
+            scheduleSync();
+            // 本轮结束标记: 补发 typing=false 撤"工作中"提示, 并给会话留痕.
+            if (isTurnCompleteEntry(entry)) {
+              writeSse(res, 'typing', { event: 'typing', active: false }).catch(() => cleanup());
+              try {
+                // agent_status 现由 agent-status-syncer 统一管; turn 完成只刷新 last_agent_event 留痕.
+                db.prepare('UPDATE sessions_v2 SET last_agent_event=strftime(\'%Y-%m-%dT%H:%M:%fZ\',\'now\') WHERE session_id=?')
+                  .run(sessionId);
+              } catch {}
+            }
+          },
+        );
+        // 连接收线: 摘两个订阅 + 清未触发的定时器.
+        unsub = () => {
+          try { unsubStore(); } catch {}
+          if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+          try { unsubRaw(); } catch {}
+        };
       }
     }
-
-    const histOpts = fullHistory ? {} : { tailCount: DEFAULT_HISTORY_TAIL };
-    const hist = backend.getHistory(sessionId, histOpts) as JsonlHistory;
-    // 把 cheap total 覆盖回 hist.total, 让 sendSseJsonlHistory 的 baseMeta.total 跟 jsonl_meta 一致.
-    if (!fullHistory && metaTotal > 0) {
-      hist.total = metaTotal;
-      hist.totalApproximate = metaApproximate;
-      hist.truncated = metaTotal > (hist.entries?.length || 0);
-    }
-    const jsonlHistorySent = await sendSseJsonlHistory(res,sessionId, hist);
-    if (!jsonlHistorySent || closed) { endStream(); return; }
-
-    unsub = backend.getAgentRawThoughtStream(
-      sessionId,
-      (entry: any) => {
-        writeSse(res, 'jsonl_entry', { event: 'jsonl_entry', session_id: sessionId, entry }).catch(() => cleanup());
-        if (isTurnCompleteEntry(entry)) {
-          writeSse(res, 'typing', { event: 'typing', active: false }).catch(() => cleanup());
-          try {
-            // agent_status 现由 agent-status-syncer 统一管; turn 完成只刷新 last_agent_event 留痕.
-            db.prepare('UPDATE sessions_v2 SET last_agent_event=strftime(\'%Y-%m-%dT%H:%M:%fZ\',\'now\') WHERE session_id=?')
-              .run(sessionId);
-          } catch {}
-        }
-      },
-      { fromSentinel: hist.sentinel },
-    );
   } catch (e) {
     console.warn(`[sessions/events] stream failed (${sessionId}): ${(e as Error).message}`);
     try { await writeSse(res, 'server_error', { event: 'error', message: (e as Error).message || String(e) }); } catch {}
@@ -951,103 +917,70 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
   }
 });
 
-// jsonl-history REST — "展开全部" 时按需补齐. SSE 默认只回灌末尾 DEFAULT_HISTORY_TAIL,
-// 前端要看完整历史时调用这个端点拉指定窗口 [from, from+limit).
-// track=mobius  → 伴生轨全量骨架 (超长会话"加载全部"只拉它, 主轨明细等展开轮次再取).
-// track=primary → 主轨时间戳切片 [from_ts 含, to_ts 排), 字节二分定界, from_byte 游标续拉.
-router.get('/:id/jsonl-history', auth, (req: express.Request, res: express.Response) => {
+// ── 历史存储协议 ① ② (agent-history-store.db) ────────────────────────────
+// ① 全部轮元数据一次给全; If-None-Match == session_version 时 304 零载荷.
+router.get('/:id/groups', auth, (req: express.Request, res: express.Response) => {
   const id = String(req.params.id);
   const user = userOf(req);
   const session = findSessionReadable(id, user);
   if (!session) { res.status(404).json({ error: '未找到' }); return; }
-  auditSessionAccess(user, 'read_session_jsonl_history', session);
+  auditSessionAccess(user, 'read_session_groups', session);
 
   const backend = backendForSession(session);
-  const histPath = typeof backend._resolveJsonlPath === 'function'
+  const primaryPath = typeof backend._resolveJsonlPath === 'function'
     ? backend._resolveJsonlPath(id)
     : null;
-  if (!histPath) {
-    res.json({ entries: [], total: 0, from: 0, returned: 0, has_more: false });
-    return;
-  }
-
-  const track = String(req.query.track || '');
-  if (track === 'mobius') {
-    try {
-      const spine = readMobiusSpine(histPath);
-      res.json({
-        session_id: id,
-        track: 'mobius',
-        entries: spine.entries,
-        total: spine.total,
-        returned: spine.entries.length,
-        truncated: spine.truncated,
-      });
-    } catch (e) {
-      res.status(500).json({ error: `mobius spine 读取失败: ${(e as Error).message}` });
-    }
-    return;
-  }
-  if (track === 'primary') {
-    try {
-      const slice = readPrimaryTsSlice(histPath, {
-        fromTs: req.query.from_ts,
-        toTs: req.query.to_ts,
-        fromByte: req.query.from_byte,
-        limit: req.query.limit,
-      });
-      if (slice.error) { res.status(400).json({ error: slice.error }); return; }
-      res.json({ session_id: id, track: 'primary', ...slice });
-    } catch (e) {
-      res.status(500).json({ error: `primary slice 读取失败: ${(e as Error).message}` });
-    }
-    return;
-  }
-
-  const fromIndex = Math.max(0, Math.floor(Number(req.query.from) || 0));
-  const requestedLimit = Math.floor(Number(req.query.limit) || DEFAULT_HISTORY_TAIL);
-  const limit = Math.max(0, Math.min(MAX_HISTORY_FETCH, requestedLimit));
-  // Overlay/preview callers only need the newest records.  Using getHistory(tailCount)
-  // avoids readMergedJsonlSlice's intentionally-expensive full-file parse.
-  const requestedTail = Math.floor(Number(req.query.tail_count) || 0);
-  const tailCount = Math.max(0, Math.min(MAX_HISTORY_FETCH, requestedTail));
-
   try {
-    if (tailCount > 0) {
-      const history = backend.getHistory(id, { tailCount });
-      const entries = Array.isArray(history?.entries) ? history.entries : [];
-      res.json({
-        session_id: id,
-        entries,
-        total: Number(history?.total || entries.length),
-        from: Math.max(0, Number(history?.total || entries.length) - entries.length),
-        returned: entries.length,
-        has_more: Boolean(history?.truncated),
-        path: history?.paths?.primary || histPath,
-      });
+    const synced = syncHistoryStore(id, primaryPath);
+    if (!synced.ok) {
+      res.status(502).json({ error: synced.error || 'history store sync failed' });
       return;
     }
-    const slice = readMergedJsonlSlice(histPath, { fromIndex, limit });
-    if (slice.exceeded) {
-      res.status(413).json({
-        error: 'jsonl 文件超过安全上限, 无法整文件解析. 请联系管理员或缩小窗口.',
-        total: slice.total,
-      });
+    const { session_version, groups } = getHistoryGroups(id);
+    const etag = String(session_version);
+    const inm = String(req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '');
+    if (inm && inm === etag) {
+      res.set('ETag', etag);
+      res.status(304).end();
       return;
     }
-    res.json({
-      session_id: id,
-      entries: slice.entries,
-      total: slice.total,
-      from: slice.from,
-      returned: slice.returned,
-      has_more: slice.from + slice.returned < slice.total,
-    });
-    return;
+    res.set('ETag', etag);
+    res.json({ session_id: id, session_version, jsonl_path: primaryPath || null, groups });
   } catch (e) {
-    console.warn(`[sessions/jsonl-history] failed (${id}): ${(e as Error).message}`);
+    console.warn(`[sessions/groups] failed (${id}): ${(e as Error).message}`);
     res.status(500).json({ error: (e as Error).message || String(e) });
+  }
+});
+
+// ② 某轮全部条目: 全量、无分页、不可变. :gid = 组序号 (0 = pre 组).
+router.get('/:id/groups/:gid/entries', auth, (req: express.Request, res: express.Response) => {
+  const id = String(req.params.id);
+  const user = userOf(req);
+  const session = findSessionReadable(id, user);
+  if (!session) { res.status(404).json({ error: '未找到' }); return; }
+  auditSessionAccess(user, 'read_session_group_entries', session);
+
+  const gid = Number(req.params.gid);
+  if (!Number.isInteger(gid) || gid < 0) {
+    res.status(400).json({ error: '无效的组序号' });
     return;
+  }
+  const backend = backendForSession(session);
+  const primaryPath = typeof backend._resolveJsonlPath === 'function'
+    ? backend._resolveJsonlPath(id)
+    : null;
+  try {
+    const synced = syncHistoryStore(id, primaryPath);
+    if (!synced.ok) {
+      res.status(502).json({ error: synced.error || 'history store sync failed' });
+      return;
+    }
+    const result = getHistoryGroupEntries(id, gid);
+    if (!result) { res.status(404).json({ error: `组 ${gid} 不存在` }); return; }
+    res.json({ session_id: id, ...result });
+  } catch (e) {
+    console.warn(`[sessions/group-entries] failed (${id}/${gid}): ${(e as Error).message}`);
+    res.status(500).json({ error: (e as Error).message || String(e) });
   }
 });
 
@@ -1437,8 +1370,8 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
     ? String((backend as any).realTimeInfo(id) || '')
     : '';
 
-  // 错误扫描: agent 进程在, 且 .mobius.jsonl 末条不是 error (去重) 时, 调
-  // backend.getRecentError 扫 TUI 屏幕. 命中则追加一条 type:'error' 到 .mobius.jsonl,
+  // 错误扫描: agent 进程在, 且历史存储末条不是 error (去重) 时, 调
+  // backend.getRecentError 扫 TUI 屏幕. 命中则往 agent-history-store 落一条 type:'error',
   // 前端经 SSE 自然收到并以红色卡片渲染. tmux-claude-code 的 getRecentError 恒 null, 整段自动跳过.
   //
   // 不再 gate on !working: codex 撞致命上游错误 (403 余额不足 / image generation is banned /
@@ -1446,22 +1379,22 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
   // isWorking 据 rollout 尾部的 task_started/message 一直判 working=true — 旧逻辑下 "!working" 门
   // 永不打开, 错误永远扫不到, 前端看不到红色卡片. getRecentError 的 ■(U+25A0)+红色 ANSI 双匹配仅
   // 命中 codex 的 ErrorEvent (警告用黄/系统消息用灰, 不会误中), 故 working 中扫也安全; 去重
-  // (.mobius.jsonl 末条非 error) 保证同一屏错误不会因 2s 轮询反复落条刷屏.
+  // (库内末条非 error) 保证同一屏错误不会因 2s 轮询反复落条刷屏.
   // 注意: 只放宽本处 error_scan 的门, 不动 isWorking 本身 — cleaner/forgotten-flag-scanner 等仍依赖
   // 它原语义判断 "是否在干活", 改 isWorking 会误杀卡在错误上的 session.
   if (alive) {
     try {
       const jsonlPath = backend._lookupPersistedJsonlPath(id);
-      if (jsonlPath && readLastMobiusEntryType(jsonlPath) !== 'error') {
+      if (jsonlPath) {
         const err = backend.getRecentError(id);
         if (err) {
           const p = backend._lookupPersistedEntry(id) || {};
-          appendMobiusErrorEntry({
-            jsonlPath,
+          writeMobiusErrorEntry({
             sessionId: id,
             agentSessionId: p.agentSessionId || null,
             cwd: p.cwd || null,
             backendName: backend.name,
+            primaryPath: jsonlPath,
             error: err,
           });
           console.log(`[sessions/status] error_scan hit sid=${id} backend=${backend.name} msg="${String(err.message).slice(0, 120)}"`);

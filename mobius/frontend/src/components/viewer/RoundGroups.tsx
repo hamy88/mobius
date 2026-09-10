@@ -7,10 +7,11 @@
  *  - RoundGroup: 一个对话轮次 (1 条 user 问题 + N 条 agent 回复); 最新两轮默认展开,
  *    更早的轮在跌出最新两轮时自动折叠, 用户手动操作过的轮尊重用户.
  */
-import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { Fragment, memo, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Search } from 'lucide-react'
 import type { AnyEntry, BashToolResult, JsonlViewItem, Round, RoundItem } from './types'
-import type { ResolvedCallMap } from './tool-status'
+import type { ToolStatus, ToolStatusMap } from './tool-status'
+import { deriveToolCallStatus } from './tool-status'
 import { groupExploreItems, type ExploreRenderItem } from './explore-group'
 import { entryDisplayImages, entryReadImagePaths, entryUserAttachmentImages } from './entry-extract'
 import { buildHeaderSummary } from './header-summary'
@@ -19,18 +20,30 @@ import { DisplayImagesCard } from './DisplayImages'
 import type { TaskPlanByUuid } from './task-progress'
 import type { RoundHeaderPalette } from './round-header-palette'
 
-export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResults = [], forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, resolvedMap, taskPlans }: {
+// 每卡工具状态 (组级 map 的预派生值): 按 (entry 身份, map 身份) 记忆.
+// 传 primitive 给卡片 → SSE 新数据只换 map 身份, 内容未变的卡拿到同一字符串, memo 保持.
+const statusCacheByEntry = new WeakMap<AnyEntry, { map: ToolStatusMap | null | undefined; status: ToolStatus | null }>()
+function toolStatusOf(entry: AnyEntry, map: ToolStatusMap | null | undefined): ToolStatus | null {
+  const hit = statusCacheByEntry.get(entry)
+  if (hit && hit.map === map) return hit.status
+  const status = deriveToolCallStatus(entry, map)
+  statusCacheByEntry.set(entry, { map, status })
+  return status
+}
+
+export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResults = [], forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, toolStatus, taskPlans }: {
   entry: AnyEntry
   lineNo: number
   bashResults?: BashToolResult[]
   readResults?: BashToolResult[]
   // forceOpen: 搜索命中该卡, 透传给 JsonEntryCard 强制展开.
   forceOpen?: boolean
-  // parentOrderedCollapse: forgotten-flag 收尾卡, 透传给 JsonEntryCard 默认折叠 (用户仍可手动展开).
+  // parentOrderedCollapse: 上下文折叠规则命中的卡片, 透传给 JsonEntryCard 默认折叠 (用户仍可手动展开).
   parentOrderedCollapse?: boolean
   showMeta?: boolean
   dense?: boolean
-  resolvedMap?: ResolvedCallMap | null
+  // 已派生的每卡工具状态 ('running' | 'success' | 'error' | null), 见 toolStatusOf.
+  toolStatus?: ToolStatus | null
   // 任务工具跨条目累积快照 (anchor uuid → PlanUpdate), 按卡片 uuid 取值透传给计划视图.
   taskPlans?: TaskPlanByUuid | null
 }) {
@@ -47,7 +60,7 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
   const uuid = typeof entry?.uuid === 'string' ? entry.uuid : null
   return (
     <>
-      <JsonEntryCard entry={entry} lineNo={lineNo} forceOpen={forceOpen} parentOrderedCollapse={parentOrderedCollapse} showMeta={showMeta} dense={dense} bashResults={bashResults} readResults={readResults} resolvedMap={resolvedMap} taskPlan={(uuid && taskPlans) ? taskPlans.get(uuid) ?? null : null} />
+      <JsonEntryCard entry={entry} lineNo={lineNo} forceOpen={forceOpen} parentOrderedCollapse={parentOrderedCollapse} showMeta={showMeta} dense={dense} bashResults={bashResults} readResults={readResults} toolStatus={toolStatus} taskPlan={(uuid && taskPlans) ? taskPlans.get(uuid) ?? null : null} />
       {imgs.length > 0 && <DisplayImagesCard images={imgs} lineNo={lineNo} sourceLabel={sourceLabel} />}
     </>
   )
@@ -55,11 +68,11 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
 
 // 探索类工具聚合容器: 把连续的只读/搜索调用折叠成 "已探索 N 个工具" 一行 (Cursor 式).
 // 含失败调用时默认展开并标红, 摘要行带错误标记 (折叠也不能藏起错误); 展开后逐条渲染子卡片.
-export function ExploreGroupCard({ items, hasError, showMeta = true, resolvedMap, collapseLineNos, focusLineNo, taskPlans }: {
+export function ExploreGroupCard({ items, hasError, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, taskPlans }: {
   items: RoundItem[]
   hasError: boolean
   showMeta?: boolean
-  resolvedMap?: ResolvedCallMap | null
+  toolStatusMap?: ToolStatusMap | null
   collapseLineNos?: Set<number>
   // 搜索命中卡可能被聚合在“探索”组内；组本身也必须打开，子卡才有机会展开/滚到。
   focusLineNo?: number | null
@@ -92,7 +105,7 @@ export function ExploreGroupCard({ items, hasError, showMeta = true, resolvedMap
               bashResults={item.bashResults}
               readResults={item.readResults}
               showMeta={showMeta}
-              resolvedMap={resolvedMap}
+              toolStatus={toolStatusOf(item.entry, toolStatusMap)}
               forceOpen={item.lineNo === focusLineNo}
               parentOrderedCollapse={collapseLineNos?.has(item.lineNo)}
               taskPlans={taskPlans}
@@ -104,7 +117,7 @@ export function ExploreGroupCard({ items, hasError, showMeta = true, resolvedMap
   )
 }
 
-export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, showMeta = true, resolvedMap, collapseLineNos, focusLineNo, taskPlans }: { items: JsonlViewItem[]; onlyGroup: boolean; forceExpandAll?: boolean; showMeta?: boolean; resolvedMap?: ResolvedCallMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; taskPlans?: TaskPlanByUuid | null }) {
+export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, taskPlans }: { items: JsonlViewItem[]; onlyGroup: boolean; forceExpandAll?: boolean; showMeta?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; taskPlans?: TaskPlanByUuid | null }) {
   // 只有一组时强制展开, 禁止折叠; forceExpandAll (点 "加载全部") 时也展开; 其它场景保留原默认折叠行为
   const containsFocus = typeof focusLineNo === 'number' && items.some(item => item.lineNo === focusLineNo)
   const [open, setOpen] = useState(onlyGroup || forceExpandAll || containsFocus)
@@ -144,7 +157,7 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
                 ...
               </span>
               <div className="flex-1 min-w-0">
-                <EntryCardWithImages entry={entry} lineNo={lineNo} bashResults={bashResults} readResults={readResults} showMeta={showMeta} resolvedMap={resolvedMap} forceOpen={lineNo === focusLineNo} parentOrderedCollapse={collapseLineNos?.has(lineNo)} taskPlans={taskPlans} />
+                <EntryCardWithImages entry={entry} lineNo={lineNo} bashResults={bashResults} readResults={readResults} showMeta={showMeta} toolStatus={toolStatusOf(entry, toolStatusMap)} forceOpen={lineNo === focusLineNo} parentOrderedCollapse={collapseLineNos?.has(lineNo)} taskPlans={taskPlans} />
               </div>
             </div>
           ))}
@@ -154,39 +167,31 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
   )
 }
 
-export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpandAll = false, forceOpen = false, showMeta = true, resolvedMap, cursorStyleTools = true, collapseLineNos, focusLineNo, headerPalette, taskPlans, detailLoaded, detailLoading, onNeedDetail }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; forceExpandAll?: boolean; forceOpen?: boolean; showMeta?: boolean; resolvedMap?: ResolvedCallMap | null; cursorStyleTools?: boolean; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; detailLoaded?: boolean; detailLoading?: boolean; onNeedDetail?: () => void }) {
-  // 追踪用户是否手动点击过折叠/展开. 一旦手动操作, 后续不再被 autoOpen/forceExpandAll 自动接管.
-  // 实现"最新两轮自动展开, 除非人为折叠": 最新轮和上一轮默认展开, 更早的轮默认折叠;
-  // 某轮升入最新两轮时自动展开, 跌出最新两轮时自动折叠; 用户手动操作过的轮尊重用户, 不再自动改.
-  // (倒数第二轮保持展开, 让刚问完的上一轮不随新轮出现而被折叠掉.)
-  // forceExpandAll (点 "加载全部"): 把所有轮强制展开, 让 "加载全部" 后整段对话一次可见; 仍尊重用户手动折叠.
+// 受控组件: 开合状态来自 store 的组状态机 (closed/open-*), 本组件只发转移意图.
+// 自动规则: 用户没插手过 (sticky=false) 时跟随"末两轮展开"自动开合;
+// 用户点过一次后 sticky=true, 自动规则永不再接管. 展开即加载由 store 状态机保证.
+// memo: 未收数据的组全部 prop 身份稳定 (round 缓存 + 回调缓存 + map 缓存), 整组跳过重渲染.
+function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; showMeta?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
   const autoOpen = isLast || isSecondLast
-  const userToggledRef = useRef(false)
-  // 初始值含 forceExpandAll: 避免虚拟列表里新滚入的轮先以折叠态绘制再被 effect 掀开 (闪一下).
-  const [open, setOpen] = useState(forceExpandAll || forceOpen || autoOpen || onlyGroup)
-
-  // onlyGroup 时永远保持展开; 否则跟随 forceExpandAll/autoOpen 自动展开/折叠, 但用户手动操作过则尊重用户.
+  // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
-    if (onlyGroup || forceOpen) { setOpen(true); return }
-    if (userToggledRef.current) return
-    setOpen(forceExpandAll || autoOpen)
-  }, [autoOpen, onlyGroup, forceExpandAll, forceOpen])
+    // 搜索命中是显式导航，必须压过此前把该轮锁定为 sticky/closed 的状态。
+    if (forceOpen) { if (!open) onAutoOpen(); return }
+    if (sticky) return
+    if (onlyGroup || autoOpen) { if (!open) onAutoOpen(); return }
+    if (open) onAutoClose()
+  }, [sticky, autoOpen, onlyGroup, forceOpen, open, onAutoOpen, onAutoClose])
+  // 首帧防闪: store 还没来得及转移时, 按"应展开"先行绘制 (视觉态), effect 随后对齐真实态.
+  const openVisual = open || forceOpen || (!sticky && (onlyGroup || autoOpen))
 
-  const toggle = () => {
-    userToggledRef.current = true
-    const next = !open
-    // 骨架模式下用户展开 → 自动拉取该轮主轨明细 (只在"确认未加载"时触发一次)
-    if (next && detailLoaded === false && onNeedDetail) onNeedDetail()
-    setOpen(next)
-  }
+  const toggle = () => onUserToggle()
 
   const userItem = round.items[0]
   const agentCount = round.items.length - 1
-  const userSummary = userItem ? buildHeaderSummary(userItem.entry).short : ''
-  // 探索类聚合: 连续只读/搜索调用合并为 "已探索 N 个工具"; cursorStyleTools 关闭时退化为逐条单卡 (回退原始展示).
-  const renderSeq: ExploreRenderItem[] = cursorStyleTools
-    ? groupExploreItems(round.items, resolvedMap)
-    : round.items.map((item) => ({ kind: 'single' as const, item }))
+  // 条目未加载时 (折叠轮零条目驻留), 用调用方给的元数据摘要当轮次标识.
+  const userSummary = userItem ? buildHeaderSummary(userItem.entry).short : (headerSummary || '')
+  // 探索类聚合: 连续只读/搜索调用合并为 "已探索 N 个工具".
+  const renderSeq: ExploreRenderItem[] = groupExploreItems(round.items, toolStatusMap)
 
   return (
     <div className="mb-1">
@@ -197,47 +202,73 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
         data-round-header-palette={headerPalette.id}
         aria-keyshortcuts="Control+Shift+K"
         title={`轮次背景：${headerPalette.name} · Ctrl+Shift+K 切换`}
-        className={`round-group-trigger w-full h-8 min-h-8 flex items-center gap-2 px-2 py-0 rounded-lg border text-left group ${onlyGroup ? 'cursor-default' : 'cursor-pointer'}`}
+        data-search-hit-group={forceOpen ? 'true' : undefined}
+        className={`round-group-trigger w-full h-8 min-h-8 flex items-center gap-2 px-2 py-0 rounded-lg border text-left group ${onlyGroup ? 'cursor-default' : 'cursor-pointer'} ${forceOpen ? 'ring-2 ring-red-500/95 border-red-500/95 bg-red-500/15 shadow-[0_0_0_3px_rgba(239,68,68,0.24),0_0_22px_rgba(239,68,68,0.3)]' : ''}`}
         style={{
           '--round-header-background': headerPalette.background,
           '--round-header-background-size': headerPalette.backgroundSize,
-          '--round-header-border': headerPalette.border,
-          '--round-header-border-hover': headerPalette.borderHover,
-          '--round-header-accent': headerPalette.accent,
+          // round-group-trigger 的基础 CSS 会从这些变量写入 border-color；命中态
+          // 用变量覆盖而不是只依赖 Tailwind border 类，确保不会被基础样式盖掉。
+          '--round-header-border': forceOpen ? 'rgba(239,68,68,0.95)' : headerPalette.border,
+          '--round-header-border-hover': forceOpen ? 'rgba(248,113,113,1)' : headerPalette.borderHover,
+          '--round-header-accent': forceOpen ? 'rgba(239,68,68,1)' : headerPalette.accent,
+          boxShadow: forceOpen
+            ? 'inset 3px 0 0 rgba(239,68,68,1), inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 3px rgba(239,68,68,0.24), 0 0 22px rgba(239,68,68,0.3)'
+            : undefined,
         } as CSSProperties}
       >
         <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-[var(--round-header-accent)]" />
         <span className="font-mono text-[10px] font-bold text-[var(--text-secondary)] flex-shrink-0 w-12" title={`第 ${round.roundNum} 轮`}>
-          第 {round.roundNum} 轮
+          {headerTitle ?? `第 ${round.roundNum} 轮`}
         </span>
         <span className="text-[11px] text-[var(--text-secondary)] truncate flex-1 min-w-0">
           {/* 展开后用户问题由下方编号为 roundNum 的卡片完整呈现, header 不再重复摘要 (仅折叠态显示作轮次标识) */}
-          {open ? '' : (userSummary || '(空)')}
+          {openVisual ? '' : (userSummary || '(空)')}
         </span>
-        {!open && agentCount > 0 && (
+        {forceOpen && (
+          <span className="inline-flex items-center gap-1 rounded-full border border-red-400/80 bg-red-500/25 px-1.5 py-0.5 text-[10px] font-semibold text-red-100 flex-shrink-0" title="搜索命中所在轮次">
+            <Search className="h-3 w-3" strokeWidth={2.4} aria-hidden="true" />
+            搜索命中
+          </span>
+        )}
+        {!openVisual && agentCount > 0 && (
           <span className="text-[10px] text-[var(--text-muted)] flex-shrink-0 font-mono">
             +{agentCount}
           </span>
         )}
         {!onlyGroup && (
           <span className="text-[10px] text-[var(--text-muted)] flex-shrink-0 opacity-50 group-hover:opacity-100 transition-opacity">
-            {open ? '▲' : '▼'}
+            {openVisual ? '▲' : '▼'}
           </span>
         )}
       </button>
 
-      {open && (
+      {openVisual && (
         <div className="mt-2 jsonl-thread">
-          {detailLoaded === false && onNeedDetail && (
+          {!resident && (
             <div className="mb-1 flex justify-center">
-              <button
-                type="button"
-                onClick={onNeedDetail}
-                disabled={!!detailLoading}
-                className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-60"
-              >
-                {detailLoading ? '正在加载本轮明细…' : '加载本轮明细 (主轨条目未加载)'}
-              </button>
+              {failed ? (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  disabled={loading}
+                  className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-60"
+                >
+                  {loading ? '正在重试…' : '明细加载失败 · 点击重试'}
+                </button>
+              ) : (
+                <span className="text-[10px] px-2 py-0.5 text-[var(--text-muted)]">
+                  正在加载本轮明细…
+                </span>
+              )}
+            </div>
+          )}
+          {/* 已加载但渲染为空 (条目全被噪声过滤 / 数据本就为空) → 显式提醒, 不留空白. */}
+          {resident && renderSeq.length === 0 && (
+            <div className="mb-1 flex justify-center">
+              <span className="text-[10px] px-2 py-0.5 rounded border border-dashed text-[var(--text-muted)]">
+                本轮为空 · 没有可显示的条目
+              </span>
             </div>
           )}
           {renderSeq.map((ri, idx) => {
@@ -246,7 +277,7 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
                 <div key={`explore-${idx}-${ri.items[0]?.lineNo ?? ''}`} className="flex items-start gap-1.5">
                   <span className="font-mono text-[9px] text-[var(--text-dimmed)] flex-shrink-0 mt-2.5 w-5 text-right leading-none select-none">·</span>
                   <div className="flex-1 min-w-0">
-                    <ExploreGroupCard items={ri.items} hasError={ri.hasError} showMeta={showMeta} resolvedMap={resolvedMap} collapseLineNos={collapseLineNos} focusLineNo={focusLineNo} taskPlans={taskPlans} />
+                    <ExploreGroupCard items={ri.items} hasError={ri.hasError} showMeta={showMeta} toolStatusMap={toolStatusMap} collapseLineNos={collapseLineNos} focusLineNo={focusLineNo} taskPlans={taskPlans} />
                   </div>
                 </div>
               )
@@ -268,7 +299,7 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
                       bashResults={item.bashResults}
                       readResults={item.readResults}
                       showMeta={showMeta}
-                      resolvedMap={resolvedMap}
+                      toolStatus={toolStatusOf(item.entry, toolStatusMap)}
                       forceOpen={item.lineNo === focusLineNo}
                       parentOrderedCollapse={collapseLineNos?.has(item.lineNo)}
                       taskPlans={taskPlans}
@@ -283,3 +314,5 @@ export function RoundGroup({ round, isLast, isSecondLast, onlyGroup, forceExpand
     </div>
   )
 }
+
+export const RoundGroup = memo(RoundGroupInner)

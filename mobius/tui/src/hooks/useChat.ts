@@ -4,11 +4,14 @@
  * Lifecycle (per the TUI spec):
  *   - lazily create a session (POST /api/issues/:issueId/sessions) on the first
  *     submitted message, using the saved preferences;
- *   - open the SSE stream (GET /api/sessions/:id/events?token=) and append
- *     `jsonl_entry` payloads to the transcript as they arrive;
+ *   - open the SSE stream (GET /api/sessions/:id/events?token=); on subscribe
+ *     bootstrap the transcript via ① groups + ② tail-group entries, then apply
+ *     live `entries` batches (watermark + uuid dedup) as they arrive;
+ *   - reconnects re-run the same ① negotiation (stateless reconciliation):
+ *     groups whose version changed are refetched whole, transcript rebuilt;
  *   - keep the agent's busy state synchronized with the runtime status API.
  * `/clear` remounts the hook (fresh session next time); `/resume` injects a
- * pre-existing sessionId so the stream replays its history.
+ * pre-existing sessionId.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { MobiusClient, ApiError } from '../api.js'
@@ -42,7 +45,7 @@ function nextId(): number { ID += 1; return ID }
 /**
  * Does this entry represent the user's just-submitted message? Used to retire the
  * optimistic `pendingUser` placeholder once the real entry is observed — including
- * via a reconnect's history replay (the live `jsonl_entry` path already clears it).
+ * via a reconnect's history reconciliation (the live `entries` path already clears it).
  *
  * Mobius may prepend injected context (project/issue framing) to a user turn, so we
  * match the typed text as a suffix of the entry's normalized text rather than
@@ -64,6 +67,22 @@ function entryMatchesPendingUser(entry: AnyEntry, pendingText: string): boolean 
 /** Stable identity for de-duplication. Every Mobius jsonl entry carries a uuid. */
 function entryKey(entry: AnyEntry): string | null {
   return typeof entry?.uuid === 'string' ? entry.uuid : null
+}
+
+// 首次 bootstrap 拉取的末尾组数 (旧 SSE 尾部回放的等价物; 更早的组按需不拉,
+// TUI 是平铺字幕, 没有轮次展开概念, 末尾几组已覆盖活跃对话).
+const BOOTSTRAP_GROUP_COUNT = 3
+// A fresh session can spend several seconds creating the worker and loading
+// context before /status reports alive=true. Keep the first-turn indicator
+// visible during that bootstrap window instead of letting the short generic
+// hint expire and leaving the user with no feedback.
+const FIRST_TURN_BOOTSTRAP_GRACE_MS = 30_000
+
+/** Mini group store: 组序 + 水位线 (version) + 组内条目. */
+interface GroupSlot {
+  seq: number
+  version: number
+  entries: AnyEntry[]
 }
 
 // Retry transient gateway/transport errors so a brief 502/503/504 (a reverse-
@@ -95,6 +114,8 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const sseRef = useRef<SseConnection | null>(null)
+  // agent-history mini group store (协议 ①②③ 的 TUI 侧消费形态).
+  const groupSlotsRef = useRef<Map<string, GroupSlot>>(new Map())
   const pollNowRef = useRef<(() => void) | null>(null)
   const typingRef = useRef(false)
   const sendingRef = useRef(false)
@@ -103,7 +124,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
   // SSE auto-reconnect state. A reverse proxy's idle timeout (or a server
   // restart) drops the stream mid-session; without reconnect the TUI stops
   // receiving new jsonl entries even though the web client keeps updating.
-  // On reconnect the server replays jsonl_history, so no entries are lost.
+  // On reconnect the stateless ①② reconciliation refills any missed entries.
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectAttemptRef = useRef(0)
   const aliveRef = useRef(true)
@@ -119,7 +140,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
   const appendEntries = useCallback((newOnes: AnyEntry[]) => {
     if (!newOnes.length) return
     setEntries(prev => {
-      // De-duplicate by uuid so a live jsonl_entry that also appears in a
+      // De-duplicate by uuid so a live `entries` batch that also appears in a
       // reconnect's history replay is never shown twice.
       const seen = new Set<string>()
       for (const e of prev) { const k = entryKey(e); if (k) seen.add(k) }
@@ -145,6 +166,63 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     setEntries(out)
   }, [])
 
+  // ── agent-history (协议 ①②③): bootstrap / 重连对账 ──────────────────────
+
+  /** 按组序摊平重建 transcript (uuid 去重由 setHistory 兜底). */
+  const rebuildEntriesFromGroups = useCallback(() => {
+    const slots = [...groupSlotsRef.current.values()].sort((a, b) => a.seq - b.seq)
+    const flat: AnyEntry[] = []
+    for (const s of slots) flat.push(...s.entries)
+    setHistory(flat)
+  }, [setHistory])
+
+  /**
+   * Stateless 对账 (订阅时/重连时同一条路径):
+   *   ① 拿全部组元数据 → 本地没有的或 version 变了的组 ② 整组重拉 → 重建 transcript.
+   * 首次 (本地空) 只拉末尾 BOOTSTRAP_GROUP_COUNT 组; 之后每次只补差额, 常态零请求.
+   */
+  const reconcileHistory = useCallback(async (sid: string) => {
+    try {
+      const data = await client.listHistoryGroups(sid)
+      const groups: any[] = Array.isArray(data?.groups) ? data.groups : []
+      const local = groupSlotsRef.current
+      const targets = local.size === 0 ? groups.slice(-BOOTSTRAP_GROUP_COUNT) : groups
+      let changed = false
+      for (const g of targets) {
+        const gid = String(g?.id ?? '')
+        if (!gid) continue
+        const ver = Number(g?.version) || 0
+        const cur = local.get(gid)
+        if (cur && cur.version >= ver) continue
+        try {
+          const r = await client.listHistoryGroupEntries(sid, gid)
+          local.set(gid, {
+            seq: Number(g?.seq) || (local.size + 1),
+            version: Number(r?.version) || 0,
+            entries: Array.isArray(r?.entries) ? r.entries : [],
+          })
+          changed = true
+        } catch { /* 单组失败不阻塞其余组 */ }
+      }
+      // 服务端已不存在的组 → 丢弃 (会话被删/重建的防御).
+      const alive = new Set(groups.map((g: any) => String(g?.id ?? '')))
+      for (const gid of [...local.keys()]) {
+        if (!alive.has(gid)) { local.delete(gid); changed = true }
+      }
+      if (changed) rebuildEntriesFromGroups()
+      // 对账补齐后, 若乐观占位已被真实条目覆盖 → 退掉 (断线期间整轮完成的场景).
+      setPendingUser(prev => {
+        if (prev === null) return prev
+        const slots = [...local.values()].sort((a, b) => a.seq - b.seq)
+        const flat: AnyEntry[] = []
+        for (const s of slots) flat.push(...s.entries)
+        return flat.some(e => entryMatchesPendingUser(e, prev)) ? null : prev
+      })
+    } catch (e) {
+      if (process.env.MOBIUS_TUI_DEBUG) console.error('[history-reconcile]', (e as Error)?.message ?? e)
+    }
+  }, [client, rebuildEntriesFromGroups])
+
   // ── SSE connection ────────────────────────────────────────────────────────
   const connect = useCallback((sid: string) => {
     if (process.env.MOBIUS_TUI_DEBUG) console.error('[connect]', sid)
@@ -153,23 +231,49 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
     const url = `${client.server}/api/sessions/${encodeURIComponent(sid)}/events?token=${encodeURIComponent(client.token)}`
     const conn = new SseConnection(url, {
-      onHistoryEntries: (es, _done) => {
-        if (es.length) setHistory(es)
-        // A reconnect replays the session tail. If our optimistic placeholder is
-        // now backed by its real entry, retire it so the user's input isn't shown
-        // twice (once as the entry, once as the placeholder). The live jsonl_entry
-        // path already clears pendingUser, but a dropped SSE stream (reverse-proxy
-        // idle timeout) can deliver the message only via this history replay — and
-        // if the whole turn finished while disconnected, no live entry ever comes
-        // to clear it, leaving the duplication on screen until the next send.
-        setPendingUser(prev => (prev !== null && es.some(e => entryMatchesPendingUser(e, prev)) ? null : prev))
+      onGroupCreated: (group) => {
+        if (!group || typeof group !== 'object') return
+        const gid = String(group.id ?? '')
+        if (!gid || groupSlotsRef.current.has(gid)) return  // 元数据不可变, 已知即忽略
+        groupSlotsRef.current.set(gid, {
+          seq: Number(group.seq) || (groupSlotsRef.current.size + 1),
+          version: Number(group.version) || 1,
+          entries: [],
+        })
       },
-      onEntry: (entry) => {
-        if (process.env.MOBIUS_TUI_DEBUG) console.error('[onEntry]', entry?.type, (entry?.message?.content?.[0]?.text ?? '').slice(0, 40))
-        appendEntries([entry])
-        setPendingUser(null)
+      onEntries: ({ group_id, group_id_version, entries }) => {
+        if (process.env.MOBIUS_TUI_DEBUG) console.error('[onEntries]', group_id, group_id_version, entries.length)
+        const gid = String(group_id ?? '')
+        if (!gid) return
+        let slot = groupSlotsRef.current.get(gid)
+        if (!slot) {
+          // 事件早到且本地无该组 (错过 group_created): 建槽后按水位线对账.
+          slot = { seq: groupSlotsRef.current.size + 1, version: 0, entries: [] }
+          groupSlotsRef.current.set(gid, slot)
+        }
+        const version = Number(group_id_version) || 0
+        if (slot.entries.length > 0 && version <= slot.version) return  // 水位线: ≤ 本地即丢弃
+        // uuid 去重保险丝: 与整组重拉/对账重叠的条目只留一份.
+        const known = new Set<string>()
+        for (const e of slot.entries) { const k = entryKey(e); if (k) known.add(k) }
+        const fresh = entries.filter(e => {
+          const k = entryKey(e)
+          if (k && known.has(k)) return false
+          if (k) known.add(k)
+          return true
+        })
+        slot.entries = slot.entries.concat(fresh)
+        slot.version = Math.max(slot.version, version)
+        if (fresh.length > 0) {
+          appendEntries(fresh)
+          setPendingUser(null)
+        }
       },
-      onSubscribed: () => { reconnectAttemptRef.current = 0 },
+      onSubscribed: () => {
+        reconnectAttemptRef.current = 0
+        // 订阅即对账 (首开 = bootstrap 拉末尾几组; 重连 = stateless 补差额).
+        void reconcileHistory(sid)
+      },
       onTyping: (active) => {
         // SSE is a low-latency hint, not the source of truth. A `true` event
         // lights the indicator immediately; either edge requests a fresh
@@ -179,7 +283,11 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
           workingHintUntilRef.current = Date.now() + 1_500
           updateTyping(true)
         } else {
-          workingHintUntilRef.current = 0
+          // A fresh turn uses a longer bootstrap grace period.  Some agents
+          // emit an early typing=false edge before their worker is observable;
+          // do not let that transient edge erase the first-turn indicator.
+          const remaining = workingHintUntilRef.current - Date.now()
+          if (remaining < 5_000) workingHintUntilRef.current = 0
         }
         pollNowRef.current?.()
       },
@@ -204,7 +312,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     })
     sseRef.current = conn
     conn.start()
-  }, [client.server, client.token, appendEntries, setHistory, updateTyping])
+  }, [client.server, client.token, appendEntries, setHistory, updateTyping, reconcileHistory])
   doConnectRef.current = connect
 
   const ensureSseForSend = useCallback((sid: string): boolean => {
@@ -374,7 +482,8 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     setError(null)
     setPendingUser(body)
     statusEpochRef.current += 1
-    workingHintUntilRef.current = Date.now() + 2_000
+    const firstTurn = !sessionId && entries.length === 0
+    workingHintUntilRef.current = Date.now() + (firstTurn ? FIRST_TURN_BOOTSTRAP_GRACE_MS : 2_000)
     sendingRef.current = true
     updateTyping(true)
     setSending(true)
@@ -400,7 +509,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
       setSending(false)
       pollNowRef.current?.()
     }
-  }, [sending, ensureSession, ensureSseForSend, client, updateTyping])
+  }, [sending, sessionId, entries.length, ensureSession, ensureSseForSend, client, updateTyping])
 
   const stop = useCallback(async () => {
     if (!sessionId) return

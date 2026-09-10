@@ -14,6 +14,7 @@
     "test:assistant-auto-compact": "node --require tsx/cjs tests/assistant-auto-compact.js",
     "test:forgotten-flag-notify-timing": "node --require tsx/cjs tests/forgotten-flag-notify-timing.js",
     "test:assistant-tts-cache": "node --require tsx/cjs tests/assistant-tts-cache.js",
+    "test:agent-history-store": "node --require tsx/cjs tests/agent-history-store.js",
     "test:code-server-workspace": "node --require tsx/cjs tests/code-server-workspace.js",
     "test:native-file-menu": "node --require tsx/cjs tests/native-file-menu.js",
     "test:designer-eye-locator": "node --require tsx/cjs tests/designer-eye-locator.js",

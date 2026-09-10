@@ -31,8 +31,8 @@ const path = require('path')
 const EventEmitter = require('events')
 const { emitAgentRawEntry } = require('./events')
 
-// 历史快照: entries = 落盘原始事件 (协议透传, 后端各异), sentinel = 续接 live 流的字节
-// offset; total*/truncated 为大文件截断统计 (见 services/mobius-jsonl readMergedJsonlHistory).
+// 历史快照: entries = agent-history-store 库内条目 (按到达序), sentinel = 原生 jsonl
+// 已读字节 (书签); total*/truncated 为兼容旧调用方的统计字段.
 interface HistorySnapshot {
   entries: unknown[]
   total?: number

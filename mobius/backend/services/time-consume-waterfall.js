@@ -1,7 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 
-const { mobiusJsonlPathOf } = require('./mobius-jsonl')
+const { deprecatedMobiusJsonlPathOf: mobiusJsonlPathOf } = require('./mobius-agent-history-deprecated') // [deprecated-compat] 旧双轨字节统计
 
 const TIME_CONSUME_WATERFALL_VERSION = 5
 const MIN_STEP_MS = 1000
