@@ -302,9 +302,11 @@ class AgentBackend {
   // 该原生 jsonl 条目是否为「出队事件」: 即 agent 真正消费到人类输入的那一刻.
   // 开轮时机依赖它 —— 提交问题只把 opener 挂进 pending_round_openers, 等 scanPrimary
   // 扫到 containDequeueEvent==true 才把所有 pending 一次性开成一组.
-  //   - 基类默认 true (占位): codex / deepseek harness 无出队信号, 不 override, 直接继承,
+  //   - 基类默认 true (占位): deepseek harness 无出队信号, 不 override, 直接继承,
   //     语义 = 首次 sync 即出队 (等价旧「立即开轮」).
   //   - tmux-claude-code: override 成「条目含 origin.kind=='human'」检测 (见其实现).
+  //   - tmux-codex:       override 成「response_item.message.role=='user' 或
+  //                       event_msg.task_started」检测 (见其实现).
   containDequeueEvent(_entry: unknown): boolean { return true }
 
   // 中断当前 turn, 让 agent 出队消费下一条已排队的用户指令 (不追加任何新 prompt).

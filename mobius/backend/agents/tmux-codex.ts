@@ -932,6 +932,17 @@ class TmuxCodexBackend extends AgentBackend {
         || null
   }
 
+  // 出队事件检测: codex 的「人类输入真正被 agent 消费」有两种落盘形态, 任一中即视为出队:
+  //   ① response_item.message.role=='user' — 人类输入作为 user 消息写进 rollout (input_text 内容).
+  //   ② event_msg.task_started — 新一轮 turn 开始 (task_started 携带对应 turn_id).
+  // 其余 (assistant/tool/function_call 等) 都不是出队信号.
+  containDequeueEvent(entry: any): boolean {
+    if (!entry || typeof entry !== 'object') return false
+    if (entry.type === 'response_item' && entry.payload?.type === 'message' && entry.payload?.role === 'user') return true
+    if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') return true
+    return false
+  }
+
   // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
   getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
     return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this)) as HistorySnapshot
