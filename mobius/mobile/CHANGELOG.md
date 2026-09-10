@@ -3,6 +3,23 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.1] - 2026-09-10
+
+### 变更（UI 重构）
+- **服务器地址选择器：卡片列表 → 下拉**（Issue e5a536be / 分身 #9）：登录界面 + 设置页"连接"区域统一改为 `ExposedDropdownMenuBox` + `OutlinedTextField.menuAnchor()`，把"卡片列表 + 独立输入框"两段式合并成"一行 ▼ 输入框"。
+  - 点击 ▼ 展开历史地址列表，点条目 = 选中应用（走 `vm.selectServerEntry`，与手输保存同路径）。
+  - 每条条目右侧 `⋯` 弹二级菜单：**重命名**（保留 0.3.0 `ServerRenameDialog`，label 可空）/ **删除**（走 `vm.removeServerEntry`）。走 `⋯` 子菜单避开 `combinedClickable` 与 `DropdownMenuItem` 的手势冲突（已知 Material3 bug）。
+  - 仍在 `OutlinedTextField` 直接打字 = 手输新地址（保留 IME `Next/Done` + `KeyboardType.Uri`），下拉只是快捷回填。
+  - 设置页删除"填入默认"按钮（功能被下拉 placeholder + 列表项选中覆盖）；**保留**显式"保存服务器地址"按钮（避免用户输错立刻入库）。
+- 删除 `ServerAddressPicker` / `ServerAddressRow` 两个函数（共 ~197 行），保留 `ServerRenameDialog`（下拉 ⋮ 菜单触发）。
+- ViewModel / Repository 一行不动（`MomoAppViewModel.selectServerEntry / removeServerEntry / renameServerEntry / setServerBaseUrl / saveServerBaseUrl`，`ServerAddressRepository.addOrTouch / remove / rename / getAll` 全部沿用 0.3.0 签名）。
+- 同步 `androidApp/build.gradle.kts` `versionCode=23` / `versionName="0.3.1"`；`extension.json` 0.3.1；`mobius/frontend/src/components/modals.tsx` `MOBILE_VERSION='0.3.1'` + APK 文件名模板 `mobius-mobile-0.3.1-android-{arm,armv7}.apk`（size/sha256 待 CI 落盘后回填）。
+
+### 保留
+- 0.3.0 `ServerAddressRepository` + ViewModel 完整 API（commit ffd116e）。
+- 0.2.0 聊天长按选取复制修复（commit 271a219）。
+- `sync-desktop-builds.js` mobile-sync hardening（commit 09191ee）。
+
 ## [0.3.0] - 2026-09-09
 
 ### 新增

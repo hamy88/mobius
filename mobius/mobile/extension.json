@@ -2,6 +2,6 @@
   "name": "momo-mobile",
   "display_name": "小莫助理移动端",
   "description": "小莫助理 Android / iOS Kotlin Multiplatform 客户端；网页入口直接运行共享 Compose UI，作为真实应用的开发调试镜像。",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "icon": "favicon.svg"
 }

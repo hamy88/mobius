@@ -72,6 +72,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.ExposedDropdownMenu
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -889,153 +893,97 @@ private fun LoginScreen(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel
     }
 }
 
-@Composable
-private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "服务器地址",
-                color = theme.textMuted,
-                style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)),
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                "填入默认",
-                color = theme.accentPrimary,
-                style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)),
-                modifier = Modifier
-                    .clip(RoundedCornerShape(MomoCorners.chip))
-                    .clickable { vm.setServerBaseUrl(RECOMMENDED_MOBIUS_BASE_URL) }
-                    .padding(horizontal = MomoSpacing.sm, vertical = MomoSpacing.xs),
-            )
-        }
-        Spacer(Modifier.height(MomoSpacing.sm))
-        // 已保存过服务器(登录成功自动记录)时: 选择器在上, 下方保留可编辑输入框(选中即回填)。
-        if (state.serverEntries.isNotEmpty()) {
-            ServerAddressPicker(
-                entries = state.serverEntries,
-                currentUrl = state.serverBaseUrl,
-                theme = theme,
-                onSelect = vm::selectServerEntry,
-                onRemove = vm::removeServerEntry,
-                onRename = vm::renameServerEntry,
-            )
-            Spacer(Modifier.height(MomoSpacing.md))
-        }
-        MomoInput(
-            value = state.serverBaseUrl,
-            placeholder = RECOMMENDED_MOBIUS_BASE_URL,
-            theme = theme,
-            minHeight = 44.dp,
-            imeAction = ImeAction.Next,
-            keyboardType = KeyboardType.Uri,
-            onSubmit = vm::saveServerBaseUrl,
-            onChange = vm::setServerBaseUrl,
-        )
-        // 列表非空时给出提示: 输入框仍是权威入口(可改可存), 选择器只是快捷回填。
-        if (state.serverEntries.isNotEmpty()) {
-            Spacer(Modifier.height(MomoSpacing.xs))
-            Text(
-                "从上方列表选择, 或直接输入新地址",
-                color = theme.textMuted,
-                style = momoTextStyle(MomoTypography.caption),
-            )
-        }
-    }
-}
-
-/**
- * 登录页服务器地址选择器(0.3.0): 最近使用倒序的卡片列表。
- * - 点击行: 选中并应用到输入框(走 vm.selectServerEntry, 与手输保存同路径)。
- * - 左滑(SwipeToDismissBox EndToStart): 删除该地址。
- * - 长按: 弹重命名对话框(label 备注名, 可空)。
- */
-@Composable
-private fun ServerAddressPicker(
-    entries: List<ServerEntry>,
-    currentUrl: String,
-    theme: MomoTheme,
-    onSelect: (String) -> Unit,
-    onRemove: (String) -> Unit,
-    onRename: (String, String?) -> Unit,
-) {
-    var renameTarget by remember { mutableStateOf<ServerEntry?>(null) }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(MomoCorners.medium))
-            .background(theme.inputBg)
-            .border(1.dp, theme.borderDefault, RoundedCornerShape(MomoCorners.medium)),
-    ) {
-        entries.forEachIndexed { index, entry ->
-            if (index > 0) HorizontalDivider(color = theme.borderDefault, thickness = 0.5.dp)
-            ServerAddressRow(
-                entry = entry,
-                selected = entry.url == currentUrl,
-                theme = theme,
-                onClick = { onSelect(entry.url) },
-                onRemove = { onRemove(entry.url) },
-                onRename = { renameTarget = entry },
-            )
-        }
-    }
-    renameTarget?.let { target ->
-        ServerRenameDialog(
-            entry = target,
-            theme = theme,
-            onConfirm = { label -> onRename(target.url, label) },
-            onDismiss = { renameTarget = null },
-        )
-    }
-}
-
-// 单条服务器地址行: 左滑删除 + 长按重命名, 点击选择(与 DeletableChatRow 同一交互范式)。
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ServerAddressRow(
-    entry: ServerEntry,
-    selected: Boolean,
-    theme: MomoTheme,
-    onClick: () -> Unit,
-    onRemove: () -> Unit,
-    onRename: () -> Unit,
-) {
-    val haptic = LocalHapticFeedback.current
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart) {
-                onRemove()
-                true
-            } else {
-                false
-            }
-        },
-    )
-    SwipeToDismissBox(
-        state = dismissState,
-        backgroundContent = { SwipeDeleteBackground(theme, "删除") },
-        enableDismissFromStartToEnd = false,
-        enableDismissFromEndToStart = true,
-    ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(if (selected) theme.accentPrimary.copy(alpha = 0.08f) else Color.Transparent)
-                .combinedClickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onClick,
-                    onLongClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onRename()
-                    },
-                )
-                .padding(horizontal = MomoSpacing.lg, vertical = MomoSpacing.md),
-            verticalAlignment = Alignment.CenterVertically,
+private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<ServerEntry?>(null) }
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            "服务器地址",
+            color = theme.textMuted,
+            style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)),
+        )
+        Spacer(Modifier.height(MomoSpacing.sm))
+        // 0.3.1: 服务器地址选择器由 SwipeToDismissBox 卡片列表 → ExposedDropdownMenuBox 下拉,
+        // 输入框与下拉合一: 直接在输入框打字 = 手输, 点 ▼ 展开 = 选中历史地址。
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded },
         ) {
+            OutlinedTextField(
+                value = state.serverBaseUrl,
+                onValueChange = { vm.setServerBaseUrl(it) },
+                placeholder = { Text(RECOMMENDED_MOBIUS_BASE_URL, color = theme.textMuted, style = momoTextStyle(MomoTypography.body)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { vm.saveServerBaseUrl() }),
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(
+                    focusedBorderColor = theme.accentPrimary,
+                    unfocusedBorderColor = theme.borderDefault,
+                    focusedTextColor = theme.textPrimary,
+                    unfocusedTextColor = theme.textPrimary,
+                ),
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth(),
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                if (state.serverEntries.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("暂无保存的服务器", color = theme.textMuted) },
+                        onClick = { expanded = false },
+                        enabled = false,
+                    )
+                } else {
+                    state.serverEntries.forEach { entry ->
+                        ServerDropdownRow(
+                            entry = entry,
+                            isSelected = entry.url == state.serverBaseUrl,
+                            theme = theme,
+                            onSelect = {
+                                vm.selectServerEntry(entry.url)
+                                expanded = false
+                            },
+                            onRename = { renameTarget = it },
+                            onRemove = {
+                                vm.removeServerEntry(it.url)
+                                expanded = false
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        renameTarget?.let { target ->
+            ServerRenameDialog(
+                entry = target,
+                theme = theme,
+                onConfirm = { label -> vm.renameServerEntry(target.url, label) },
+                onDismiss = { renameTarget = null },
+            )
+        }
+    }
+}
+
+// 下拉菜单内单条服务器: 点击选中, trailingIcon 的 ⋮ 弹二级菜单(重命名 / 删除)。
+// 避开 combinedClickable 与 DropdownMenuItem 的手势冲突(已知 Material3 bug), 走 ⋮ 子菜单 fallback。
+@Composable
+private fun ServerDropdownRow(
+    entry: ServerEntry,
+    isSelected: Boolean,
+    theme: MomoTheme,
+    onSelect: () -> Unit,
+    onRename: (ServerEntry) -> Unit,
+    onRemove: (ServerEntry) -> Unit,
+) {
+    var showActionMenu by remember { mutableStateOf(false) }
+    DropdownMenuItem(
+        text = {
             Column(Modifier.weight(1f)) {
                 if (entry.label.isNotBlank()) {
                     Text(
@@ -1055,24 +1003,54 @@ private fun ServerAddressRow(
                 } else {
                     Text(
                         entry.url,
-                        color = if (selected) theme.accentPrimary else theme.textPrimary,
+                        color = if (isSelected) theme.accentPrimary else theme.textPrimary,
                         style = momoTextStyle(MomoTypography.body),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
-            if (selected) {
-                Spacer(Modifier.width(MomoSpacing.sm))
+        },
+        onClick = onSelect,
+        trailingIcon = {
+            Box {
                 Text(
-                    "当前",
-                    color = theme.accentPrimary,
-                    style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)),
+                    "⋯",
+                    color = theme.textMuted,
+                    style = momoTextStyle(MomoTypography.headline),
+                    modifier = Modifier
+                        .clickable { showActionMenu = true }
+                        .padding(horizontal = MomoSpacing.sm, vertical = MomoSpacing.xs),
                 )
+                DropdownMenu(
+                    expanded = showActionMenu,
+                    onDismissRequest = { showActionMenu = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("重命名", color = theme.textPrimary) },
+                        onClick = {
+                            showActionMenu = false
+                            onRename(entry)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("删除", color = theme.danger) },
+                        onClick = {
+                            showActionMenu = false
+                            onRemove(entry)
+                        },
+                    )
+                }
             }
-        }
-    }
+        },
+    )
 }
+
+/**
+ * 0.3.1: 旧的卡片列表选择器 (SwipeToDismissBox + 长按重命名) 已替换为
+ * ExposedDropdownMenuBox 下拉 (见 LoginServerBaseUrlField / ServerDropdownRow)。
+ * 重命名对话框保留(下拉的 ⋮ 菜单触发)。
+ */
 
 // 服务器地址重命名对话框: label 备注名可空(清空即恢复只显 URL)。
 @Composable
@@ -1575,67 +1553,88 @@ private fun SettingsScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewMode
                 item { Spacer(Modifier.height(MomoSpacing.xxl)) }
                 item {
                     SettingsGroupCard("连 接", theme) {
+                        var expanded by remember { mutableStateOf(false) }
+                        var renameTarget by remember { mutableStateOf<ServerEntry?>(null) }
                         var serverField by remember { mutableStateOf(state.serverBaseUrl) }
                         var lastPushedServer by remember { mutableStateOf(state.serverBaseUrl) }
                         val externalServerUrl = state.serverBaseUrl
-                        // 同 MomoInput：lastPushed 区分"自己回灌的回声"与"外部重置（填入默认等）"，
+                        // 同 MomoInput：lastPushed 区分"自己回灌的回声"与"外部重置"，
                         // 只有外部重置才回写本地，避免按键往返覆盖光标。
                         LaunchedEffect(externalServerUrl) {
                             if (externalServerUrl != lastPushedServer && externalServerUrl != serverField) {
                                 serverField = externalServerUrl
                             }
                         }
-                        BasicTextField(
-                            value = serverField,
-                            onValueChange = { newValue ->
-                                serverField = newValue
-                                if (newValue != lastPushedServer) {
-                                    lastPushedServer = newValue
-                                    vm.setServerBaseUrl(newValue)
-                                }
-                            },
-                            singleLine = true,
-                            textStyle = momoTextStyle(MomoTypography.body).copy(color = theme.textPrimary),
-                            cursorBrush = SolidColor(theme.textPrimary),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(onDone = { vm.saveServerBaseUrl() }),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(56.dp)
-                                .padding(start = MomoSpacing.lg, end = MomoSpacing.sm),
-                            decorationBox = { inner ->
-                                Row(
-                                    Modifier.fillMaxSize(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(MomoSpacing.sm),
-                                ) {
-                                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                                        if (serverField.isBlank()) {
-                                            Text(
-                                                "$RECOMMENDED_MOBIUS_BASE_URL（可修改为你自建的 Mobius 服务器）",
-                                                color = theme.textMuted,
-                                                style = momoTextStyle(MomoTypography.body),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                        inner()
+                        // 0.3.1: 设置页"连接"区域 BasicTextField + "填入默认"按钮 → ExposedDropdownMenuBox 下拉,
+                        // ▼ 点开弹历史地址, 输入框直接打字 = 手输。保留显式"保存服务器地址"按钮(避免误存)。
+                        ExposedDropdownMenuBox(
+                            expanded = expanded,
+                            onExpandedChange = { expanded = !expanded },
+                            modifier = Modifier.padding(horizontal = MomoSpacing.lg, vertical = MomoSpacing.sm),
+                        ) {
+                            OutlinedTextField(
+                                value = serverField,
+                                onValueChange = { newValue ->
+                                    serverField = newValue
+                                    if (newValue != lastPushedServer) {
+                                        lastPushedServer = newValue
+                                        vm.setServerBaseUrl(newValue)
                                     }
-                                    Box(
-                                        Modifier
-                                            .height(32.dp)
-                                            .widthIn(min = 72.dp)
-                                            .clip(RoundedCornerShape(MomoCorners.medium))
-                                            .background(theme.accentPrimary.copy(alpha = 0.12f))
-                                            .clickable { vm.setServerBaseUrl(RECOMMENDED_MOBIUS_BASE_URL) }
-                                            .padding(horizontal = MomoSpacing.md),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text("填入默认", color = theme.accentPrimary, style = momoTextStyle(MomoTypography.subheadline.copy(fontWeight = FontWeight.Medium)))
+                                },
+                                label = { Text("服务器地址", color = theme.textMuted) },
+                                placeholder = { Text(RECOMMENDED_MOBIUS_BASE_URL, color = theme.textMuted, style = momoTextStyle(MomoTypography.body)) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(onDone = { vm.saveServerBaseUrl() }),
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(
+                                    focusedBorderColor = theme.accentPrimary,
+                                    unfocusedBorderColor = theme.borderDefault,
+                                    focusedTextColor = theme.textPrimary,
+                                    unfocusedTextColor = theme.textPrimary,
+                                ),
+                                modifier = Modifier
+                                    .menuAnchor()
+                                    .fillMaxWidth(),
+                            )
+                            ExposedDropdownMenu(
+                                expanded = expanded,
+                                onDismissRequest = { expanded = false },
+                            ) {
+                                if (state.serverEntries.isEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("暂无保存的服务器", color = theme.textMuted) },
+                                        onClick = { expanded = false },
+                                        enabled = false,
+                                    )
+                                } else {
+                                    state.serverEntries.forEach { entry ->
+                                        ServerDropdownRow(
+                                            entry = entry,
+                                            isSelected = entry.url == state.serverBaseUrl,
+                                            theme = theme,
+                                            onSelect = {
+                                                vm.selectServerEntry(entry.url)
+                                                expanded = false
+                                            },
+                                            onRename = { renameTarget = it },
+                                            onRemove = {
+                                                vm.removeServerEntry(it.url)
+                                                expanded = false
+                                            },
+                                        )
                                     }
                                 }
-                            },
-                        )
+                            }
+                        }
+                        renameTarget?.let { target ->
+                            ServerRenameDialog(
+                                entry = target,
+                                theme = theme,
+                                onConfirm = { label -> vm.renameServerEntry(target.url, label) },
+                                onDismiss = { renameTarget = null },
+                            )
+                        }
                         SettingsHairline(theme)
                         SettingActionRow("保存服务器地址", theme, showDivider = false, onClick = vm::saveServerBaseUrl)
                     }
