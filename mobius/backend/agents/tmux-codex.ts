@@ -735,9 +735,9 @@ class TmuxCodexBackend extends AgentBackend {
     return this._withLock(sessionId, async () => {
       if (!sessionId) throw new Error('sessionId required')
       if (!windowExists(sessionId)) return
-      // 单次 C-c 打断当前 turn (实测单次足够), 让 agent 停下当前 turn 去消费下一条排队指令.
-      // 不追加新 prompt / 不发 M-Enter (与 pauseCurrentAndResumeFromSession 加急路径不同, 这里只打断).
-      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
+      // codex 的中断键是 Esc (不是 C-c). 单次 Esc 打断当前 turn, 让 agent 停下当前 turn
+      // 去消费下一条排队指令. 不追加新 prompt / 不发 M-Enter (这里只打断).
+      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Escape'])
       await new Promise((r) => setTimeout(r, 250))
     })
   }
