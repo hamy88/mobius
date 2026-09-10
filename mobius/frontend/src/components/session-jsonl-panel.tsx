@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useMemo, useRef, useState, type RefObject } from 'react'
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import type { SessionHistoryStore } from '../services/agent-history-store'
@@ -119,6 +119,45 @@ function SessionJsonlPanelInner({
   const lastTimestamp = useMemo(() => findLatestEntryTimestamp(visibleJsonl).value, [visibleJsonl])
   // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
   const lastScrollTopRef = useRef<number | null>(null)
+
+  // 用户输入意图监听: wheel / touchmove / pointerdown / keydown 一旦表达"向上翻/接管"
+  // 意图, 立即把 userScrolledUp 置 true (终止 EntriesAutoScroll 的追底), 不再依赖 onScroll
+  // 里"向上滚 > 2px"的方向推断 — 慢速小步上滚会被 lerp 追底拉回. 这些事件天然来自用户,
+  // 绕开"程序滚动 vs 用户滚动"的来源识别; 恢复钉底仍由 onScroll 的 dist < 4 负责.
+  useEffect(() => {
+    const el = chatContainerRef.current
+    if (!el) return
+
+    // wheel 上滚 (deltaY<0) 才算向上翻; 向下滚留 onScroll 贴底判定恢复钉底.
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) onScrollPositionChange(true)
+    }
+    // 手指下移 (clientY 增大) = 内容上滚 (向上翻); 反之回底部交给 onScroll 恢复.
+    let lastTouchY: number | null = null
+    const onTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0]
+      if (!t) return
+      if (lastTouchY !== null && t.clientY > lastTouchY) onScrollPositionChange(true)
+      lastTouchY = t.clientY
+    }
+    // pointerdown (点按/抓取滚动条或开始拖拽) 无方向可判, 视为"接管滚动".
+    const onPointerDown = () => onScrollPositionChange(true)
+    // 仅"向上翻"类按键视为接管; 输入区与滚动容器是兄弟节点, 输入框方向键不会冒泡到此.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') onScrollPositionChange(true)
+    }
+
+    el.addEventListener('wheel', onWheel, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
+    el.addEventListener('pointerdown', onPointerDown, { passive: true })
+    el.addEventListener('keydown', onKeyDown)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('pointerdown', onPointerDown)
+      el.removeEventListener('keydown', onKeyDown)
+    }
+  }, [chatContainerRef, onScrollPositionChange])
 
   return (
     <div data-tour="session-jsonl-view" className="mobius-chat-history flex min-w-0 flex-1 flex-col">
