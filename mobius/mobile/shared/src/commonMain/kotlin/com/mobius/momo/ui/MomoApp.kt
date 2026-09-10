@@ -74,7 +74,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.ExposedDropdownMenu
+// ExposedDropdownMenu 是 ExposedDropdownMenuBoxScope 的成员函数, 不能顶层 import。
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.MaterialTheme
@@ -984,7 +984,9 @@ private fun ServerDropdownRow(
     var showActionMenu by remember { mutableStateOf(false) }
     DropdownMenuItem(
         text = {
-            Column(Modifier.weight(1f)) {
+            // DropdownMenuItem 的 text lambda 没有 ColumnScope, 不能用 Modifier.weight。
+            // DropdownMenuItem 自己已用 Row 排版, 这里 fillMaxWidth 占满剩余宽度即可。
+            Column(Modifier.fillMaxWidth()) {
                 if (entry.label.isNotBlank()) {
                     Text(
                         entry.label,
