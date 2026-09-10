@@ -16,6 +16,7 @@ import { mergeBashToolResultItems } from './entry-extract'
 import { collectResolvedCallIds } from './tool-status'
 import { RoundGroup } from './RoundGroups'
 import { isHiddenJsonlNoiseEntry } from './entry-classify'
+import { extractInitialContext } from './initial-context'
 import { filterDisplayDuplicates } from './display-dedup'
 import { computeCollapsedByEncryptedReasoning, computeCollapsedByForgottenFlag } from './fold-rules'
 import { buildTaskPlans } from './task-progress'
@@ -136,7 +137,13 @@ function buildRoundFromEntries(entries: AnyEntry[], roundNum: number, baseLineNo
     : entries
   const deduped = filterDisplayDuplicates(windowed)
   const merged = mergeBashToolResultItems(deduped, baseLineNo + windowStart)
-  const visible = merged.filter((item) => !isHiddenJsonlNoiseEntry(item.entry))
+  let visible = merged.filter((item) => !isHiddenJsonlNoiseEntry(item.entry))
+  // 特殊规则 (仅第一轮 / group 1): 一旦出现"初始模式"卡片 (extractInitialContext 命中),
+  // 隐藏它之前的所有卡片 —— 初始上下文之前的 setup 噪声 / 边车原文卡不再展示.
+  if (roundNum === 1) {
+    const initialIndex = visible.findIndex((item) => extractInitialContext(item.entry) !== null)
+    if (initialIndex > 0) visible = visible.slice(initialIndex)
+  }
   return { roundNum, items: visible.map((item, index) => ({ ...item, relIdx: index })) }
 }
 
