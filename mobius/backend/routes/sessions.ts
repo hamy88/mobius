@@ -945,7 +945,7 @@ router.get('/:id/groups', auth, (req: express.Request, res: express.Response) =>
       return;
     }
     res.set('ETag', etag);
-    res.json({ session_id: id, session_version, groups });
+    res.json({ session_id: id, session_version, jsonl_path: primaryPath || null, groups });
   } catch (e) {
     console.warn(`[sessions/groups] failed (${id}): ${(e as Error).message}`);
     res.status(500).json({ error: (e as Error).message || String(e) });

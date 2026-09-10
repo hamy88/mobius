@@ -17,7 +17,7 @@ import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
 import { AnnouncePcButton } from './announce-pc-button'
 import { isGuidedDemoSession, patchGuidedDemoSessionCompleted } from '../services/guided-demo'
-import { useAgentHistoryStore, useHistorySnapshotOf, useLoadedEntryCount, useTotalEntryCount, type SessionHistoryStore } from '../services/agent-history-store'
+import { useAgentHistoryStore, useHistorySnapshotOf, useLoadedEntryCount, useTotalEntryCount, useSessionJsonlPath, type SessionHistoryStore } from '../services/agent-history-store'
 import { findLatestEntryTimestamp } from './session-jsonl-panel'
 import {
   preloadSessionInputCache,
@@ -2757,6 +2757,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const historyStore = useAgentHistoryStore(sessionId)
   const historyStoreRef = useRef(historyStore)
   historyStoreRef.current = historyStore
+  // 原始 JSONL 弹窗标题展示 jsonl 文件路径 (订阅下沉到 primitive selector, 只在路径变化时重渲染).
+  const jsonlPath = useSessionJsonlPath(historyStore)
   const [easyRoundCount, setEasyRoundCount] = useState(0)
   const [easyExpandAllSignal, setEasyExpandAllSignal] = useState(0)
   const [easyLoadingAll, setEasyLoadingAll] = useState(false)
@@ -5482,6 +5484,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 <span className="flex-shrink-0">原始 JSONL <JsonlCountSlot store={historyStore}>{(loaded, total) => (
                   <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· 已载 {loaded}{total > loaded ? ` / ${total}` : ''} 条</span>
                 )}</JsonlCountSlot></span>
+                {jsonlPath && (
+                  <span className="text-[11px] font-mono truncate min-w-0" style={{ color: 'var(--text-muted)' }} title={jsonlPath}>{jsonlPath}</span>
+                )}
               </span>
               <JsonlCopyButton
                 copied={rawJsonlCopied}

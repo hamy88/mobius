@@ -50,6 +50,7 @@ export interface GroupRuntime {
 export interface HistorySnapshot {
   rev: number
   sessionVersion: number
+  jsonlPath: string | null
   groups: HistoryGroupMeta[]
   entriesByGroup: ReadonlyMap<string, any[]>
   groupRuntime: ReadonlyMap<string, GroupRuntime>
@@ -70,6 +71,7 @@ interface CacheRecord {
   sid: string
   sessionVersion: number
   updatedAt: number
+  jsonlPath: string | null
   groups: HistoryGroupMeta[]
   groupsData: Array<{ gid: string; version: number; entries: any[] }>
   // 用户手动开/合过的组 (sticky), 跨刷新保留展开偏好.
@@ -145,7 +147,7 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 /** ① GET groups. 304 → notModified (缓存全可信). */
-async function fetchGroups(sid: string, etag: string | null): Promise<{ notModified?: boolean; session_version?: number; groups?: HistoryGroupMeta[] }> {
+async function fetchGroups(sid: string, etag: string | null): Promise<{ notModified?: boolean; session_version?: number; jsonl_path?: string | null; groups?: HistoryGroupMeta[] }> {
   const res = await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/groups`, {
     headers: authHeaders(etag ? { 'If-None-Match': etag } : {}),
   })
@@ -168,7 +170,7 @@ async function fetchGroupEntries(sid: string, gid: string): Promise<{ version: n
 // ── Store ────────────────────────────────────────────────────────────────
 
 const EMPTY_SNAPSHOT: HistorySnapshot = {
-  rev: 0, sessionVersion: 0, groups: [], entriesByGroup: new Map(),
+  rev: 0, sessionVersion: 0, jsonlPath: null, groups: [], entriesByGroup: new Map(),
   groupRuntime: new Map(), error: null, negotiated: false,
 }
 
@@ -200,6 +202,7 @@ export class SessionHistoryStore {
 
   groups: HistoryGroupMeta[] = []
   sessionVersion = 0
+  jsonlPath: string | null = null
   negotiated = false
   error: string | null = null
   entriesByGroup = new Map<string, any[]>()
@@ -224,6 +227,7 @@ export class SessionHistoryStore {
       this.snapshotCache = {
         rev: this.rev,
         sessionVersion: this.sessionVersion,
+        jsonlPath: this.jsonlPath,
         groups: this.groups,
         entriesByGroup: this.entriesByGroup,
         groupRuntime: this.groupRuntime,
@@ -351,6 +355,7 @@ export class SessionHistoryStore {
       if (this.negotiated) return
       this.groups = [...record.groups].sort((a, b) => a.seq - b.seq)
       this.sessionVersion = Number(record.sessionVersion) || 0
+      this.jsonlPath = record.jsonlPath || null
       for (const gd of record.groupsData || []) {
         if (!Array.isArray(gd.entries) || gd.entries.length === 0) continue
         this.entriesByGroup.set(String(gd.gid), gd.entries)
@@ -394,6 +399,7 @@ export class SessionHistoryStore {
         }
         this.groups = serverGroups
         this.sessionVersion = Number(data.session_version) || 0
+        if (typeof data.jsonl_path === 'string') this.jsonlPath = data.jsonl_path
         this.error = null
         this.negotiated = true
         this.emit()
@@ -579,6 +585,7 @@ export class SessionHistoryStore {
       sid: this.sid,
       sessionVersion: this.sessionVersion,
       updatedAt: Date.now(),
+      jsonlPath: this.jsonlPath,
       groups: this.groups,
       groupsData,
       stickies,
@@ -659,6 +666,14 @@ export function useTotalEntryCount(store: SessionHistoryStore | null): number {
   return useSyncExternalStore(
     store ? store.subscribe : noopSubscribe,
     store ? () => store.groups.reduce((n, g) => n + (g.entry_count || 0), 0) : () => 0,
+  )
+}
+
+/** primitive selector: 会话 jsonl 文件绝对路径 (原始 JSONL 弹窗标题展示用). 返回值变化才重渲染. */
+export function useSessionJsonlPath(store: SessionHistoryStore | null): string | null {
+  return useSyncExternalStore(
+    store ? store.subscribe : noopSubscribe,
+    store ? () => store.jsonlPath : () => null,
   )
 }
 
