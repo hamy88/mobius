@@ -27,6 +27,13 @@ export interface HistoryGroupMeta {
   entry_count: number
 }
 
+// 挂起中的开轮卡 (pending_round_openers): 前端当作「特殊的最后一个组」渲染.
+export interface PendingOpenerMeta {
+  id: string
+  opener_ts: string | null
+  user_summary: string
+}
+
 // ── 组状态机 (展开与加载合一; 展开即背负加载义务) ────────────────────────────
 //
 //   closed --用户展开 or 自动展开--> open-unloaded --自动加载--> open-loading
@@ -52,6 +59,7 @@ export interface HistorySnapshot {
   sessionVersion: number
   jsonlPath: string | null
   groups: HistoryGroupMeta[]
+  pending: PendingOpenerMeta[]
   entriesByGroup: ReadonlyMap<string, any[]>
   groupRuntime: ReadonlyMap<string, GroupRuntime>
   error: string | null
@@ -147,7 +155,7 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 /** ① GET groups. 304 → notModified (缓存全可信). */
-async function fetchGroups(sid: string, etag: string | null): Promise<{ notModified?: boolean; session_version?: number; jsonl_path?: string | null; groups?: HistoryGroupMeta[] }> {
+async function fetchGroups(sid: string, etag: string | null): Promise<{ notModified?: boolean; session_version?: number; jsonl_path?: string | null; groups?: HistoryGroupMeta[]; pending?: PendingOpenerMeta[] }> {
   const res = await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/groups`, {
     headers: authHeaders(etag ? { 'If-None-Match': etag } : {}),
   })
@@ -170,7 +178,7 @@ async function fetchGroupEntries(sid: string, gid: string): Promise<{ version: n
 // ── Store ────────────────────────────────────────────────────────────────
 
 const EMPTY_SNAPSHOT: HistorySnapshot = {
-  rev: 0, sessionVersion: 0, jsonlPath: null, groups: [], entriesByGroup: new Map(),
+  rev: 0, sessionVersion: 0, jsonlPath: null, groups: [], pending: [], entriesByGroup: new Map(),
   groupRuntime: new Map(), error: null, negotiated: false,
 }
 
@@ -201,6 +209,7 @@ export class SessionHistoryStore {
   private writeThroughTimer: ReturnType<typeof setTimeout> | null = null
 
   groups: HistoryGroupMeta[] = []
+  pending: PendingOpenerMeta[] = []
   sessionVersion = 0
   jsonlPath: string | null = null
   negotiated = false
@@ -229,6 +238,7 @@ export class SessionHistoryStore {
         sessionVersion: this.sessionVersion,
         jsonlPath: this.jsonlPath,
         groups: this.groups,
+        pending: this.pending,
         entriesByGroup: this.entriesByGroup,
         groupRuntime: this.groupRuntime,
         error: this.error,
@@ -398,6 +408,7 @@ export class SessionHistoryStore {
           }
         }
         this.groups = serverGroups
+        this.pending = Array.isArray(data.pending) ? data.pending : []
         this.sessionVersion = Number(data.session_version) || 0
         if (typeof data.jsonl_path === 'string') this.jsonlPath = data.jsonl_path
         this.error = null
@@ -497,6 +508,8 @@ export class SessionHistoryStore {
       this.applyOrBuffer(() => this.applyGroupCreated(msg.group))
     } else if (msg.event === 'entries') {
       this.applyOrBuffer(() => this.applyEntriesEvent(msg))
+    } else if (msg.event === 'pending_opener') {
+      this.applyOrBuffer(() => this.applyPendingOpener(msg.entry))
     }
   }
 
@@ -522,8 +535,23 @@ export class SessionHistoryStore {
     }
     this.groups.push(meta)
     this.groups.sort((a, b) => a.seq - b.seq)
+    // 出队 = 所有 pending 一次性开成该组 → 清空伪组.
+    this.pending = []
     this.emit()
     this.persistSoon()
+  }
+
+  private applyPendingOpener(entry: any): void {
+    if (!entry || typeof entry !== 'object') return
+    const id = String(entry.id || '')
+    if (!id) return
+    if (this.pending.some((p) => p.id === id)) return
+    this.pending.push({
+      id,
+      opener_ts: entry.opener_ts || null,
+      user_summary: entry.user_summary || '',
+    })
+    this.emit()
   }
 
   private applyEntriesEvent(msg: any): void {

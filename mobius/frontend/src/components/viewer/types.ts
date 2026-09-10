@@ -152,3 +152,4 @@ export type JsonlRenderBlock =
   | { key: string; kind: 'continuation'; items: JsonlViewItem[] }
   | { key: string; kind: 'preItem'; item: JsonlViewItem }
   | { key: string; kind: 'round'; round: Round; index: number }
+  | { key: string; kind: 'pending'; pending: { id: string; user_summary: string }[] }

@@ -298,6 +298,14 @@ class AgentBackend {
   //     (后续出现 type:user 或 attachment.type:queued_command 携带同内容) 的 (见其实现).
   //   - tmux-codex: codex 不在 rollout JSONL 暴露排队事件 → 恒空 (显式 override).
   getPendingRequests(_sessionId: string): any[] { return [] }
+
+  // 该原生 jsonl 条目是否为「出队事件」: 即 agent 真正消费到人类输入的那一刻.
+  // 开轮时机依赖它 —— 提交问题只把 opener 挂进 pending_round_openers, 等 scanPrimary
+  // 扫到 containDequeueEvent==true 才把所有 pending 一次性开成一组.
+  //   - 基类默认 true (占位): codex / deepseek harness 无出队信号, 不 override, 直接继承,
+  //     语义 = 首次 sync 即出队 (等价旧「立即开轮」).
+  //   - tmux-claude-code: override 成「条目含 origin.kind=='human'」检测 (见其实现).
+  containDequeueEvent(_entry: unknown): boolean { return true }
 }
 
 module.exports = { AgentBackend }

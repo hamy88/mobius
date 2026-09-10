@@ -334,12 +334,13 @@ const taskAccumulator = new TaskStateAccumulator();
 // ── SSE 订阅 (事件 = 落库结果的投影; 没有订阅者就不发) ─────────────────────
 
 export interface HistoryStoreEvent {
-  type: 'group_created' | 'entries';
+  type: 'group_created' | 'entries' | 'pending_opener';
   payload: {
     group?: any;
     group_id?: string;
     group_id_version?: number;
     entries?: any[];
+    entry?: any;
   };
 }
 
@@ -505,43 +506,83 @@ function* iterateNewLines(filePath: string, startByte: number): Generator<{ text
 
 // ── 迁移源 (冻结的旧 .mobius.jsonl): 见 mobius-agent-history-legacy.ts ────
 
-// ── pending_round_openers: 两阶段开轮 ────────────────────────────────────
-// 阶段A (事务1): 条目入库 (group_seq=NULL) + uuid 入队; 阶段B (事务2): 出队开组.
-// 故意拆成两个事务: 合一个则崩溃整体回滚, 中间态永不可见, 预留就失去意义.
-// 卡住态 = A 已提交 B 未执行; syncSession 开头检查并自愈 (v1 策略: 打日志 + 补跑 B).
+// ── pending_round_openers: 出队开轮 ─────────────────────────────────────
+// 阶段A (writeMobiusCoreEntry): 条目入库 (group_seq=NULL, round_opener=1) + uuid 入队,
+// 只挂起不开轮. 出队 (flush) 触发点:
+//   1. group 0 特殊: 新会话还没开过任何轮 (last_group_seq==0) → 阶段A 后立即出队,
+//      等价旧「opener 提前」, spawn 前导落进第 1 轮而非第 0 轮.
+//   2. dequeue 事件: scanPrimary 扫到 containDequeueEvent(entry)==true 时出队
+//      (仅已开过轮的会话走到这; dequeue 必然全部出队, 故「全部 pending → 一个组」).
+//   3. session 终止兜底: 后端 terminateSession 调 flushPendingOpeners 清空
+//      (防 agent 崩溃后 dequeue 永不出现, pending 永久挂起).
+// 多个 pending 一次性出队只开一组 (group_seq 只 +1); 组元数据取「最后一个」pending.
 
-function recoverPendingOpeners(sessionId: string): void {
+function flushPendingOpenersToSink(sessionId: string, sink: CommitSink): number | null {
   const st = S();
   const state = st.getState.get(sessionId) as any;
-  if (!state) return;
+  if (!state) return null;
   const pending: string[] = JSON.parse(state.pending_round_openers || '[]');
-  if (!pending.length) return;
-  console.warn(`[agent-history] recovering ${pending.length} pending round opener(s) for ${sessionId}`);
+  if (!pending.length) return null;
+
   const db = openStore();
-  const recovered: any[] = [];
+  const resolved: { uuid: string; json: string; ts: number | null }[] = [];
   for (const uuid of pending) {
     const row = db.prepare('SELECT json, ts FROM entries WHERE session_id = ? AND uuid = ?').get(sessionId, uuid) as any;
-    if (!row) continue; // 条目也没了 → 只出队
-    const entry = safeParseJson(row.json);
-    const summary = summarizeUserText(entry?.message?.content);
-    const popTx = db.transaction((): number => {
-      const cur = st.getState.get(sessionId) as any;
-      const gseq = (cur.last_group_seq || 0) + 1;
-      st.insertRound.run(sessionId, gseq, uuid, row.ts, summary, 1, nowIso());
-      st.updateEntryGroup.run(gseq, 0, sessionId, uuid);
-      db.prepare('UPDATE ingest_state SET last_group_seq = ?, session_version = ? WHERE session_id = ?')
-        .run(gseq, (cur.session_version || 0) + 1, sessionId);
-      return gseq;
-    });
-    const gseq = popTx() as number;
-    recovered.push({
-      id: String(gseq), seq: gseq,
-      opener_ts: row.ts != null ? new Date(row.ts).toISOString() : null,
-      user_summary: summary, version: 1, entry_count: 1,
-    });
+    if (row) resolved.push({ uuid, json: row.json, ts: row.ts });
   }
-  db.prepare("UPDATE ingest_state SET pending_round_openers = '[]' WHERE session_id = ?").run(sessionId);
-  for (const group of recovered) emit(sessionId, { type: 'group_created', payload: { group } });
+  if (!resolved.length) {
+    // 队列里的条目都没了 → 只清空队列, 不开组.
+    db.prepare("UPDATE ingest_state SET pending_round_openers = '[]' WHERE session_id = ?").run(sessionId);
+    return null;
+  }
+
+  const last = resolved[resolved.length - 1];
+  const lastEntry = safeParseJson(last.json);
+  const summary = summarizeUserText(lastEntry?.message?.content);
+
+  const tx = db.transaction((): number => {
+    const cur = st.getState.get(sessionId) as any;
+    const gseq = (cur.last_group_seq || 0) + 1;
+    st.insertRound.run(sessionId, gseq, last.uuid, last.ts, summary, resolved.length, nowIso());
+    resolved.forEach((r, i) => st.updateEntryGroup.run(gseq, i, sessionId, r.uuid));
+    db.prepare('UPDATE ingest_state SET last_group_seq = ?, pending_round_openers = ?, session_version = ? WHERE session_id = ?')
+      .run(gseq, '[]', (cur.session_version || 0) + 1, sessionId);
+    return gseq;
+  });
+  const gseq = tx() as number;
+
+  sink.newRounds.push({
+    id: String(gseq), seq: gseq,
+    opener_ts: last.ts != null ? new Date(last.ts).toISOString() : null,
+    user_summary: summary, version: resolved.length, entry_count: resolved.length,
+  });
+  sink.rowsByGroup.set(gseq, resolved.map((r) => safeParseJson(r.json)).filter(Boolean));
+  return gseq;
+}
+
+// 对外兜底入口 (terminateSession 等): 自建 sink 并立即广播.
+function flushPendingOpeners(sessionId: string): number | null {
+  const sink: CommitSink = { newRounds: [], rowsByGroup: new Map() };
+  const gseq = flushPendingOpenersToSink(sessionId, sink);
+  flushSink(sessionId, sink);
+  return gseq;
+}
+
+// pending opener 的对外投影 (前端伪组 / pending_opener 事件共用同一形状).
+function pendingMetaOf(entry: any): { id: string; opener_ts: string | null; user_summary: string } {
+  return {
+    id: entry?.uuid || '',
+    opener_ts: entry?.timestamp || null,
+    user_summary: summarizeUserText(entry?.message?.content),
+  };
+}
+
+function hasPendingOpeners(sessionId: string): boolean {
+  const st = S();
+  const state = st.getState.get(sessionId) as any;
+  if (!state) return false;
+  const pending: string[] = JSON.parse(state.pending_round_openers || '[]');
+  return pending.length > 0;
 }
 
 // ── 对外: 直写入口 (发送链路 / 错误扫描) ──────────────────────────────────
@@ -556,6 +597,7 @@ function writeMobiusCoreEntry(args: {
   cwd?: any;
   backendName?: any;
   primaryPath?: string | null;
+  containDequeueEvent?: (entry: any) => boolean;
 } & MobiusCoreRecord): boolean {
   const sessionId = args.sessionId;
   if (!sessionId) return false;
@@ -571,13 +613,12 @@ function writeMobiusCoreEntry(args: {
     // 本轮 opener 排在最后 — 组序 = 时间序. (路径未知 = 新会话无迁移源, 直接建行,
     // 迁移标记保持 0, 由首次 sync 检查.)
     if (args.primaryPath) {
-      try { syncSession(sessionId, args.primaryPath); } catch {}
+      try { syncSession(sessionId, args.primaryPath, args.containDequeueEvent); } catch {}
     }
     if (!st.getState.get(sessionId)) {
       st.insertState.run(sessionId, args.primaryPath || '');
     }
   }
-  recoverPendingOpeners(sessionId);
 
   const excluded = isExcludedSystemReminder(entry);
   const sink: CommitSink = { newRounds: [], rowsByGroup: new Map() };
@@ -612,29 +653,14 @@ function writeMobiusCoreEntry(args: {
   });
   txA();
 
-  // 阶段B: 出队开组. (单线程同步执行, txA→txB 之间不会插队, 队头必是本轮 uuid.)
-  const txB = db.transaction(() => {
-    const state = st.getState.get(sessionId) as any;
-    const pending: string[] = JSON.parse(state.pending_round_openers || '[]');
-    const uuid = pending.shift();
-    if (uuid !== entry.uuid && uuid != null) {
-      console.warn(`[agent-history] pending queue head ${uuid} != ${entry.uuid}, recovering order`);
-      pending.unshift(uuid);
-    }
-    const gseq = (state.last_group_seq || 0) + 1;
-    const summary = summarizeUserText(entry.message?.content);
-    st.insertRound.run(sessionId, gseq, entry.uuid, ts, summary, 1, nowIso());
-    st.updateEntryGroup.run(gseq, 0, sessionId, entry.uuid);
-    db.prepare('UPDATE ingest_state SET last_group_seq = ?, pending_round_openers = ?, session_version = ? WHERE session_id = ?')
-      .run(gseq, JSON.stringify(pending), (state.session_version || 0) + 1, sessionId);
-    sink.newRounds.push({
-      id: String(gseq), seq: gseq,
-      opener_ts: entry.timestamp || null,
-      user_summary: summary, version: 1, entry_count: 1,
-    });
-    pushSinkRow(sink, gseq, entry);
-  });
-  txB();
+  // 出队决策: group 0 特殊 (新会话还没开过轮) → 立即出队 (等价旧 opener 提前);
+  // 已开过轮 → 挂起等 scanPrimary 扫到 dequeue 事件再出队, 前端先收到 pending_opener.
+  const stateAfterA = st.getState.get(sessionId) as any;
+  if ((stateAfterA.last_group_seq || 0) === 0) {
+    flushPendingOpenersToSink(sessionId, sink);
+  } else {
+    emit(sessionId, { type: 'pending_opener', payload: { entry: pendingMetaOf(entry) } });
+  }
   flushSink(sessionId, sink);
   return true;
 }
@@ -649,12 +675,13 @@ function writeMobiusErrorEntry(args: {
   cwd?: any;
   backendName?: any;
   primaryPath?: string | null;
+  containDequeueEvent?: (entry: any) => boolean;
   error?: any;
 }): boolean {
   const sessionId = args.sessionId;
   if (!sessionId) return false;
   if (args.primaryPath) {
-    try { syncSession(sessionId, args.primaryPath); } catch {}
+    try { syncSession(sessionId, args.primaryPath, args.containDequeueEvent); } catch {}
   }
   const st = S();
   if (!st.getState.get(sessionId)) {
@@ -701,8 +728,9 @@ function markError(sessionId: string, message: string): SyncResult {
   return { ok: false, error: message };
 }
 
-// [legacy-migration] 第四个参数: 迁移源 (无则纯原生轨扫描); 第五个: 本次调用是否结算迁移标记. 删除迁移时一并删掉.
-function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'members', legacy: LegacyBackfill | null, markLegacyDone: boolean): SyncResult {
+// [legacy-migration] 第四个参数: 迁移源 (无则纯原生轨扫描); 第五个: 本次调用是否结算迁移标记.
+// 第六个: 出队事件检测 (缺省恒 true = 立即出队). 删除迁移时一并删掉 legacy 相关参数.
+function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'members', legacy: LegacyBackfill | null, markLegacyDone: boolean, containDequeueEvent?: (entry: any) => boolean): SyncResult {
   const db = openStore();
   const st = S();
   const state = st.getState.get(sessionId) as any;
@@ -719,6 +747,8 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
   // 定序锚: 原生行里 933+ 行无时间戳 (claude-code 元数据行), 用最近一次有效 ts 给它们定序 —
   // 元数据行写在哪个时刻之后, 就参与哪个时刻的归并.
   let lastKnownTs: number | null = null;
+  // 出队检测缺省恒 true (codex / deepseek 占位), 但基类已提供同名方法, 调用方照传.
+  const detectDequeue = containDequeueEvent || (() => true);
 
   const commit = () => {
     if (pendingRows.length === 0) return;
@@ -735,6 +765,11 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
       if (lineTs != null) lastKnownTs = lineTs;
       // [legacy-migration] 归并序: 迁移条目按时间戳插到原生行之前 (同刻原生优先; 无锚不 flush).
       if (legacy) pendingRows.push(...legacy.takeUpTo(anchorTs));
+      // 出队触发: 本行是出队事件 且 有挂起的 opener → 先结清前导行到旧组, 再一次性开组.
+      if (detectDequeue(entry) && hasPendingOpeners(sessionId)) {
+        commit();
+        flushPendingOpenersToSink(sessionId, sink);
+      }
       pendingRows.push({ entry, json: line.text, origin: 'primary', roundOpener: false, ts: parseTimestampMs(entry) });
       // task 快照: 紧跟锚点条目之后落库.
       try {
@@ -773,7 +808,7 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
  * 首次 (无状态行) = backfill: 冻结的旧 .mobius.jsonl 与原生轨按时间戳归并,
  * 见开轮卡切组 (origin='legacy'). 之后旧文件永不再读.
  */
-function syncSession(sessionId: string, primaryPath: string | null | undefined): SyncResult {
+function syncSession(sessionId: string, primaryPath: string | null | undefined, containDequeueEvent?: (entry: any) => boolean): SyncResult {
   const st = S();
   let state = st.getState.get(sessionId) as any;
   let created = false;
@@ -784,14 +819,13 @@ function syncSession(sessionId: string, primaryPath: string | null | undefined):
     created = true;
   }
   if (state.error) return { ok: false, error: state.error };
-  recoverPendingOpeners(sessionId);
   if (!primaryPath) return { ok: true, inserted: 0 };
 
   // 换轨 (respawn 换了原生会话): 先把旧轨读到尾, 再从 0 读新轨.
   if (state.primary_path && state.primary_path !== primaryPath) {
     const oldPath = state.primary_path;
     if (fs.existsSync(oldPath)) {
-      const r = scanPrimary(sessionId, oldPath, 'members', null, false);
+      const r = scanPrimary(sessionId, oldPath, 'members', null, false, containDequeueEvent);
       if (!r.ok) return r;
       openStore().prepare('UPDATE ingest_state SET primary_path = ?, primary_read_bytes = 0 WHERE session_id = ?')
         .run(primaryPath, sessionId);
@@ -807,7 +841,7 @@ function syncSession(sessionId: string, primaryPath: string | null | undefined):
   // opener 提前写入也会建状态行, 若按 created 判定, 这些会话的旧文件会被永久跳过.
   const needLegacy = Number(state.legacy_read_bytes) === 0;
   const legacy = needLegacy ? loadLegacyBackfill(primaryPath) : null;
-  return scanPrimary(sessionId, primaryPath, created ? 'initial' : 'members', legacy, needLegacy);
+  return scanPrimary(sessionId, primaryPath, created ? 'initial' : 'members', legacy, needLegacy, containDequeueEvent);
 }
 
 // ── 对外: 查询 (① ② + 旧 getHistory 兼容) ───────────────────────────────
@@ -851,11 +885,11 @@ function getGroupEntries(sessionId: string, groupSeq: number): { group_id: strin
 }
 
 /** 旧 getHistory 语义的库版: 全部条目按到达序. assistant 快照 / 标题扫描仍在用. */
-function getHistorySnapshot(sessionId: string, primaryPath: string | null | undefined): {
+function getHistorySnapshot(sessionId: string, primaryPath: string | null | undefined, containDequeueEvent?: (entry: any) => boolean): {
   entries: any[]; total: number; truncated: boolean; sentinel: any;
 } {
   if (primaryPath) {
-    try { syncSession(sessionId, primaryPath); } catch {}
+    try { syncSession(sessionId, primaryPath, containDequeueEvent); } catch {}
   }
   const db = openStore();
   const rows = db.prepare('SELECT json FROM entries WHERE session_id = ? ORDER BY seq ASC').all(sessionId) as any[];
@@ -866,6 +900,24 @@ function getHistorySnapshot(sessionId: string, primaryPath: string | null | unde
     truncated: false,
     sentinel: state ? (state.primary_read_bytes || 0) : 0,
   };
+}
+
+/** 挂起中的开轮卡 (pending_round_openers): 前端把它们当作「特殊的最后一个组」渲染. */
+function getPendingOpeners(sessionId: string): { id: string; opener_ts: string | null; user_summary: string }[] {
+  const st = S();
+  const state = st.getState.get(sessionId) as any;
+  if (!state) return [];
+  const pending: string[] = JSON.parse(state.pending_round_openers || '[]');
+  if (!pending.length) return [];
+  const db = openStore();
+  const out: { id: string; opener_ts: string | null; user_summary: string }[] = [];
+  for (const uuid of pending) {
+    const row = db.prepare('SELECT json FROM entries WHERE session_id = ? AND uuid = ?').get(sessionId, uuid) as any;
+    if (!row) continue;
+    const entry = safeParseJson(row.json);
+    if (entry) out.push(pendingMetaOf(entry));
+  }
+  return out;
 }
 
 /** 会话删除: 三表级联. */
@@ -884,9 +936,11 @@ export {
   syncSession,
   getGroups,
   getGroupEntries,
+  getPendingOpeners,
   getHistorySnapshot,
   writeMobiusCoreEntry,
   writeMobiusErrorEntry,
+  flushPendingOpeners,
   deleteSessionData,
   subscribeSessionEvents,
 };

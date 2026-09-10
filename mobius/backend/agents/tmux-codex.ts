@@ -33,6 +33,7 @@ import type { HistorySnapshot, QueryOpts } from './base'
 const {
   getHistorySnapshot,
   writeMobiusCoreEntry,
+  flushPendingOpeners,
 } = require('../services/mobius-agent-history')
 const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
@@ -738,7 +739,12 @@ class TmuxCodexBackend extends AgentBackend {
     try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
   terminateSession(sessionId: string) {
-    return this._withLock(sessionId, () => this._terminateImpl(sessionId))
+    return this._withLock(sessionId, async () => {
+      const r = await this._terminateImpl(sessionId)
+      // session 终止兜底: 挂起的 pending_round_openers 立即出队 (防 agent 崩溃后 dequeue 永不出现).
+      try { flushPendingOpeners(sessionId) } catch {}
+      return r
+    })
   }
 
   isAlive(sessionId: string) {
@@ -918,7 +924,7 @@ class TmuxCodexBackend extends AgentBackend {
 
   // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
   getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
-    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId)) as HistorySnapshot
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this)) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: any = {}) {
@@ -949,6 +955,7 @@ class TmuxCodexBackend extends AgentBackend {
         backendName: this.name,
         primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
+        containDequeueEvent: this.containDequeueEvent.bind(this),
       })
     } catch (e) {
       console.warn(`[tmux-codex] mobius core entry failed (${sessionId}): ${e.message}`)

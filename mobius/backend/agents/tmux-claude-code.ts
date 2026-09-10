@@ -31,6 +31,7 @@ import type { HistorySnapshot, QueryOpts } from './base'
 const {
   getHistorySnapshot,
   writeMobiusCoreEntry,
+  flushPendingOpeners,
 } = require('../services/mobius-agent-history')
 const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
@@ -641,7 +642,12 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
   terminateSession(sessionId: string) {
-    return this._withLock(sessionId, () => this._terminateImpl(sessionId))
+    return this._withLock(sessionId, async () => {
+      const r = await this._terminateImpl(sessionId)
+      // session 终止兜底: 挂起的 pending_round_openers 立即出队 (防 agent 崩溃后 dequeue 永不出现).
+      try { flushPendingOpeners(sessionId) } catch {}
+      return r
+    })
   }
 
   // ── 状态查询 (不上锁, 跟写操作并发安全) ─────────────
@@ -697,6 +703,16 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     // 等待 background agents —— 该等待态 JSONL 表达不了, 兜底看 pane 是否有
     // "Waiting for N background agents to finish". 命中则仍视为工作中, 避免误判待命 / 误回收.
     return CLAUDE_BG_AGENTS_WAITING_RE.test(capturePaneTail(sessionId))
+  }
+
+  // 出队事件检测: Claude Code 的「人类输入真正到达 agent」= 条目带 origin.kind=='human'.
+  // 两种落盘形态都算: 顶层 origin (type:user 手打) / attachment 里 origin (queued_command 注入).
+  // 其余 (system/assistant/tool 等) 都不是出队信号.
+  containDequeueEvent(entry: any): boolean {
+    if (!entry || typeof entry !== 'object') return false
+    if (entry.origin?.kind === 'human') return true
+    if (entry.attachment?.origin?.kind === 'human') return true
+    return false
   }
 
   // 待处理请求: Claude Code 内存队列里"已 enqueue 但尚未被消费"的 prompt.
@@ -859,7 +875,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
 
   // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
   getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
-    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId)) as HistorySnapshot
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this)) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
@@ -889,6 +905,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         backendName: this.name,
         primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
+        containDequeueEvent: this.containDequeueEvent.bind(this),
       })
     } catch (e) {
       console.warn(`[tmux-claude-code] mobius core entry failed (${sessionId}): ${(e as Error)?.message || e}`)

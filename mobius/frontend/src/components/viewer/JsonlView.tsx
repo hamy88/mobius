@@ -322,13 +322,22 @@ export function JsonlView({
   const activeTarget = extTarget ?? internalTarget
 
   const renderBlocks = useMemo<JsonlRenderBlock[]>(() => {
-    return rounds.map((r, index) => ({
+    const blocks: JsonlRenderBlock[] = rounds.map((r, index) => ({
       key: roundKeyOf(r.meta.id),
       kind: 'round' as const,
       round: r.round,
       index,
     }))
-  }, [rounds])
+    // 挂起的开轮卡 → 渲染成「特殊的最后一个组」(排队中, 尚未开轮).
+    if (snapshot.pending.length > 0) {
+      blocks.push({
+        key: 'pending',
+        kind: 'pending',
+        pending: snapshot.pending.map((p) => ({ id: p.id, user_summary: p.user_summary })),
+      })
+    }
+    return blocks
+  }, [rounds, snapshot.pending])
 
   // 逐组回调缓存: 身份跨渲染稳定, 是 RoundGroup memo 生效的前提 (store 换实例时整体作废).
   const groupCbRef = useRef<{ store: SessionHistoryStore | null; map: Map<string, GroupCallbacks> }>({ store: null, map: new Map() })
@@ -348,6 +357,26 @@ export function JsonlView({
   }
 
   const renderBlock = (block: JsonlRenderBlock) => {
+    if (block.kind === 'pending') {
+      return (
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.05] px-4 py-3 card-enter">
+          <div className="flex items-center gap-3">
+            <span className="relative inline-flex w-4 h-4 flex-shrink-0">
+              <span className="absolute inset-0 rounded-full border-2 border-amber-300/20" />
+              <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-amber-300 animate-spin" />
+            </span>
+            <span className="font-medium text-amber-200">排队中 · {block.pending.length} 条待处理</span>
+          </div>
+          <div className="mt-2 space-y-1">
+            {block.pending.map((p) => (
+              <div key={p.id} className="text-[12px] text-[var(--text-secondary)] truncate" title={p.user_summary}>
+                {p.user_summary || '(无内容)'}
+              </div>
+            ))}
+          </div>
+        </div>
+      )
+    }
     if (block.kind !== 'round') return null
     const r = rounds[block.index]
     if (!r) return null
@@ -386,8 +415,8 @@ export function JsonlView({
     )
   }
 
-  // 空
-  if (groups.length === 0) {
+  // 空 (有 pending 时也非空 — 排队中的伪组仍需渲染).
+  if (groups.length === 0 && snapshot.pending.length === 0) {
     if (initialLoading) return <JsonlInitialSkeleton />
     if (emptyLoadingText) {
       return (

@@ -9,6 +9,7 @@ const { projectHarnessEvent } = require('./deepseek-harness-events')
 const {
   getHistorySnapshot,
   writeMobiusCoreEntry,
+  flushPendingOpeners,
 } = require('../services/mobius-agent-history')
 const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
@@ -190,6 +191,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
         backendName: this.name,
         primaryPath: entry.jsonlPath,
         ...mobiusPromptRecord,
+        containDequeueEvent: this.containDequeueEvent.bind(this),
       })
     } catch (error) {
       this._captureError(entry.sessionId, error)
@@ -361,6 +363,8 @@ class DeepSeekHarnessBackend extends AgentBackend {
       this.runtime.delete(sessionId)
       this._forgetPersisted(sessionId)
       if (entry?.flagRoot || entry?.cwd) safeRemoveFlagDir(entry.flagRoot || entry.cwd, sessionId, this.name)
+      // session 终止兜底: 挂起的 pending_round_openers 立即出队 (防 agent 崩溃后 dequeue 永不出现).
+      try { flushPendingOpeners(sessionId) } catch {}
     })
   }
 
@@ -381,7 +385,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
   getRecentError(sessionId: string) { return this.runtime.get(sessionId)?.recentError || null }
   // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
   getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
-    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId)) as HistorySnapshot
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this)) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {

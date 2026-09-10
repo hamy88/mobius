@@ -2,7 +2,8 @@
  * agent-history-store.js — 历史存储 (agent-history-store.db) 的行为测试.
  *
  * 覆盖: 开轮/归组、排除串、幂等 sync、backfill 迁移归并 (含 task_state 载体)、
- * pending_round_openers 卡住态自愈、文件变小报错、删除级联、事件订阅.
+ * pending_round_openers 出队 (dequeue 触发 + 多 opener 合并 + 元数据取末)、
+ * 文件变小报错、删除级联、事件订阅.
  */
 const assert = require('assert')
 const fs = require('fs')
@@ -150,32 +151,47 @@ async function main() {
   assert.ok(snap.entries.length >= 8)
   assert.ok(snap.entries[0].message && snap.entries[0].message.content === '旧问题一')
 
-  // ── D. pending_round_openers 卡住态自愈 ──────────────────────────────
+  // ── D. pending_round_openers 出队 (dequeue 触发 + 多 opener 合并 + 元数据取末) ──
   const dirD = fs.mkdtempSync(path.join(os.tmpdir(), 'ahs-d-'))
   const jsonlD = path.join(dirD, 'sess-d.jsonl')
   const sidD = `test-ahs-d-${process.pid}`
-  writeLines(jsonlD, [nativeEntry(5)])
-  store.syncSession(sidD, jsonlD) // 建状态行 + pre 组
+  const eventsD = []
+  const unsubD = store.subscribeSessionEvents(sidD, (ev) => eventsD.push(ev))
 
-  const Database = require('better-sqlite3')
-  const raw = new Database(process.env.MOBIUS_AGENT_HISTORY_STORE_PATH)
-  const openerJson = JSON.stringify({
-    type: 'user', uuid: 'pend-opener-1', timestamp: iso(1),
-    message: { role: 'user', content: '卡住的开轮' }, entrypoint: 'mobius', mobius: { kind: 'user_input' },
-  })
-  raw.prepare(`INSERT INTO entries (session_id, uuid, seq, group_seq, seq_in_group, round_opener, origin, ts, json)
-               VALUES (?, 'pend-opener-1', 999, NULL, NULL, 1, 'direct', ?, ?)`)
-    .run(sidD, BASE_MS + 1000, openerJson)
-  raw.prepare('UPDATE ingest_state SET pending_round_openers = ? WHERE session_id = ?').run('["pend-opener-1"]', sidD)
-  raw.close()
+  // 第一问: 新会话 group0 特殊 → 立即开轮1 (不挂 pending).
+  store.writeMobiusCoreEntry({ sessionId: sidD, content: '第一问', primaryPath: jsonlD })
+  appendLines(jsonlD, [nativeEntry(5)])
+  store.syncSession(sidD, jsonlD)
+  assert.strictEqual(store.getGroups(sidD).groups.length, 1, '轮1 已开 (group0 特殊立即出队)')
 
-  r = store.syncSession(sidD, jsonlD)
+  // 已开过轮: 两个 opener → 都挂 pending, 不立即开轮, 发 pending_opener 事件.
+  store.writeMobiusCoreEntry({ sessionId: sidD, content: '排队问题一', primaryPath: jsonlD })
+  store.writeMobiusCoreEntry({ sessionId: sidD, content: '排队问题二', primaryPath: jsonlD })
+  g = store.getGroups(sidD)
+  assert.strictEqual(g.groups.length, 1, '排队期间不开新轮')
+  let pending = store.getPendingOpeners(sidD)
+  assert.strictEqual(pending.length, 2, '两个 pending opener')
+  assert.strictEqual(pending[0].user_summary, '排队问题一')
+  assert.strictEqual(pending[1].user_summary, '排队问题二')
+  assert.ok(eventsD.some((e) => e.type === 'pending_opener' && e.payload.entry.user_summary === '排队问题二'), 'pending_opener 事件')
+
+  // dequeue 事件 (origin.kind=human) → 两个 pending 一次性出队, 只 +1 组, 元数据取最后一个.
+  appendLines(jsonlD, [nativeEntry(10, { origin: { kind: 'human' } })])
+  const detector = (e) => !!(e && e.origin && e.origin.kind === 'human')
+  r = store.syncSession(sidD, jsonlD, detector)
   assert.strictEqual(r.ok, true)
   g = store.getGroups(sidD)
-  const recovered = g.groups.find((x) => x.user_summary === '卡住的开轮')
-  assert.ok(recovered, 'pending 自愈: 组已开出')
-  ge = store.getGroupEntries(sidD, recovered.seq)
-  assert.strictEqual(ge.entries[0].uuid, 'pend-opener-1')
+  assert.strictEqual(g.groups.length, 2, 'dequeue 后合并成一组')
+  const merged = g.groups[1]
+  assert.strictEqual(merged.seq, 2)
+  assert.strictEqual(merged.user_summary, '排队问题二', '组元数据取最后一个 pending')
+  assert.strictEqual(merged.entry_count, 3, '两 opener + 一条原生行')
+  ge = store.getGroupEntries(sidD, merged.seq)
+  assert.strictEqual(ge.entries[0].message.content, '排队问题一')
+  assert.strictEqual(ge.entries[1].message.content, '排队问题二')
+  assert.strictEqual(ge.entries[2].timestamp, iso(10))
+  assert.strictEqual(store.getPendingOpeners(sidD).length, 0, '出队后 pending 清空')
+  unsubD()
 
   // ── F. task 快照: 原生 TaskCreate 行触发 task_state 载体落库 ─────────
   const dirF = fs.mkdtempSync(path.join(os.tmpdir(), 'ahs-f-'))

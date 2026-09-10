@@ -3992,9 +3992,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           loadHistoryRef.current()
         }
         else if (msg.event === 'stopped') { setTyping(false); setStreamContent(''); loadHistoryRef.current() }
-        else if (msg.event === 'group_created' || msg.event === 'entries') {
-          // 历史存储事件 (落库结果的投影): group_created / {entries, group_id, group_id_version}.
-          // store 内部按水位线 + uuid 对账 (① 协商前到达的事件先缓冲).
+        else if (msg.event === 'group_created' || msg.event === 'entries' || msg.event === 'pending_opener') {
+          // 历史存储事件 (落库结果的投影): group_created / {entries, group_id, group_id_version} /
+          // pending_opener {entry}. store 内部按水位线 + uuid 对账 (① 协商前到达的事件先缓冲).
           if (msg.session_id && msg.session_id !== sid) return
           historyStoreRef.current?.applySseEvent(msg)
         }
@@ -4006,7 +4006,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       } catch {}
     }
 
-    ;['subscribed', 'history', 'stream', 'buttons', 'stopped', 'group_created', 'entries', 'typing', 'server_error']
+    ;['subscribed', 'history', 'stream', 'buttons', 'stopped', 'group_created', 'entries', 'pending_opener', 'typing', 'server_error']
       .forEach(eventName => source.addEventListener(eventName, handleStreamMessage as EventListener))
 
     source.onerror = () => {
