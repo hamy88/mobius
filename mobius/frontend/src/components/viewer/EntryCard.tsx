@@ -133,7 +133,7 @@ function ToolStatusIcon({ status }: { status: ToolStatus }) {
  * 单卡 open 的"系统期望值" — 所有展开/折叠条件合并到此一处判定, 优先级 (高 → 低):
  *   ① 字段模式       始终默认折叠 — 字段树不能被任何自动展开信号掀开.
  *   ② forceOpen       搜索命中        — 用户显式查看, 压过 parentOrderedCollapse.
- *   ③ parentOrderedCollapse    forgotten-flag  — 默认折叠; 压过本地展开条件.
+ *   ③ parentOrderedCollapse    上下文折叠规则 (forgotten-flag / 加密 reasoning) — 默认折叠; 压过本地展开条件.
  *   ④ 本地展开条件     patch_apply / 计划(canPlan) / 纯文本卡(可精简·可图片·error 类型, 且非代码卡).
  *   ⑤ toolError       工具失败        — "折叠不藏错误"; 被 ①抑制.
  *   ⑥ 兜底            折叠.
@@ -155,7 +155,7 @@ function resolveDesiredOpen(opts: {
 }): boolean {
   if (opts.forceOpen) return true       // 搜索命中是显式查看, 压过字段模式与其它折叠规则
   if (opts.mode === 'field') return false       // 字段模式永远不自动展开
-  if (opts.parentOrderedCollapse) return false   // ② forgotten-flag
+  if (opts.parentOrderedCollapse) return false   // ② 上下文折叠规则
   // ③ 本地展开条件: patch_apply / 计划 / 初始 / 纯文本卡(可精简·可图片·error 类型, 且非代码卡)
   if (opts.isPatchApply || opts.canPlan || opts.canInitial || (!opts.canCode && (opts.canCompact || opts.canImage || opts.isErrorType))) return true
   if (opts.toolError) return true       // ④ 工具失败
@@ -170,7 +170,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   lineNo?: number
   // forceOpen: 搜索命中该卡 — 用户显式查看, 优先级最高, 压过 parentOrderedCollapse 与用户曾手动折叠.
   forceOpen?: boolean
-  // parentOrderedCollapse: forgotten-flag 收尾卡 (agent 被 forgotten-flag 系统提醒触发的机械删 flag 链路) —
+  // parentOrderedCollapse: 上下文折叠规则命中的卡片 (forgotten-flag 收尾链路 / 加密 reasoning) —
   // 默认折叠, 压过本地展开条件, 但被 forceOpen 压过. 用户仍可手动展开 (onToggle 写回 state, userToggledRef 阻止自动掀开).
   parentOrderedCollapse?: boolean
   showMeta?: boolean
@@ -304,7 +304,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
 
   // 卡片展开态受控于本地 state, 跨父组件重渲染 (实时轮询追加 entry) 保持不变.
   // 展开优先级集中在上方的 resolveDesiredOpen: field(字段模式) > forceOpen(搜索) >
-  // parentOrderedCollapse(forgotten-flag) > localExpand(本地展开条件) > toolError(工具失败) > 兜底折叠.
+  // parentOrderedCollapse(上下文规则) > localExpand(本地展开条件) > toolError(工具失败) > 兜底折叠.
   // 用户手动折叠 → onToggle 写回 state, 此后重渲染不再强制掀开 (字段模式也不会被自动掀开).
   const tourTarget = jsonEntryTourTarget(entry)
 

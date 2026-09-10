@@ -38,7 +38,7 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
   readResults?: BashToolResult[]
   // forceOpen: 搜索命中该卡, 透传给 JsonEntryCard 强制展开.
   forceOpen?: boolean
-  // parentOrderedCollapse: forgotten-flag 收尾卡, 透传给 JsonEntryCard 默认折叠 (用户仍可手动展开).
+  // parentOrderedCollapse: 上下文折叠规则命中的卡片, 透传给 JsonEntryCard 默认折叠 (用户仍可手动展开).
   parentOrderedCollapse?: boolean
   showMeta?: boolean
   dense?: boolean

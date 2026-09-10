@@ -6,7 +6,12 @@
  * "默认折叠" 取决于它前面的条目内容 (跨卡片上下文), 单张卡片看不到前后文, 必须在
  * JsonlView 顶层对可见条目序列做一次扫描后把结论透传下去. 本文件集中这类规则.
  *
- * 当前规则 (forgotten-flag 收尾折叠):
+ * 当前规则:
+ *   - forgotten-flag 收尾折叠: forgotten-flag-scanner 检测到 "agent 停工但 running.flag 未删" 时,
+ *     会注入一条系统 user 消息; agent 随后通常执行一串机械收尾动作. 这类卡片默认折叠.
+ *   - 加密 reasoning 折叠: Codex 对闭源模型只保留 encrypted_content, 无法在前端解码; 卡片保留但默认折叠.
+ *
+ * forgotten-flag 触发条件严格按用户规则:
  *   mobius 的 forgotten-flag-scanner 检测到 "agent 停工但 running.flag 未删" 时, 会自动
  *   往该 session 注入一条系统 user 消息 (DEFAULT_FORGOTTEN_FLAG_MESSAGE), 文案以
  *   "It seems that the running flag is still present, ..." 开头. agent 收到后通常会做
@@ -157,6 +162,24 @@ export function computeCollapsedByForgottenFlag(items: JsonlViewItem[]): Set<num
       if (isForgottenFlagUserEntry(items[j].entry)) { triggered = true; break }
     }
     if (triggered) collapsed.add(item.lineNo)
+  }
+  return collapsed
+}
+
+// Codex 对闭源模型的 reasoning 只保留 encrypted_content, 无法在前端解码;
+// 这类卡片仍保留在时间线中, 但默认折叠, 让可读对话内容优先呈现.
+export function computeCollapsedByEncryptedReasoning(items: JsonlViewItem[]): Set<number> {
+  const collapsed = new Set<number>()
+  for (const item of items) {
+    const entry = item.entry
+    if (
+      entry?.type === 'response_item' &&
+      entry?.payload?.type === 'reasoning' &&
+      typeof entry?.payload?.encrypted_content === 'string' &&
+      entry.payload.encrypted_content.length > 0
+    ) {
+      collapsed.add(item.lineNo)
+    }
   }
   return collapsed
 }

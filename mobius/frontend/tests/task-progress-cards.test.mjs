@@ -294,6 +294,9 @@ function taskUpdateEntry() {
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'mcp_tool_call_end' } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'agent_message', phase: 'final' } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'future_event', message: 'metadata' } }), true)
+  assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: '' }] } }), true)
+  assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: '可读思考' }] } }), false)
+  assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '正文' }] } }), false)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'assistant', message: { stop_reason: 'end_turn' } }), false)
 }
 

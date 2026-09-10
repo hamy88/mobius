@@ -167,6 +167,7 @@ export function isEventMessageEntry(entry: AnyEntry): boolean {
 //   - turn_context        : codex 每轮注入的本轮上下文元数据 (含 developer_instructions 系统提示词)
 //   - task_state          : mobius sidecar 任务快照载体 (数据并入 anchor 任务卡的计划视图)
 //   - empty task_reminder : 空 content 的 task_reminder 附件 (无任务时的空壳)
+//   - empty thinking-only : assistant 仅含空 thinking 块 (摘要显示“思考内容被隐藏”)
 //   - no_response_requested: Claude Code 合成占位 assistant 消息 ("No response requested.",
 //                            model "<synthetic>", 本地生成非模型输出; 同源的 API Error 卡保留)
 export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
@@ -185,6 +186,7 @@ export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
     isAgentListingDeltaAttachment(entry) ||
     isTaskStateCarrierEntry(entry) ||
     isEmptyTaskReminderAttachment(entry) ||
+    isEmptyThinkingOnlyAssistantEntry(entry) ||
     isNoResponseRequestedEntry(entry)
   )
 }
@@ -202,6 +204,15 @@ export function isThinkingOnlyAssistantEntry(entry: AnyEntry): boolean {
   const c = entry?.message?.content
   if (!Array.isArray(c) || c.length === 0) return false
   return c.every((b: any) => b?.type === 'thinking')
+}
+
+// 某些闭源模型只写入空 thinking 块 (正文被加密或未提供), header-summary 会将其
+// 显示为“思考内容被隐藏”。这张卡片没有可读内容, 对浏览对话没有价值, 整卡过滤隐藏；
+// 含有实际思考文本的 thinking 卡片仍保留.
+export function isEmptyThinkingOnlyAssistantEntry(entry: AnyEntry): boolean {
+  if (!isThinkingOnlyAssistantEntry(entry)) return false
+  const content = entry?.message?.content as any[]
+  return content.every((block) => String(block?.thinking || '').trim() === '')
 }
 
 export function assistantResponseText(content: any): string {

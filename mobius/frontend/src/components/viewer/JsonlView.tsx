@@ -17,7 +17,7 @@ import { collectResolvedCallIds } from './tool-status'
 import { RoundGroup } from './RoundGroups'
 import { isHiddenJsonlNoiseEntry } from './entry-classify'
 import { filterDisplayDuplicates } from './display-dedup'
-import { computeCollapsedByForgottenFlag } from './fold-rules'
+import { computeCollapsedByEncryptedReasoning, computeCollapsedByForgottenFlag } from './fold-rules'
 import { buildTaskPlans } from './task-progress'
 import type { HistorySnapshot, SessionHistoryStore } from '../../services/agent-history-store'
 
@@ -168,6 +168,7 @@ function collapsedLineNosFor(entries: AnyEntry[], items: JsonlViewItem[]) {
   const hit = collapsedCache.get(entries)
   if (hit) return hit
   const next = computeCollapsedByForgottenFlag(items)
+  for (const lineNo of computeCollapsedByEncryptedReasoning(items)) next.add(lineNo)
   collapsedCache.set(entries, next)
   return next
 }
