@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Archive, Download, File, Folder, RefreshCw } from 'lucide-react'
 import { api, HIDDEN_FOLDER_NAME } from '../../store'
+import { formatCstMonthDayTime } from '../../utils/time-format'
 
 type PackageEntry = {
   name: string
@@ -32,15 +33,8 @@ function formatBytes(value: number) {
 
 function formatModified(value?: string) {
   if (!value) return ''
-  const date = new Date(value)
-  if (isNaN(date.getTime())) return ''
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  return formatCstMonthDayTime(value)
 }
 
 function entryTypeLabel(type: PackageEntry['type']) {

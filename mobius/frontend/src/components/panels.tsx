@@ -48,6 +48,7 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { api, useStore } from '../store'
+import { formatCstDateTimeShort } from '../utils/time-format'
 import {
   TEXT_REDACTION_ENABLED_EVENT,
   TEXT_REDACTION_ENABLED_STORAGE_KEY,
@@ -3697,10 +3698,10 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
                   服务支持 {Array.from(supportedHarnesses).join(' / ')}
                 </span>
               )}
-              {connection.synced_at && <span className="px-1 py-1" style={{ color: 'var(--text-muted)' }}>上次同步 {new Date(connection.synced_at).toLocaleString()}</span>}
+              {connection.synced_at && <span className="px-1 py-1" style={{ color: 'var(--text-muted)' }}>上次同步 {formatCstDateTimeShort(connection.synced_at)}</span>}
               {autoSync?.last_checked_at && (
                 <span className="px-1 py-1" style={{ color: 'var(--text-muted)' }}>
-                  上次目录检查 {new Date(autoSync.last_checked_at).toLocaleString()}
+                  上次目录检查 {formatCstDateTimeShort(autoSync.last_checked_at)}
                 </span>
               )}
             </div>

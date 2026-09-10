@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BarChart3, Clock3, PieChart, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '../store'
+import { formatCstDateTimeShort } from '../utils/time-format'
 import { pollRecursive } from '../services/polling'
 
 type TimeConsumeSegment = {
@@ -77,9 +78,8 @@ function formatDuration(ms: number): string {
 
 function formatClock(value?: string | null): string {
   if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '-'
-  return date.toLocaleString()
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  return formatCstDateTimeShort(value) || '-'
 }
 
 function describeArc(cx: number, cy: number, radius: number, startAngle: number, endAngle: number): string {

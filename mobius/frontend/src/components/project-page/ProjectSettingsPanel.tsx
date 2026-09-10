@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import { AlertTriangle, Check, Copy, Download, FolderOpen, MoreHorizontal, Plus, Trash2, Upload, X } from 'lucide-react'
+import { formatCstDateTimeShort } from '../../utils/time-format'
 import { ProjectUserContextWhitelist } from '../context-whitelist'
 import { HelpHint } from './help-hint'
 import { ToggleSwitch } from '../toggle-switch'
@@ -137,16 +138,8 @@ const GIT_TRACKING_ACTIONS: Array<{ key: GitTrackingAction; label: string; descr
 ]
 
 function formatCommitDate(date: string) {
-  const d = new Date(date)
-  if (isNaN(d.getTime())) return ''
-  return d.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  return formatCstDateTimeShort(date)
 }
 
 function normalizeSingleLineText(value: string) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../store'
+import { formatCstDateTimeShort } from '../utils/time-format'
 
 type PlanningEditorProps = {
   projectId: string
@@ -451,7 +452,7 @@ function HistoryModal({
 
   function restore() {
     if (!selected) return
-    if (!window.confirm(`确认回滚到 ${new Date(selected.saved_at).toLocaleString()} 的版本? 当前内容会先备份到历史.`)) return
+    if (!window.confirm(`确认回滚到 ${formatCstDateTimeShort(selected.saved_at)} 的版本? 当前内容会先备份到历史.`)) return
     setRestoring(true)
     setRestoreErr('')
     api(`/api/projects/${projectId}/memories/project-knowledge/restore`, {
@@ -521,7 +522,7 @@ function HistoryModal({
                     background: active ? 'var(--bg-card-hover)' : 'transparent',
                     color: 'var(--text-primary)',
                   }}>
-                  <div className="font-medium truncate">{new Date(it.saved_at).toLocaleString()}</div>
+                  <div className="font-medium truncate">{formatCstDateTimeShort(it.saved_at)}</div>
                   <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
                     {formatBytes(it.size)}
                   </div>

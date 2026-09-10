@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { BookOpen, Brain, Clock3, Eye, GitBranch, GitFork, Loader2, MonitorPlay, Plus, Puzzle, RefreshCw, Rocket, Settings2, Upload, X } from 'lucide-react'
 import { api } from '../store'
+import { formatCstTimeOfDay } from '../utils/time-format'
 import { DevPortsBar } from './dev-ports-bar'
 import { normalizeGithubSkillInput } from './skills'
 import { SkillMarketLink } from './skill-market-link'
@@ -1025,7 +1026,7 @@ export function SessionSkillMemoryEditor({
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-2 px-1 py-0.5">
                         <span className="min-w-0 flex-1 truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                          {gitScanMeta.scannedAt ? `${gitScanMeta.cached ? '缓存' : '刚刚扫描'} · ${new Date(gitScanMeta.scannedAt).toLocaleTimeString()}` : '按需扫描中枢、本机与远端'}
+                          {gitScanMeta.scannedAt ? `${gitScanMeta.cached ? '缓存' : '刚刚扫描'} · ${formatCstTimeOfDay(gitScanMeta.scannedAt)}` : '按需扫描中枢、本机与远端'}
                         </span>
                         <button
                           type="button"

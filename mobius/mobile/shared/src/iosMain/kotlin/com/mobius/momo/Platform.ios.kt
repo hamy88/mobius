@@ -281,14 +281,13 @@ actual fun formatBackendTime(value: String?): String {
         parser.dateFormat = pattern
         parser.dateFromString(raw)
     } ?: return ""
+    // 全局统一北京时间（CST, UTC+8）+ 24 小时制 (Issue 8f64748a)
     val cal = NSCalendar.currentCalendar()
-    cal.timeZone = NSTimeZone.localTimeZone()
+    cal.timeZone = NSTimeZone.timeZoneForSecondsFromGMT(8 * 3600) // Asia/Shanghai (UTC+8)
     val unitFlags = NSCalendarUnitHour or NSCalendarUnitMinute or NSCalendarUnitMonth or NSCalendarUnitDay
     val comps = cal.components(unitFlags, date)
     val hour = comps.hour.toInt()
-    val ampm = if (hour < 12) "上午" else "下午"
-    val h12 = if (hour % 12 == 0) 12 else hour % 12
-    val time = "$ampm $h12:${comps.minute.toString().padStart(2, '0')}"
+    val time = "${hour.toString().padStart(2, '0')}:${comps.minute.toString().padStart(2, '0')}"
     return when {
         cal.isDateInToday(date) -> time
         cal.isDateInYesterday(date) -> "昨天 $time"

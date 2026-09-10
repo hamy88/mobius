@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Loader2, Plus, Trash2 } from 'lucide-react'
 import { api } from '../../store'
+import { formatCstMonthDayTime } from '../../utils/time-format'
 
 type ProjectTodo = {
   id: string
@@ -118,13 +119,7 @@ function TodoRow({ todo, canManage, busy, onUpdate, onDelete }: TodoRowProps) {
             }}
           />
           <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-            更新于 {new Date(todo.updated_at || todo.created_at).toLocaleString('zh-CN', {
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: false,
-            })}
+            更新于 {formatCstMonthDayTime(todo.updated_at || todo.created_at)}
           </div>
         </div>
         {canManage && (

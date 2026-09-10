@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
 import { Bot, Bookmark, Wrench, MoreHorizontal, History, Copy, Check, Replace, Archive, Maximize2, Minimize2, X, ZoomIn, FileDiff, Terminal, GitCompare, Loader2, Mic, RefreshCw, SendHorizontal, Zap, Square, Plus, Paperclip, ExternalLink, Server, FolderOpen, FolderPlus, ChevronDown, ChevronRight, FileText, AtSign, ArrowLeftRight, Search, Clock, Sparkles, Eye, MessageCircle } from 'lucide-react'
 import { useStore, api, HIDDEN_FOLDER_NAME } from '../store'
+import { formatCstDateTimeShort } from '../utils/time-format'
 import { timeAgo, isRecentlyActive } from './shell'
 import { AgentStatusDot } from './AgentStatusDot'
 import { SessionWelcomeCards, SessionStartModal, SessionSkillMemoryEditor, SessionSkillMemoryModal } from './session-welcome'
@@ -545,9 +546,8 @@ function previewTextOf(entry: SessionInputEntry) {
 
 function formatFeatureTime(value?: string | null) {
   if (!value) return '未知时间'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  return formatCstDateTimeShort(value) || value
 }
 
 async function copyTextToClipboard(text: string) {
@@ -1571,8 +1571,9 @@ export function MessageBubble({
   const sessionMentions = isUser && Array.isArray(m.session_mentions) ? m.session_mentions : []
   const formatMentionContextTime = (value: any) => {
     if (!value) return ''
-    const date = new Date(value)
-    return Number.isFinite(date.getTime()) ? date.toLocaleString() : String(value)
+    // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+    const formatted = formatCstDateTimeShort(value)
+    return formatted || String(value)
   }
   // ChatGPT 风格: 用户用中性灰色 pill 气泡, assistant 完全无气泡 (纯文本流).
   // 气泡四角对称, 不再有指向头像的"尾巴"那一边变小的 rounded-tr-md / rounded-tl-md.

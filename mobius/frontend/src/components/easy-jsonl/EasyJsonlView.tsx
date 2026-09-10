@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import JsonlCompactMarkdown from '../jsonl-compact-markdown'
 import { resolveMediaSrc } from '../jsonl-vscode-link'
+import { formatCstTimeOfDay } from '../../utils/time-format'
 import type { AnyEntry, JsonlViewItem } from '../viewer/types'
 import { mergeBashToolResultItems } from '../viewer/entry-extract'
 import { isHiddenJsonlNoiseEntry } from '../viewer/entry-classify'
@@ -100,9 +101,8 @@ function EasyActivityItem({ activity }: { activity: EasyActivity }) {
 
 function formatRoundTime(value?: string) {
   if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  return formatCstTimeOfDay(value)
 }
 
 function EasySkeleton() {

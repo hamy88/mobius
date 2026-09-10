@@ -178,9 +178,12 @@ async function runOnce() {
   }
   const rot = nextRotation(state.lastSort);
   const latestGid = await latestArticleGid();
+  // session 名显式用北京时间（CST, UTC+8），不依赖系统 TZ (Issue 8f64748a)
   const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
+  const cstMs = now.getTime() + (8 * 60 - now.getTimezoneOffset()) * 60_000;
+  const cstNow = new Date(cstMs);
+  const hh = String(cstNow.getHours()).padStart(2, '0');
+  const mm = String(cstNow.getMinutes()).padStart(2, '0');
   try {
     const created = await api('POST', `/api/issues/${ISSUE_ID}/sessions/`, {
       name: `定时撰稿 ${hh}-${mm}`,

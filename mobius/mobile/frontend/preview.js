@@ -68,7 +68,11 @@ let composerRenderPending = false;
 const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
 function nowShortTime() {
-  return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  const d = new Date();
+  const cst = new Date(d.getTime() + (8 * 60 - d.getTimezoneOffset()) * 60_000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(cst.getHours())}:${pad(cst.getMinutes())}`;
 }
 
 function formatMessageTime(raw) {
@@ -79,7 +83,8 @@ function formatMessageTime(raw) {
   if (diff < 60_000) return '刚刚';
   if (diff < 3_600_000) return `${Math.max(1, Math.floor(diff / 60_000))}分钟前`;
   if (diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))}小时前`;
-  const d = new Date(ms);
+  // 转北京时间（CST, UTC+8） (Issue 8f64748a)
+  const d = new Date(ms + (8 * 60 - new Date(ms).getTimezoneOffset()) * 60_000);
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

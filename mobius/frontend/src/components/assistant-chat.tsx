@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
 import { AlertTriangle, Archive, BookOpen, Check, ChevronsLeft, ChevronsRight, Copy, Eraser, ExternalLink, FilePlus2, Maximize2, Mic, Minimize2, RefreshCw, SendHorizontal, Settings, Square, Trash2, UserPlus, Volume2, VolumeX, X } from 'lucide-react'
 import { api, useStore } from '../store'
+import { formatCstRelative } from '../utils/time-format'
 import { AssistantPresetModal } from './assistant-preset-modal'
 import { draftClear, draftLoad, draftSave } from '../services/input-drafts'
 import {
@@ -1187,16 +1188,8 @@ function sessionPageUrl(userId?: string, snapshot?: AssistantSnapshot | null) {
 }
 
 function formatTime(raw?: string | null) {
-  if (!raw) return ''
-  const ms = Date.parse(raw)
-  if (!Number.isFinite(ms)) return ''
-  const diff = Date.now() - ms
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.max(1, Math.floor(diff / 60_000))}分钟前`
-  if (diff < 86_400_000) return `${Math.max(1, Math.floor(diff / 3_600_000))}小时前`
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
+  return formatCstRelative(raw)
 }
 
 function UserAvatar() {

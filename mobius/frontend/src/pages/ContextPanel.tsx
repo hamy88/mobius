@@ -34,7 +34,11 @@ function injectionShare(item: { body?: string }, total: number) {
 function formatTime(iso?: string | null) {
   if (!iso) return ''
   try {
-    const d = new Date(iso)
+    // 转北京时间（CST, UTC+8） + 24h 制 (Issue 8f64748a)
+    const ms = new Date(iso).getTime()
+    if (!Number.isFinite(ms)) return iso
+    const local = new Date(ms)
+    const d = new Date(ms + (8 * 60 - local.getTimezoneOffset()) * 60_000)
     const pad = (n: number) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   } catch { return iso }

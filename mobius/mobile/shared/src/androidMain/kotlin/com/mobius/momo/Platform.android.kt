@@ -366,12 +366,11 @@ actual fun parseBackendTimeMillis(value: String?): Long? {
 actual fun formatBackendTime(value: String?): String {
     val raw = value?.takeIf { it.isNotBlank() } ?: return ""
     val instant = runCatching { java.time.Instant.parse(raw) }.getOrNull() ?: return ""
-    val zone = java.time.ZoneId.systemDefault()
+    // 全局统一北京时间（CST, UTC+8）+ 24 小时制 (Issue 8f64748a)
+    val zone = java.time.ZoneId.of("Asia/Shanghai")
     val zdt = instant.atZone(zone)
     val now = java.time.ZonedDateTime.now(zone)
-    val ampm = if (zdt.hour < 12) "上午" else "下午"
-    val h12 = if (zdt.hour % 12 == 0) 12 else zdt.hour % 12
-    val time = "$ampm $h12:${zdt.minute.toString().padStart(2, '0')}"
+    val time = "${zdt.hour.toString().padStart(2, '0')}:${zdt.minute.toString().padStart(2, '0')}"
     val today = now.toLocalDate()
     val date = zdt.toLocalDate()
     return when {
