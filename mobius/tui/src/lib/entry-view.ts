@@ -31,6 +31,7 @@ export type EntryView =
   | { kind: 'write_file'; filePath: string; content: string }
   | { kind: 'system'; text: string }
   | { kind: 'error'; text: string }
+  | { kind: 'pending'; text: string; count: number }
 
 export interface ToolResultView {
   text: string
@@ -517,6 +518,10 @@ function parseCustomToolCall(raw: any): { name: string; input: Record<string, an
 export function viewsForBlock(block: Block): EntryView[] {
   const entry = block.entry
   if (!entry || typeof entry !== 'object') return [{ kind: 'skip' }]
+  // 排队行 (合成条目): 显示忙时挂起的用户指令, 与 web 排队卡片同形.
+  if (entry.type === '__pending_queue__') {
+    return [{ kind: 'pending', text: String(entry.text ?? ''), count: Number(entry.count) || 1 }]
+  }
   if (isHiddenNoise(entry)) return [{ kind: 'skip' }]
   const type = entry.type
 

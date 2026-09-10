@@ -9,6 +9,7 @@ import type {
   AnyEntry,
   AuthConfig,
   HistoryGroup,
+  HistoryPendingOpener,
   Issue,
   LoginResponse,
   Memory,
@@ -163,9 +164,14 @@ export class MobiusClient {
   }
 
   // ── agent-history (协议 ①②: 组元数据 + 整组条目) ──────────────────────────
-  /** ① 全部组元数据, 一次给全. */
-  async listHistoryGroups(sessionId: string): Promise<{ session_version: number; groups: HistoryGroup[] }> {
+  /** ① 全部组元数据, 一次给全; 顺带返回挂起中的开轮卡 (pending). */
+  async listHistoryGroups(sessionId: string): Promise<{ session_version: number; groups: HistoryGroup[]; pending: HistoryPendingOpener[] }> {
     return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/groups`)
+  }
+
+  /** 打断当前 turn 并出队下一条排队指令 (不追加新 prompt). */
+  async pauseToDequeue(sessionId: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/pause-to-dequeue`, { method: 'POST', body: '{}' })
   }
 
   /** ② 某组全部条目 (全量, 无分页, 条目不可变). */

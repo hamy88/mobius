@@ -19,6 +19,8 @@ export interface SseHandlers {
   onGroupCreated?: (group: any) => void
   /** ③ 组条目增量: version = 应用该批后的组版本 (调用方水位线判据). */
   onEntries?: (payload: { group_id: string; group_id_version: number; entries: AnyEntry[] }) => void
+  /** 挂起开轮卡 (忙时提交、尚未出队的用户指令): { id, opener_ts, user_summary }. */
+  onPendingOpener?: (pending: { id: string; opener_ts: string | null; user_summary: string }) => void
   onTyping?: (active: boolean) => void
   onError?: (message: string, category?: string) => void
   onClose?: () => void
@@ -116,6 +118,9 @@ export class SseConnection {
           group_id_version: Number(p.group_id_version) || 0,
           entries: Array.isArray(p.entries) ? p.entries : [],
         })
+        break
+      case 'pending_opener':
+        this.handlers.onPendingOpener?.(p.entry)
         break
       case 'typing':
         this.handlers.onTyping?.(!!p.active)

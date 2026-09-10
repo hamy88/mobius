@@ -203,6 +203,16 @@ export interface HistoryGroup {
   entry_count: number
 }
 
+/**
+ * 挂起中的开轮卡 (pending_round_openers): 忙时提交、尚未出队的用户指令.
+ * /groups 端点返回的 `pending` 数组与 SSE `pending_opener` 事件的 `entry` 字段同形.
+ */
+export interface HistoryPendingOpener {
+  id: string
+  opener_ts: string | null
+  user_summary: string
+}
+
 // ── SSE envelope events (GET /api/sessions/:id/events) ───────────────────────
 // Each SSE frame's data is a JSON object with an `event` discriminator.
 export type SseEvent =

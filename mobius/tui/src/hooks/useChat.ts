@@ -19,7 +19,7 @@ import { SseConnection } from '../sse.js'
 import { updateIssuePreference } from '../config.js'
 import { tuiAimuxIdentifier, probeAimuxBridgeConnection } from '../aimux.js'
 import { viewsForEntry } from '../lib/entry-view.js'
-import type { AnyEntry } from '../types.js'
+import type { AnyEntry, HistoryPendingOpener } from '../types.js'
 import type { ReadyState } from '../components/PrepScreen.js'
 
 export interface ChatApi {
@@ -31,12 +31,14 @@ export interface ChatApi {
 export interface ChatController {
   entries: AnyEntry[]
   pendingUser: string | null
+  pending: HistoryPendingOpener[]
   typing: boolean
   sending: boolean
   error: string | null
   sessionId: string | null
   send: (text: string) => Promise<void>
   stop: () => Promise<void>
+  pauseToDequeue: () => Promise<void>
 }
 
 let ID = 0
@@ -110,6 +112,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
   const [sessionId, setSessionId] = useState<string | null>(resumeSessionId ?? null)
   const [entries, setEntries] = useState<AnyEntry[]>([])
   const [pendingUser, setPendingUser] = useState<string | null>(null)
+  const [pending, setPending] = useState<HistoryPendingOpener[]>([])
   const [typing, setTyping] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -185,6 +188,8 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     try {
       const data = await client.listHistoryGroups(sid)
       const groups: any[] = Array.isArray(data?.groups) ? data.groups : []
+      // 挂起中的开轮卡 (排队指令): /groups 是权威快照, 覆盖本地增量.
+      setPending(Array.isArray(data?.pending) ? data.pending : [])
       const local = groupSlotsRef.current
       const targets = local.size === 0 ? groups.slice(-BOOTSTRAP_GROUP_COUNT) : groups
       let changed = false
@@ -240,6 +245,9 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
           version: Number(group.version) || 1,
           entries: [],
         })
+        // 新组开轮 = 后端已把挂起的 pending_round_openers 一次性出队 (flushPendingOpenersToSink).
+        // 排队行随之清空; 随后 entries 事件会把这一整组内容补齐.
+        setPending([])
       },
       onEntries: ({ group_id, group_id_version, entries }) => {
         if (process.env.MOBIUS_TUI_DEBUG) console.error('[onEntries]', group_id, group_id_version, entries.length)
@@ -268,6 +276,16 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
           appendEntries(fresh)
           setPendingUser(null)
         }
+      },
+      onPendingOpener: (opener) => {
+        // 忙时提交的新指令被挂起: 追加到排队行 (uuid 去重), 乐观占位随之退役.
+        if (!opener || typeof opener !== 'object') return
+        const id = String(opener.id ?? '')
+        setPending(prev => {
+          if (id && prev.some(p => p.id === id)) return prev
+          return [...prev, { id, opener_ts: opener.opener_ts ?? null, user_summary: opener.user_summary ?? '' }]
+        })
+        setPendingUser(null)
       },
       onSubscribed: () => {
         reconnectAttemptRef.current = 0
@@ -521,5 +539,18 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
     pollNowRef.current?.()
   }, [sessionId, client, updateTyping])
 
-  return { entries, pendingUser, typing, sending, error, sessionId, send, stop }
+  // 打断当前 turn 并出队下一条排队指令 (空输入回车 / 插队). 不追加新 prompt,
+  // 后端对 claude-code/codex 发一次 C-c, deepseek harness 是空实现. 排队行会在
+  // 新组开轮 (group_created) 时被清空, 这里只需触发并刷新状态轮询.
+  const pauseToDequeue = useCallback(async () => {
+    if (!sessionId) return
+    statusEpochRef.current += 1
+    try { await client.pauseToDequeue(sessionId) } catch (e: any) {
+      const msg = e instanceof ApiError ? e.message : `插队失败: ${e?.message ?? e}`
+      setError(msg)
+    }
+    pollNowRef.current?.()
+  }, [sessionId, client])
+
+  return { entries, pendingUser, pending, typing, sending, error, sessionId, send, stop, pauseToDequeue }
 }
