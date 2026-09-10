@@ -136,23 +136,26 @@ const LERP_FOLLOW_K = 0.06
 // 高刷屏会略快. 不用 behavior:'smooth' (重发会打断进行中的动画). 配套: 解除钉底
 // 改为方向性判定 (仅"向上滚"才算用户, 见 session-jsonl-panel), 追赶途中 dist 再大
 // 也不误判. 消息/typing 触发的滚底仍由 Chat 自己的 effect 负责.
-function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp, onBlocked }: {
+function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUpRef, onBlocked }: {
   store: SessionHistoryStore | null
   containerRef: React.RefObject<HTMLDivElement | null>
   matchActiveRef: React.RefObject<boolean>
-  userScrolledUp: boolean
+  userScrolledUpRef: React.RefObject<boolean>
   onBlocked: () => void
 }) {
   const count = useLoadedEntryCount(store)
-  const stateRef = useRef({ userScrolledUp, onBlocked })
-  stateRef.current = { userScrolledUp, onBlocked }
+  // onBlocked 是每渲染重建的闭包, 用 ref 存最新值供追底 RAF / 条数变化 effect 读取.
+  const onBlockedRef = useRef(onBlocked)
+  onBlockedRef.current = onBlocked
 
   // lerp 追赶环: 触发只是"点火" (环没转就点一帧); 环每帧走剩余距离的 6%,
   // 没追平 (delta > 0.5px) 就自续下一帧, 追平即停 — 两个触发源共用一个环.
   const rafRef = useRef(0)
   const chase = () => {
     rafRef.current = 0
-    if (matchActiveRef.current || stateRef.current.userScrolledUp) return
+    // userScrolledUpRef 是同步可变 ref (事件处理器里直接改它), 追底每帧直接读,
+    // 不用等 React 重渲染, 避免"第一次 wheel 上滚仍被拽回一帧".
+    if (matchActiveRef.current || userScrolledUpRef.current) return
     const el = containerRef.current
     if (!el) return
     const delta = el.scrollHeight - el.scrollTop - el.clientHeight
@@ -166,8 +169,8 @@ function EntriesAutoScroll({ store, containerRef, matchActiveRef, userScrolledUp
   // 触发源 1: 条数变化 (新条目到达). 用户已上滚 → 亮"新消息"按钮, 不抢滚条.
   useEffect(() => {
     if (matchActiveRef.current) return
-    if (stateRef.current.userScrolledUp) {
-      stateRef.current.onBlocked()
+    if (userScrolledUpRef.current) {
+      onBlockedRef.current()
       return
     }
     schedulePin()
@@ -3505,7 +3508,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // 侥幸挡掉(Windows 不中招). 自维护 composingRef 独立于浏览器对 isComposing 的时序处理,
   // 与事件自带 isComposing / keyCode 229 三重守卫, 合成中按回车交给 IME 处理(字上屏, 不发送).
   const composingRef = useRef(false)
-  const [userScrolledUp, setUserScrolledUp] = useState(false)
+  // userScrolledUp 的唯一状态源是同步 ref (不是 React state): 追底 RAF 与消息滚底回调在
+  // 触发瞬间直接读它, 避免 setState 的重渲染延迟让"第一次上滚"仍被拽回一帧; 无 UI 依赖它.
+  const userScrolledUpRef = useRef(false)
   const [hasNewMessages, setHasNewMessages] = useState(false)
   const [replyTo, setReplyTo] = useState<any>(null)
   const [editingMsg, setEditingMsg] = useState<any>(null)
@@ -4069,17 +4074,19 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   }, [currentSession?.session_id, currentTask?.task_id, loadHistory, connectEventStream])
 
   // 消息/流式/typing 触发的自动滚底 (条目数变化触发的滚底由 <EntriesAutoScroll> 承担,
-  // Chat 不订阅快照). userScrolledUp=true 时不抢滚条, 改在顶部显示"新消息"按钮.
+  // Chat 不订阅快照). userScrolledUpRef=true 时不抢滚条, 改在顶部显示"新消息"按钮.
   // 用 instant scroll (而非 smooth) + RAF: smooth 期间会持续触发 onScroll, 中间帧 distFromBottom>200
-  // 会误把 userScrolledUp 翻成 true, 导致下一次 entry 抵达时不再自动滚.
-  // (userScrolledUp 故意不进依赖: 只在消息/typing 事件发生时读当时的值.)
+  // 会误把 userScrolledUpRef 翻成 true, 导致下一次 entry 抵达时不再自动滚.
+  // (读的是同步 ref, 只在消息/typing 事件发生时取当时的值; 排队 RAF 执行前再查一次.)
   useEffect(() => {
     // 搜索结果跳转进行中时不抢滚条, 让 JsonlView 的 scrollToKey 把视图钉到命中卡片.
     if (matchTargetActiveRef.current) return
-    if (userScrolledUp) {
+    if (userScrolledUpRef.current) {
       setHasNewMessages(true)
     } else {
       requestAnimationFrame(() => {
+        // 滚底回调执行前再查一次: 排队期间用户上滚了就别再抢滚条.
+        if (userScrolledUpRef.current || matchTargetActiveRef.current) return
         const el = chatContainerRef.current
         if (el) el.scrollTop = el.scrollHeight
       })
@@ -4088,18 +4095,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   }, [messages, streamContent, isTyping])
 
   const handleJsonlScrollPositionChange = useCallback((nextUserScrolledUp: boolean) => {
-    if (nextUserScrolledUp) {
-      setUserScrolledUp(true)
-    } else {
-      setUserScrolledUp(false)
-      setHasNewMessages(false)
-    }
+    // 同步改 ref, 让正在跑的追底 RAF 下一帧立刻停下.
+    userScrolledUpRef.current = nextUserScrolledUp
+    if (!nextUserScrolledUp) setHasNewMessages(false)
   }, [])
 
   const jumpToJsonlBottom = useCallback(() => {
+    userScrolledUpRef.current = false
     const el = chatContainerRef.current
     if (el) el.scrollTop = el.scrollHeight
-    setUserScrolledUp(false)
     setHasNewMessages(false)
   }, [])
 
@@ -4824,7 +4828,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           store={historyStore}
           containerRef={chatContainerRef}
           matchActiveRef={matchTargetActiveRef}
-          userScrolledUp={userScrolledUp}
+          userScrolledUpRef={userScrolledUpRef}
           onBlocked={() => setHasNewMessages(true)}
         />
 
