@@ -148,13 +148,17 @@ export function isMcpToolCallEndEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'mcp_tool_call_end'
 }
 
+// event_msg 条目是 Codex 的生命周期/镜像元数据, 不作为对话卡片展示.
+// 无论 payload.type 是 agent_message、user_message 还是未来新增的事件类型,
+// 统一在这里整卡隐藏, 避免只维护一份不断扩张的子类型黑名单.
+export function isEventMessageEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg'
+}
+
 // jsonl 卡片视图里"整卡过滤隐藏"的噪声 entry 集合: 对浏览对话内容无价值的系统注入/元数据噪声.
 // 集中在此一处, viewer/JsonlView 的 visibleItems 过滤只调本谓词, 以后新增噪声类型往这里加即可.
 //   - 非白名单类型        : file-history-snapshot / last-prompt / mode / permission-mode / ai-title / queue-operation ...
-//   - task_started        : codex 任务启动生命周期标记 (event_msg)
-//   - mcp_tool_call_end   : MCP 工具调用完成生命周期标记 (event_msg)
-//   - thread_settings_applied: codex 线程配置生效生命周期标记 (event_msg)
-//   - token_count         : codex 每轮 token 用量统计 (event_msg)
+//   - event_msg           : Codex 生命周期/镜像元数据 (包含 agent_message 等所有 payload.type)
 //   - environment_context : codex 每轮注入的 <environment_context> 系统 user 消息
 //   - session_meta        : codex 会话首条元数据 (含巨大 base_instructions 系统提示词)
 //   - turn_duration       : Claude Code 每轮结束注入的 system 耗时/消息数统计
@@ -168,6 +172,7 @@ export function isMcpToolCallEndEvent(entry: AnyEntry): boolean {
 export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
   return (
     !MAJOR_JSONL_TYPES.has(entry?.type as string) ||
+    isEventMessageEntry(entry) ||
     isTaskStartedEvent(entry) ||
     isMcpToolCallEndEvent(entry) ||
     isThreadSettingsAppliedEvent(entry) ||
