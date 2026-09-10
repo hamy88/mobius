@@ -120,10 +120,12 @@ function SessionJsonlPanelInner({
   // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
   const lastScrollTopRef = useRef<number | null>(null)
 
-  // 用户输入意图监听: wheel / touchmove / pointerdown / keydown 一旦表达"向上翻/接管"
-  // 意图, 立即把 userScrolledUp 置 true (终止 EntriesAutoScroll 的追底), 不再依赖 onScroll
-  // 里"向上滚 > 2px"的方向推断 — 慢速小步上滚会被 lerp 追底拉回. 这些事件天然来自用户,
+  // 用户输入意图监听: wheel / touchmove / keydown 一旦表达"向上翻"意图, 立即把
+  // userScrolledUp 置 true (终止 EntriesAutoScroll 的追底), 不再依赖 onScroll 里
+  // "向上滚 > 2px"的方向推断 — 慢速小步上滚会被 lerp 追底拉回. 这些事件天然来自用户,
   // 绕开"程序滚动 vs 用户滚动"的来源识别; 恢复钉底仍由 onScroll 的 dist < 4 负责.
+  // 不监听 pointerdown: 点按卡片/代码/选中文字等非滚动点击也会触发它, 会把 userScrolledUp
+  // 误置 true 从而永久停掉追底 ("不追底"); 滚动条拖拽仍由 onScroll 的 movedUp 方向判定兜底.
   useEffect(() => {
     const el = chatContainerRef.current
     if (!el) return
@@ -140,8 +142,6 @@ function SessionJsonlPanelInner({
       if (lastTouchY !== null && t.clientY > lastTouchY) onScrollPositionChange(true)
       lastTouchY = t.clientY
     }
-    // pointerdown (点按/抓取滚动条或开始拖拽) 无方向可判, 视为"接管滚动".
-    const onPointerDown = () => onScrollPositionChange(true)
     // 仅"向上翻"类按键视为接管; 输入区与滚动容器是兄弟节点, 输入框方向键不会冒泡到此.
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') onScrollPositionChange(true)
@@ -149,12 +149,10 @@ function SessionJsonlPanelInner({
 
     el.addEventListener('wheel', onWheel, { passive: true })
     el.addEventListener('touchmove', onTouchMove, { passive: true })
-    el.addEventListener('pointerdown', onPointerDown, { passive: true })
     el.addEventListener('keydown', onKeyDown)
     return () => {
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('touchmove', onTouchMove)
-      el.removeEventListener('pointerdown', onPointerDown)
       el.removeEventListener('keydown', onKeyDown)
     }
   }, [chatContainerRef, onScrollPositionChange])
