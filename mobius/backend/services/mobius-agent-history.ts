@@ -465,7 +465,15 @@ function flushSink(sessionId: string, sink: CommitSink): void {
 function* iterateNewLines(filePath: string, startByte: number): Generator<{ text: string; endByte: number }> {
   let fd: number | null = null;
   try {
-    fd = fs.openSync(filePath, 'r');
+    try {
+      fd = fs.openSync(filePath, 'r');
+    } catch (e) {
+      // 新会话: claude-code 首条 init 尚未落盘 → 原生 jsonl 还不存在. 这是正常时序
+      // (SSE 打开常早于 agent 写首行), 不是错误: 静默跳过, 等下一次 sync 文件出现后再读.
+      // 若不加守卫, fs.openSync 抛的 ENOENT 会一路冒到 /events /groups 报给前端.
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
     const size = fs.fstatSync(fd).size;
     if (startByte >= size) return;
     let pos = Math.max(0, startByte);
