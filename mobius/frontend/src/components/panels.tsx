@@ -3129,7 +3129,7 @@ function AdminProxyFilesCard() {
             <label>
               <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>地址</div>
               <input value={host} onChange={e => { setHost(e.target.value); setEnvsDirty(true) }}
-                placeholder="<redacted-host>" spellCheck={false}
+                placeholder="<host>" spellCheck={false}
                 className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
                 style={{ color: 'var(--text-primary)' }} />
             </label>
@@ -3894,7 +3894,7 @@ function SubscriptionProxyStep({ prepared, onPrepared }: { prepared: boolean; on
               <label>
                 <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>地址</div>
                 <input value={host} onChange={e => { setHost(e.target.value); setTouched(true) }}
-                  placeholder="<redacted-host>" spellCheck={false}
+                  placeholder="<host>" spellCheck={false}
                   className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
                   style={{ color: 'var(--text-primary)' }} />
               </label>

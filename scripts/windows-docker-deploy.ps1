@@ -7,7 +7,7 @@
 #
 # Usage:
 #   .\scripts\windows-docker-deploy.ps1
-#   .\scripts\windows-docker-deploy.ps1 -ProxyHost <redacted-host> -ProxyPort 12321 -ProxyUser mobius -ProxyPass <redacted-password>
+#   .\scripts\windows-docker-deploy.ps1 -ProxyHost <proxy-host> -ProxyPort <proxy-port> -ProxyUser <proxy-user> -ProxyPass <proxy-pass>
 # =============================================================================
 
 param(

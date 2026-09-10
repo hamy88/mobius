@@ -11,7 +11,7 @@ Handles:
 
 Usage (normally invoked by the .ps1 bootstrap):
   python windows-docker-deploy.py
-  python windows-docker-deploy.py --proxy-host <redacted-host> --proxy-port 12321 --proxy-user mobius --proxy-pass <redacted-password>
+  python windows-docker-deploy.py --proxy-host <proxy-host> --proxy-port <proxy-port> --proxy-user <proxy-user> --proxy-pass <proxy-pass>
 """
 
 import argparse
