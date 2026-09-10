@@ -306,6 +306,12 @@ class AgentBackend {
   //     语义 = 首次 sync 即出队 (等价旧「立即开轮」).
   //   - tmux-claude-code: override 成「条目含 origin.kind=='human'」检测 (见其实现).
   containDequeueEvent(_entry: unknown): boolean { return true }
+
+  // 中断当前 turn, 让 agent 出队消费下一条已排队的用户指令 (不追加任何新 prompt).
+  // 默认空实现: deepseek harness 暂无出队语义, 直接继承空函数.
+  //   - tmux-claude-code / tmux-codex: 覆盖成 "按一次 C-c" (参考 pauseCurrentAndResumeFromSession
+  //     的加急路径, 单次 C-c 实测足够打断当前 turn).
+  pauseCurrentToDequeueQuery(_sessionId: string): Promise<void> { return Promise.resolve() }
 }
 
 module.exports = { AgentBackend }

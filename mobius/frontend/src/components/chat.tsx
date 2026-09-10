@@ -4126,6 +4126,14 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     setHasNewMessages(false)
   }, [])
 
+  // 排队卡片闪电按钮: 打断当前 turn, 让 agent 出队消费下一条排队指令.
+  const handlePauseToDequeue = useCallback(() => {
+    if (!sessionId) return
+    api(`/api/sessions/${sessionId}/pause-to-dequeue`, { method: 'POST' })
+      .then(() => { loadHistoryRef.current() })
+      .catch((e: any) => setLastSendError(e?.message || '打断出队失败'))
+  }, [sessionId, loadHistoryRef])
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return
@@ -4836,6 +4844,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           hasNewMessages={hasNewMessages}
           onScrollPositionChange={handleJsonlScrollPositionChange}
           onJumpToBottom={jumpToJsonlBottom}
+          onPauseToDequeue={handlePauseToDequeue}
           scrollToEntryUuid={matchUuid}
           scrollToMatchTs={matchTs}
           onMatchScrollResolved={onMatchScrollResolved}

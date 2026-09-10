@@ -192,6 +192,7 @@ export function JsonlView({
   scrollToEntryUuid,
   scrollToMatchTs,
   onScrollResolved,
+  onPauseToDequeue,
 }: {
   // agent-history-store 的快照 (rev 驱动重渲染).
   snapshot: HistorySnapshot
@@ -206,6 +207,8 @@ export function JsonlView({
   scrollToEntryUuid?: string | null
   scrollToMatchTs?: string | null
   onScrollResolved?: () => void
+  // 排队卡片闪电按钮: 打断当前 turn 并出队下一条排队指令.
+  onPauseToDequeue?: () => void
 }) {
   const groups = snapshot.groups
   const [roundHeaderPaletteIndex, setRoundHeaderPaletteIndex] = useState(readRoundHeaderPaletteIndex)
@@ -375,6 +378,19 @@ export function JsonlView({
             {last?.user_summary || '(无内容)'}
           </span>
           <span className="text-[10px] text-amber-300/80 font-mono flex-shrink-0">等 {count} 条指令</span>
+          {onPauseToDequeue && (
+            <button
+              type="button"
+              onClick={onPauseToDequeue}
+              title="打断当前并出队下一条指令"
+              aria-label="打断当前并出队下一条指令"
+              className="flex-shrink-0 p-0.5 rounded text-amber-300 hover:bg-amber-500/20 hover:text-amber-200 transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
+            </button>
+          )}
         </div>
       )
     }

@@ -731,6 +731,16 @@ class TmuxCodexBackend extends AgentBackend {
     this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
   }
+  pauseCurrentToDequeueQuery(sessionId: string) {
+    return this._withLock(sessionId, async () => {
+      if (!sessionId) throw new Error('sessionId required')
+      if (!windowExists(sessionId)) return
+      // 单次 C-c 打断当前 turn (实测单次足够), 让 agent 停下当前 turn 去消费下一条排队指令.
+      // 不追加新 prompt / 不发 M-Enter (与 pauseCurrentAndResumeFromSession 加急路径不同, 这里只打断).
+      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
+      await new Promise((r) => setTimeout(r, 250))
+    })
+  }
 
   // opener 提前: dispatch 一进来 (进锁/启动 CLI 之前) 就把用户卡写库开轮.
   // 若等 spawn+绑定路径 (~10s) 再写, 首趟 sync 会抢先把启动前导落进 "第0轮".

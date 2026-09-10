@@ -54,6 +54,8 @@ type SessionJsonlPanelProps = {
   hasNewMessages: boolean
   onScrollPositionChange: (userScrolledUp: boolean) => void
   onJumpToBottom: () => void
+  // 排队卡片闪电按钮: 打断当前 turn 并出队下一条排队指令.
+  onPauseToDequeue?: () => void
   // 搜索结果跳转: 命中条目 uuid / timestamp, JsonlView 解析到所属组后滚动.
   scrollToEntryUuid?: string | null
   scrollToMatchTs?: string | null
@@ -77,6 +79,7 @@ function SessionJsonlPanelInner({
   hasNewMessages,
   onScrollPositionChange,
   onJumpToBottom,
+  onPauseToDequeue,
   scrollToEntryUuid,
   scrollToMatchTs,
   onMatchScrollResolved,
@@ -218,6 +221,7 @@ function SessionJsonlPanelInner({
                 scrollToEntryUuid={effectiveScrollToEntryUuid}
                 scrollToMatchTs={effectiveScrollToMatchTs}
                 onScrollResolved={onMatchScrollResolved}
+                onPauseToDequeue={onPauseToDequeue}
               />
             )}
             {variant === 'standard' && backendAlive && backendWorking && (

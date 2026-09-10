@@ -758,6 +758,25 @@ router.post('/:id/stop', auth, async (req: express.Request, res: express.Respons
   res.json({ ok, task_id: sessionId });
 });
 
+// 打断当前 turn 并让 agent 出队下一条排队指令 (排队卡片闪电按钮). 不追加新 prompt.
+router.post('/:id/pause-to-dequeue', auth, async (req: express.Request, res: express.Response) => {
+  const id = String(req.params.id);
+  const user = userOf(req);
+  const session = findSessionOperable(id, user);
+  if (!session) { res.status(404).json({ error: '未找到' }); return; }
+  auditSessionAccess(user, 'pause_to_dequeue', session);
+
+  const backend = backendForSession(session);
+  try {
+    await backend.pauseCurrentToDequeueQuery(id);
+  } catch (e) {
+    console.warn('[sessions/pause-to-dequeue] failed:', (e as Error).message);
+    res.status(500).json({ error: '打断出队失败' });
+    return;
+  }
+  res.json({ ok: true, task_id: id });
+});
+
 router.get('/:id/events', authOrQuery, async (req: express.Request, res: express.Response) => {
   const sessionId = String(req.params.id);
   const user = userOf(req);
