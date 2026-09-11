@@ -369,3 +369,9 @@ export function isGoalSetEntry(entry: AnyEntry): boolean {
 export function isLocalCommandEntry(entry: AnyEntry): boolean {
   return extractLocalCommandParts(entry).length > 0
 }
+
+// codex response_item.payload.type === 'reasoning' 的思考卡片 (与 Claude assistant 只含
+// thinking 块的卡片同义). 用于把它从顶层 response_item 的"应答"蓝里摘出来, 标"思考"紫色.
+export function isReasoningEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'response_item' && entry?.payload?.type === 'reasoning'
+}

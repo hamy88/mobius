@@ -27,6 +27,7 @@ import {
   THREAD_SETTINGS_APPLIED_THEME,
   ASSISTANT_END_TURN_THEME,
   THINKING_ONLY_THEME,
+  REASONING_THEME,
   COMPACT_DONE_THEME,
   GOAL_SET_THEME,
   LOCAL_COMMAND_THEME,
@@ -59,6 +60,7 @@ import {
   isThreadSettingsAppliedEvent,
   isAssistantEndTurnEntry,
   isThinkingOnlyAssistantEntry,
+  isReasoningEntry,
   isAssistantResponseGoldKeyword,
   isCompactDoneEntry,
   isGoalSetEntry,
@@ -252,11 +254,11 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const isPatchApplyEvent = entry?.type === 'event_msg' && String(entry?.payload?.type || '').startsWith('patch_apply')
   // 正文含 blackboard 标记 → 视作 Research Blackboard 相关消息.
   const isBlackboard = headerSummary.full.includes(BLACKBOARD_MARKER)
-  // 配色优先级: 初始消息 (结构辨识, 最具体) > blackboard 相关 (最醒目) > user compact 完成信号 (gold) > user /goal 设置信号 (gold) > user 其他本地命令产物 (gold) > assistant 只含 thinking 思考卡 (purple) > assistant end_turn (gold) > assistant 文本关键词 (gold) > name:"Edit" 的 tool_use (indigo) > AIMUX 协作执行 (teal) > Bash command 含 "start.py" (gold) > 普通 Bash tool_use (cyan) > event_msg.context_compacted (gold) > 顶层 type.
+  // 配色优先级: 初始消息 (结构辨识, 最具体) > blackboard 相关 (最醒目) > user compact 完成信号 (gold) > user /goal 设置信号 (gold) > user 其他本地命令产物 (gold) > assistant 只含 thinking 思考卡 (purple) > codex reasoning 思考卡 (purple) > assistant end_turn (gold) > assistant 文本关键词 (gold) > name:"Edit" 的 tool_use (indigo) > AIMUX 协作执行 (teal) > Bash command 含 "start.py" (gold) > 普通 Bash tool_use (cyan) > event_msg.context_compacted (gold) > 顶层 type.
   // initial 必须排在 blackboard 之前: research 会话的初始消息正文含 blackboard 字样, 但它是初始消息不是黑板写入.
   // start.py 必须排在 Bash 之前: 它本身也是 Bash, 但语义更具体, 不能被 cyan 普通主题盖掉.
   // compact / goal-set 必须排在 local-cmd 之前: 它们都是 local-command-stdout 的特例, 文案/标签更具体.
-  // thinking-only 必须排在 end_turn 之前: 只含思考块的卡片, "这是思考卡"比"这是结束态"更能说明卡片性质.
+  // thinking-only / reasoning 必须排在 end_turn 之前: 只含思考块的卡片, "这是思考卡"比"这是结束态"更能说明卡片性质.
   const theme = canInitial
     ? INITIAL_THEME
     : isBlackboard
@@ -269,6 +271,8 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
     ? LOCAL_COMMAND_THEME
     : isThinkingOnlyAssistantEntry(entry)
     ? THINKING_ONLY_THEME
+    : isReasoningEntry(entry)
+    ? REASONING_THEME
     : isAssistantEndTurnEntry(entry)
     ? ASSISTANT_END_TURN_THEME
     : isAssistantResponseGoldKeyword(entry)

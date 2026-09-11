@@ -20,6 +20,7 @@ import {
   functionOutputBody,
   isFunctionCallPayload,
   isFunctionCallOutputPayload,
+  reasoningText,
   isReadToolUseName,
   extractReadCallFromBlock,
   readCallOneLineSummary,
@@ -266,6 +267,9 @@ export function buildHeaderSummary(entry: AnyEntry): HeaderSummary {
     }
     if (isFunctionCallOutputPayload(payload)) return compactCodeSummary(functionOutputBody(payload?.output))
     if (pt === 'reasoning') {
+      // 优先展示可读思考正文; 只有 content 无可读文本 (闭源模型只留 encrypted_content) 才标"加密不可解".
+      const text = reasoningText(payload)
+      if (text) return clip(text, HEADER_SHORT_LIMIT)
       const encryptedContent = payload?.encrypted_content
       return clip(typeof encryptedContent === 'string' && encryptedContent.length > 0 ? ENCRYPTED_REASONING_LABEL : 'reasoning', HEADER_SHORT_LIMIT)
     }

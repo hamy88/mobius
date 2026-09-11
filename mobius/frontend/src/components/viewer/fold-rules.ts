@@ -23,7 +23,7 @@
  *   两者同时满足 → 该卡默认折叠 (用户仍可手动展开).
  */
 import type { AnyEntry, JsonlViewItem } from './types'
-import { extractBashCalls } from './entry-extract'
+import { extractBashCalls, reasoningText } from './entry-extract'
 
 // forgotten-flag 系统注入消息的标志句 (DEFAULT_FORGOTTEN_FLAG_MESSAGE 的开头).
 // 用整句而非单词 "running flag" 避免误命中 agent 自己提到 flag 的普通回复.
@@ -168,18 +168,18 @@ export function computeCollapsedByForgottenFlag(items: JsonlViewItem[]): Set<num
 
 // Codex 对闭源模型的 reasoning 只保留 encrypted_content, 无法在前端解码;
 // 这类卡片仍保留在时间线中, 但默认折叠, 让可读对话内容优先呈现.
+// 注意: reasoning 常同时带 content[] 明文与 encrypted_content 引用 — 只有 content
+// 无可读正文 (真加密) 才折叠; 有明文思考正文的卡片照常展开显示.
 export function computeCollapsedByEncryptedReasoning(items: JsonlViewItem[]): Set<number> {
   const collapsed = new Set<number>()
   for (const item of items) {
     const entry = item.entry
-    if (
-      entry?.type === 'response_item' &&
-      entry?.payload?.type === 'reasoning' &&
+    if (entry?.type !== 'response_item' || entry?.payload?.type !== 'reasoning') continue
+    const hasEncrypted =
       typeof entry?.payload?.encrypted_content === 'string' &&
       entry.payload.encrypted_content.length > 0
-    ) {
-      collapsed.add(item.lineNo)
-    }
+    const hasReadable = reasoningText(entry.payload).length > 0
+    if (hasEncrypted && !hasReadable) collapsed.add(item.lineNo)
   }
   return collapsed
 }

@@ -562,6 +562,26 @@ export function isFunctionCallOutputPayload(payload: any): boolean {
   return payload?.type === 'function_call_output' || payload?.type === 'custom_tool_call_output'
 }
 
+// 从 reasoning payload 提取可读思考正文 (response_item.payload.type === 'reasoning').
+// OpenAI Responses / Codex 的 reasoning 常同时带 content[] 明文 (reasoning_text/summary_text)
+// 与 encrypted_content 引用; 只有 content 无可读文本时才真算"加密不可解". 返回空串 = 无可读正文.
+export function reasoningText(payload: any): string {
+  const content = payload?.content
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((b: any) => {
+      if (!b || typeof b !== 'object') return ''
+      if (typeof b.text === 'string') return b.text
+      if (typeof b.reasoning === 'string') return b.reasoning
+      if (typeof b.summary === 'string') return b.summary
+      return ''
+    })
+    .filter((t: string) => t.trim())
+    .join('\n')
+    .trim()
+}
+
 function decodeJsString(raw: string): string {
   try { return JSON.parse(`"${raw}"`) }
   catch { return raw.replace(/\\([\\"'nrt])/g, (_m, c) => ({ n: '\n', r: '\r', t: '\t' } as Record<string, string>)[c] || c) }
