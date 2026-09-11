@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BarChart3, Clock3, PieChart, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '../store'
 import { pollRecursive } from '../services/polling'
@@ -102,6 +102,37 @@ function polarToCartesian(cx: number, cy: number, radius: number, angle: number)
   }
 }
 
+// 瀑布图可见块数量超过该值时，若用户未手动调整过“时间缩放”，自动放大以削减块数
+const MAX_TIMELINE_BLOCKS = 100
+const TIMELINE_ZOOM_MAX = 16
+
+// 与渲染口径一致：窗口锚定在时间轴末尾（timelinePosition=1000），计算给定缩放下的可见块数
+function countVisibleBlocks(segments: TimeConsumeSegment[], totalMs: number, zoom: number): number {
+  if (!totalMs || !segments.length) return 0
+  const visibleDuration = totalMs / zoom
+  const windowStart = Math.max(0, totalMs - visibleDuration)
+  let count = 0
+  for (const segment of segments) {
+    const segmentEnd = Math.max(0, Number(segment.start_offset_ms) || 0) + Math.max(0, Number(segment.duration_ms) || 0)
+    if (segmentEnd > windowStart) count += 1
+  }
+  return count
+}
+
+// 二分求最小缩放（≥1，步进 0.5），使可见块数 ≤ maxBlocks；仍超则封顶 TIMELINE_ZOOM_MAX
+function findZoomToLimitBlocks(segments: TimeConsumeSegment[], totalMs: number, maxBlocks: number): number {
+  if (countVisibleBlocks(segments, totalMs, 1) <= maxBlocks) return 1
+  if (countVisibleBlocks(segments, totalMs, TIMELINE_ZOOM_MAX) > maxBlocks) return TIMELINE_ZOOM_MAX
+  let lo = 1
+  let hi = TIMELINE_ZOOM_MAX
+  while (hi - lo > 0.5) {
+    const mid = (lo + hi) / 2
+    if (countVisibleBlocks(segments, totalMs, mid) <= maxBlocks) hi = mid
+    else lo = mid
+  }
+  return Math.ceil(hi * 2) / 2
+}
+
 export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) {
   const [data, setData] = useState<TimeConsumeWaterfallResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -110,6 +141,7 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
   const [view, setView] = useState<TimeConsumeView>('waterfall')
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelinePosition, setTimelinePosition] = useState(1000)
+  const userAdjustedZoomRef = useRef(false)
 
   const load = useCallback(async (signal?: AbortSignal, showSpinner = false) => {
     if (!sessionId) {
@@ -141,6 +173,7 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
     setLoading(true)
     setTimelineZoom(1)
     setTimelinePosition(1000)
+    userAdjustedZoomRef.current = false
     void load(undefined, false)
     const stop = pollRecursive((signal) => {
       if (disposed) return
@@ -161,6 +194,15 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
       return Math.max(max, end)
     }, 0)
   }, [data?.total_ms, segments])
+
+  // 可见块数超过阈值时，若用户未手动调整过“时间缩放”，自动放大削减块数
+  useEffect(() => {
+    if (userAdjustedZoomRef.current) return
+    if (!totalMs || !segments.length) return
+    if (countVisibleBlocks(segments, totalMs, timelineZoom) <= MAX_TIMELINE_BLOCKS) return
+    const target = findZoomToLimitBlocks(segments, totalMs, MAX_TIMELINE_BLOCKS)
+    if (target > timelineZoom) setTimelineZoom(target)
+  }, [segments, timelineZoom, totalMs])
 
   const pieSlices = useMemo(() => {
     const map = new Map<string, { key: string; label: string; color: string; duration: number; count: number }>()
@@ -393,7 +435,10 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
                     max="16"
                     step="0.5"
                     value={timelineZoom}
-                    onChange={(event) => setTimelineZoom(Number(event.target.value))}
+                    onChange={(event) => {
+                      userAdjustedZoomRef.current = true
+                      setTimelineZoom(Number(event.target.value))
+                    }}
                     className="h-4 w-full cursor-pointer accent-sky-400"
                     aria-label="时间缩放"
                     aria-valuetext={`${timelineZoom.toFixed(timelineZoom % 1 === 0 ? 0 : 1)} 倍`}
