@@ -294,7 +294,10 @@ router.get('/', auth, async (req: express.Request, res: express.Response) => {
     '1d': '-1 days', '7d': '-7 days', '30d': '-30 days', 'all': null,
   };
   const rangeKey = String(req.query.range || '7d').trim();
-  const rangeModifier = RANGE_MODIFIERS[rangeKey] ?? RANGE_MODIFIERS['7d'];
+  // 注意: 'all' 在 RANGE_MODIFIERS 里映射为 null (表示"不过滤时间"), 不能用 ?? 取回退值 —
+  // null 会被 ?? 当成"缺失"而错误回落到 '-7 days', 导致「全部」被静默降级成「7天内」。
+  // 这里用 `in` 区分「键存在但值为 null」与「键不存在」两种情况。
+  const rangeModifier = rangeKey in RANGE_MODIFIERS ? RANGE_MODIFIERS[rangeKey] : RANGE_MODIFIERS['7d'];
 
   // 候选 session (带 project / issue / research 名的 join), 按 last_active 倒序, 限候选量.
   const conds: string[] = [];
