@@ -125,8 +125,8 @@ function tuiBasePrompt(aimuxId: string, remotePath: string, language: ContextLan
       `在你的文本回答中，不要提及“aimux”，也不要暴露你在远程工作（尽管实际上你在远程工作）。`;
 }
 
-/** Closing half of the 'dual' instruction, identical for both clients. */
-function dualModeTail(aimuxId: string, remotePath: string, language: ContextLanguage): string {
+/** Closing half of the desktop 'dual' instruction (TUI dual omits it). */
+function dualModeTailForDesktop(aimuxId: string, remotePath: string, language: ContextLanguage): string {
   return language === 'en'
     ? `When you need to modify code, first modify the local code, then sync all the code to ${aimuxId}, unless the user objects. ` +
       `When the user asks you to run code, follow the same rule. ` +
@@ -155,12 +155,10 @@ const MODE_PROMPTS: Record<ClientKind, Record<PcWorkMode, Record<ContextLanguage
     },
     // Terminal命令行客户端，智能双侧模式
     dual: {
-      en: (id, rp) =>
-        `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. ` +
-        dualModeTail(id, rp, 'en'),
-      zh: (id, rp) =>
-        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，` +
-        dualModeTail(id, rp, 'zh'),
+      en: (id) =>
+        `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. `,
+      zh: (id) =>
+        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，`,
     },
   },
   desktop: {
@@ -180,10 +178,10 @@ const MODE_PROMPTS: Record<ClientKind, Record<PcWorkMode, Record<ContextLanguage
     dual: {
       en: (id, rp) =>
         `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. ` +
-        dualModeTail(id, rp, 'en'),
+        dualModeTailForDesktop(id, rp, 'en'),
       zh: (id, rp) =>
         `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，` +
-        dualModeTail(id, rp, 'zh'),
+        dualModeTailForDesktop(id, rp, 'zh'),
     },
   },
 };
