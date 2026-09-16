@@ -725,6 +725,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
   // 等这个合成 user 卡出现才开轮. 其余 (system/assistant/tool 等) 都不是.
   containDequeueEvent(entry: any): boolean {
     if (!entry || typeof entry !== 'object') return false
+    if (entry.operation === 'dequeue') return true
     if (entry.origin?.kind === 'human') return true
     if (entry.attachment?.origin?.kind === 'human') return true
     if (isCompactCompletionUserEvent(entry)) return true

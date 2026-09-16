@@ -141,47 +141,48 @@ function dualModeTail(aimuxId: string, remotePath: string, language: ContextLang
  */
 const MODE_PROMPTS: Record<ClientKind, Record<PcWorkMode, Record<ContextLanguage, ModePrompt>>> = {
   tui: {
+    // Terminal命令行客户端，中枢模式
     hub: {
-      en: (id) => `Do not use the remote_* tools to operate the following remote machine: ${id}. Work in the Mobius Hub (that is, locally).`,
-      zh: (id) => `不要使用 remote_* 工具操作以下远程机器： ${id}，在mobius中枢（即本地）工作`,
+      en: (id) => `Do not use aimux to connect to the following remote machine (the machine the current user is on): ${id}`,
+      zh: (id) => `不要使用aimux连接到以下远程机器（当前用户所在机器）： ${id}`,
     },
+    // Terminal命令行客户端，客户端模式
     pc: {
       en: (id, rp) =>
-        `Carry out all work on the following remote machine via the remote_* tools: ${id}${rp}. ` +
-        `When you need to modify documents, first sync the project to the Mobius Hub (that is, locally), ` +
-        `then immediately sync every change back to the path specified by ${id}, unless the user objects. ` +
-        `If the user objects, read or modify files directly through the remote_* tools.`,
-      zh: (id, rp) =>
-        `通过 remote_* 工具在以下远程机器上执行所有工作：${id}${rp}。` +
-        `当你需要修改文档时，先将项目同步到mobius中枢（即本地），每次修改后都立即同步回到 ${id} 指定路径，除非用户反对你这样做。` +
-        `如果用户反对，直接通过 remote_* 工具读取或修改文件。`,
+        `Use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on) and carry out all work, ` +
+        `and try to avoid modifying the Mobius hub code: ${id}${rp}`,
+      zh: (id, rp) => `使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）执行所有工作，尽量不修改Mobius中枢的代码： ${id}${rp}`,
     },
+    // Terminal命令行客户端，智能双侧模式
     dual: {
       en: (id, rp) =>
-        `You are authorized to operate the following remote machine via the remote_* tools: ${id}. ` +
+        `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. ` +
         dualModeTail(id, rp, 'en'),
       zh: (id, rp) =>
-        `你现在被授权通过 remote_* 工具操作以下远程机器： ${id}，` +
+        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，` +
         dualModeTail(id, rp, 'zh'),
     },
   },
   desktop: {
+    // Electron桌面端，中枢模式
     hub: {
-      en: (id) => `Do not use aimux to connect to the following remote machine: ${id}`,
-      zh: (id) => `不要使用aimux连接到以下远程机器： ${id}`,
+      en: (id) => `Do not use aimux to connect to the following remote machine (the machine the current user is on): ${id}`,
+      zh: (id) => `不要使用aimux连接到以下远程机器（当前用户所在机器）： ${id}`,
     },
+    // Electron桌面端，客户端模式
     pc: {
       en: (id, rp) =>
-        `Use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine and carry out all work, ` +
-        `and try to avoid modifying local code: ${id}${rp}`,
-      zh: (id, rp) => `使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器执行所有工作，尽量不修改本地的代码： ${id}${rp}`,
+        `Use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on) and carry out all work, ` +
+        `and try to avoid modifying the Mobius hub code: ${id}${rp}`,
+      zh: (id, rp) => `使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）执行所有工作，尽量不修改Mobius中枢的代码： ${id}${rp}`,
     },
+    // Electron桌面端，智能双侧模式
     dual: {
       en: (id, rp) =>
-        `You are authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine: ${id}. ` +
+        `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. ` +
         dualModeTail(id, rp, 'en'),
       zh: (id, rp) =>
-        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器： ${id}，` +
+        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，` +
         dualModeTail(id, rp, 'zh'),
     },
   },
