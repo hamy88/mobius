@@ -2,27 +2,18 @@
 // 从 chat.tsx 抽出为共享组件 — 会话输入框 (ChatArea) 与新建会话/研究智能体表单
 // (session-mention-picker) 复用同一抽屉, 取代旧版 fixed 浮动候选面板.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeftRight, AtSign, Bot, Check, ChevronRight, Eye, FileText, FolderOpen, Loader2, MessageCircle, RefreshCw, X } from 'lucide-react'
+import { ArrowLeftRight, AtSign, Bot, Check, ChevronRight, Eye, FileText, FolderOpen, Loader2, MessageCircle, RefreshCw, Search, X } from 'lucide-react'
 import { api } from '../store'
-import { timeAgo } from './shell'
 import { FileTreeLevel, type DirState, type Entry } from './project-files'
 import { SessionGroupTree } from './session-group-tree'
 import { buildRecentSessionTreeGroups } from '../services/recent-session-tree'
 import { normalizeRecentSessions, type RecentSession } from '../services/recent-sessions'
 import { RecentSessionRow } from './recent-session-row'
 import { copyTextToClipboard } from '../utils/clipboard'
-
-function sessionModelLabel(model?: string | null, explicitLabel?: string | null) {
-  if (explicitLabel) return explicitLabel
-  if (!model) return ''
-  const labels: Record<string, string> = {
-    opus: 'Opus',
-    'opus-4.8': 'Opus',
-    codex: 'GPT-5.5 Codex',
-    'gpt-5.5': 'GPT-5.5 Codex',
-  }
-  return labels[model] || model
-}
+import {
+  EMPTY_PROJECT_HIERARCHY_SEARCH,
+  type ProjectHierarchySearchResponse,
+} from '../services/project-hierarchy-search'
 
 type RemoteFileSource = {
   name: string
@@ -108,15 +99,16 @@ export function RemoteFileMentionDrawer({
   const [selectedSourceKey, setSelectedSourceKey] = useState('hub')
   const [sourcesLoading, setSourcesLoading] = useState(false)
   const [sourcesError, setSourcesError] = useState('')
-  const [agentSessions, setAgentSessions] = useState<MentionAgentSession[]>([])
-  const [agentLoading, setAgentLoading] = useState(false)
-  const [agentError, setAgentError] = useState('')
   const [pendingAgent, setPendingAgent] = useState<MentionAgentSession | null>(null)
-  // 智能体 tab 内的列表范围: 'recent' = 近期活跃会话 (跨项目); 'scoped' = 原同 Scope/同项目相关性列表。
-  const [agentListMode, setAgentListMode] = useState<'recent' | 'scoped'>('recent')
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([])
   const [recentLoading, setRecentLoading] = useState(false)
   const [recentError, setRecentError] = useState('')
+  // 智能体 tab 的会话搜索: 复用全站「层级搜索」(/api/projects/hierarchy-search),
+  // 与简易模式工作导航、全局搜索弹窗同一链路, 只取其中的会话命中。
+  const [sessionQuery, setSessionQuery] = useState('')
+  const [searchResult, setSearchResult] = useState<ProjectHierarchySearchResponse>(EMPTY_PROJECT_HIERARCHY_SEARCH)
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState('')
   const [dirs, setDirs] = useState<Record<string, DirState>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set(['/']))
 
@@ -161,17 +153,6 @@ export function RemoteFileMentionDrawer({
     }
   }, [projectId])
 
-  // 后端 /mention-targets 支持 session_id / issue_id / research_id 三种锚点:
-  // 会话输入框用 session_id; 新建会话/研究智能体表单还没有 session, 用 issue_id/research_id。
-  const agentScopeUrl = useMemo(() => {
-    const params = new URLSearchParams()
-    if (currentSessionId) params.set('session_id', currentSessionId)
-    else if (issueId) params.set('issue_id', issueId)
-    else if (researchId) params.set('research_id', researchId)
-    else return ''
-    return `/api/sessions/mention-targets?${params.toString()}`
-  }, [currentSessionId, issueId, researchId])
-
   useEffect(() => {
     if (!open) return
     if (initialTab) setActiveTab(initialTab)
@@ -180,34 +161,10 @@ export function RemoteFileMentionDrawer({
     setPendingAgent(null)
   }, [currentSessionId, initialTab, issueId, open, researchId, showFilesTab])
 
-  const loadAgentSessions = useCallback(async () => {
-    if (!agentScopeUrl) {
-      setAgentSessions([])
-      return
-    }
-    setAgentLoading(true)
-    setAgentError('')
-    try {
-      const data = await api(agentScopeUrl)
-      const list = Array.isArray(data?.targets) ? data.targets as MentionAgentSession[] : []
-      setAgentSessions(list.filter(item => item.session_id !== currentSessionId))
-    } catch (error: any) {
-      setAgentSessions([])
-      setAgentError(error?.message || '加载智能体列表失败')
-    } finally {
-      setAgentLoading(false)
-    }
-  }, [agentScopeUrl, currentSessionId])
-
   useEffect(() => {
     if (!open || !showFilesTab) return
     void loadSources()
   }, [open, loadSources, showFilesTab])
-
-  useEffect(() => {
-    if (!open || activeTab !== 'agents') return
-    void loadAgentSessions()
-  }, [open, activeTab, loadAgentSessions])
 
   useEffect(() => {
     if (!open) return
@@ -289,11 +246,6 @@ export function RemoteFileMentionDrawer({
     if (entry.abs_path) void copyTextToClipboard(entry.abs_path)
   }, [])
 
-  const pickAgent = useCallback((agent: MentionAgentSession) => {
-    if (!onPickAgent) return
-    setPendingAgent(agent)
-  }, [onPickAgent])
-
   const confirmAgentMode = useCallback((mode: AgentMentionMode) => {
     if (!pendingAgent || !onPickAgent) return
     const resolvedMode = mode === 'bidirectional' && pendingAgent.can_communicate === false
@@ -324,25 +276,83 @@ export function RemoteFileMentionDrawer({
     })
   }, [onPickAgent])
 
-  const filteredAgents = useMemo(() => {
-    // 后端已按「精确搜索 → 同 Scope → 同项目 → 运行态 → 最近活跃」稳定排序；
-    // 前端不要再按运行态二次排序，否则会把精确 ID/名称命中挤到列表后面。
-    return agentSessions
-  }, [agentSessions])
-
-  // 树状分组（项目 → 任务/研究 → 会话），与简易模式工作导航共享分组服务与渲染组件。
-  // 组间先按后端相关性（同 Scope → 同项目 → 其他项目）排序，同级内保持活跃度排序。
-  const agentGroups = useMemo(() => {
-    const rankOf = (agent: MentionAgentSession) => (
-      agent.group === 'same_scope' ? 0 : agent.group === 'same_project' ? 1 : 2
-    )
-    return buildRecentSessionTreeGroups(filteredAgents)
-      .map(group => ({ group, rank: group.sessions.reduce((min, agent) => Math.min(min, rankOf(agent)), 9) }))
-      .sort((a, b) => a.rank - b.rank)
-      .map(entry => entry.group)
-  }, [filteredAgents])
+  // 「近期会话」与「搜索结果」共用同一行渲染 (RecentSessionRow variant=mention)。
+  const renderSessionRow = useCallback((session: RecentSession) => (
+    <RecentSessionRow
+      session={session}
+      active={session.session_id === currentSessionId}
+      onClick={() => pickRecentSession(session)}
+      variant="mention"
+      title={`${session.name || session.session_id} · @ 选择引用或交流方式`}
+    />
+  ), [currentSessionId, pickRecentSession])
 
   const recentGroups = useMemo(() => buildRecentSessionTreeGroups(recentSessions), [recentSessions])
+
+  // 会话搜索: 复用 /api/projects/hierarchy-search (项目/任务/研究/会话元数据检索),
+  // 只保留 kind=session|research_agent 的命中, 再映射成 RecentSession, 从而复用
+  // 「近期会话」同一套分组组件、行组件与 @ 选择流程。
+  const normalizedSessionQuery = sessionQuery.trim().slice(0, 200)
+  const searchSettled = searchResult.query === normalizedSessionQuery
+  const searchSessions = useMemo<RecentSession[]>(() => {
+    if (!searchSettled) return []
+    const activityOf = new Map(recentSessions.map(session => [session.session_id, session]))
+    const sessions: RecentSession[] = []
+    for (const group of searchResult.projects) {
+      const project = group.project || {}
+      for (const hit of group.matches) {
+        if (hit.kind !== 'session' && hit.kind !== 'research_agent') continue
+        const isResearch = hit.kind === 'research_agent'
+        // 层级搜索只回会话元数据, 运行态/消息数沿用已加载的近期会话 (同一批 session_id)。
+        const activity = activityOf.get(hit.id)
+        sessions.push({
+          session_id: hit.id,
+          name: hit.title,
+          project_id: project.id || null,
+          project_name: project.name || '',
+          issue_id: isResearch ? null : hit.parent_id,
+          issue_title: isResearch ? null : hit.parent_title,
+          research_id: isResearch ? hit.parent_id : null,
+          research_title: isResearch ? hit.parent_title : null,
+          scope_type: isResearch ? 'research' : 'issue',
+          agent_status: activity?.agent_status,
+          message_count: activity?.message_count,
+          last_active: hit.last_active || undefined,
+        })
+      }
+    }
+    return sessions
+  }, [recentSessions, searchResult, searchSettled])
+  const searchGroups = useMemo(() => buildRecentSessionTreeGroups(searchSessions), [searchSessions])
+
+  useEffect(() => {
+    if (!open || activeTab !== 'agents') return
+    if (!normalizedSessionQuery) {
+      setSearchResult(EMPTY_PROJECT_HIERARCHY_SEARCH)
+      setSearchLoading(false)
+      setSearchError('')
+      return
+    }
+    const controller = new AbortController()
+    setSearchLoading(true)
+    setSearchError('')
+    const timer = window.setTimeout(() => {
+      api(`/api/projects/hierarchy-search?q=${encodeURIComponent(normalizedSessionQuery)}`, { signal: controller.signal })
+        .then((payload: ProjectHierarchySearchResponse) => setSearchResult(payload || EMPTY_PROJECT_HIERARCHY_SEARCH))
+        .catch((error: any) => {
+          if (error?.name === 'AbortError') return
+          setSearchResult(EMPTY_PROJECT_HIERARCHY_SEARCH)
+          setSearchError(error?.message || '搜索会话失败')
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSearchLoading(false)
+        })
+    }, 300)
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [open, activeTab, normalizedSessionQuery])
 
   if (!open) return null
   const selectedSource = sourceOptions.find(source => source.key === selectedSourceKey)
@@ -469,136 +479,75 @@ export function RemoteFileMentionDrawer({
             </>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
-              {/* 智能体 tab 内的范围切换 — 与 IssuePage 侧栏「任务会话 / 近期会话」同一交互模式 (role=tablist)。 */}
-              <div className="mb-2 flex flex-shrink-0 items-center gap-1.5" data-testid="mention-agent-scope-switcher">
-                <div className="flex min-w-0 flex-1 rounded-md p-0.5" role="tablist" aria-label="Session 列表范围"
-                     style={{ background: 'var(--bg-secondary)' }}>
-                  {([
-                    ['recent', '近期会话'],
-                    ['scoped', '相关智能体'],
-                  ] as const).map(([mode, label]) => {
-                    const active = agentListMode === mode
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        aria-controls="mention-agent-session-list"
-                        onClick={() => setAgentListMode(mode)}
-                        className="min-w-0 flex-1 truncate rounded px-1 py-1.5 text-[11px] font-medium leading-none transition-colors hover:text-[var(--text-primary)]"
-                        style={{
-                          color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-                          background: active ? 'var(--bg-active)' : 'transparent',
-                          boxShadow: active ? '0 1px 2px rgba(0,0,0,0.14)' : undefined,
-                        }}
-                        title={label}
-                      >
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
+              {/* 会话搜索 — 复用全站层级搜索, 命中的会话与「近期会话」同组件渲染。 */}
+              <label className="mb-2 flex h-9 flex-shrink-0 items-center gap-2 rounded-lg border px-2.5 focus-within:ring-2 focus-within:ring-blue-500/20"
+                     style={{ borderColor: 'var(--border-color)', background: 'var(--input-bg)' }}>
+                <Search className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
+                <input
+                  value={sessionQuery}
+                  onChange={event => setSessionQuery(event.target.value)}
+                  maxLength={200}
+                  placeholder="搜索会话名称"
+                  aria-label="搜索会话"
+                  className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[12px] outline-none"
+                  style={{ color: 'var(--text-primary)' }}
+                />
+                {searchLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" style={{ color: 'var(--accent-primary)' }} aria-label="正在搜索会话" />
+                ) : sessionQuery && (
+                  <button type="button" onClick={() => setSessionQuery('')} title="清空搜索" aria-label="清空搜索"
+                          className="rounded p-0.5 hover:bg-[var(--bg-hover)]">
+                    <X className="h-3.5 w-3.5" style={{ color: 'var(--text-muted)' }} />
+                  </button>
+                )}
+              </label>
               <div id="mention-agent-session-list" role="tabpanel" className="flex min-h-0 flex-1 flex-col">
-              {agentListMode === 'recent' ? (
-                recentLoading && recentSessions.length === 0 ? (
+              {normalizedSessionQuery ? (
+                searchError ? (
+                  <div className="rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">搜索会话失败：{searchError}</div>
+                ) : !searchSettled || searchLoading ? (
                   <div className="flex h-16 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
-                    <Loader2 className="h-4 w-4 animate-spin" />加载近期会话…
+                    <Loader2 className="h-4 w-4 animate-spin" />正在搜索会话…
                   </div>
-                ) : recentError ? (
+                ) : searchSessions.length === 0 ? (
                   <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                    近期会话加载失败：{recentError}
-                  </div>
-                ) : recentGroups.length === 0 ? (
-                  <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                    暂无近期会话。
+                    没有找到匹配的会话，试试会话名称或其他关键词。
                   </div>
                 ) : (
-                  <div className="min-h-0 flex-1 overflow-y-auto pr-1" aria-label="按项目与任务分组的近期会话" data-testid="mention-recent-session-tree">
-                    <SessionGroupTree
-                      groups={recentGroups}
-                      domIdPrefix="mention-recent-group"
-                      renderSession={session => (
-                        <RecentSessionRow
-                          session={session}
-                          active={session.session_id === currentSessionId}
-                          onClick={() => pickRecentSession(session)}
-                          variant="mention"
-                          title={`${session.name || session.session_id} · @ 选择引用或交流方式`}
-                        />
-                      )}
-                    />
-                  </div>
-                )
-              ) : agentLoading && agentSessions.length === 0 ? (
-                <div className="flex h-16 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
-                  <Loader2 className="h-4 w-4 animate-spin" />加载智能体…
-                </div>
-              ) : (
-                <>
-                  {agentError && <div className="mb-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">智能体加载失败：{agentError}</div>}
-                  {!agentScopeUrl ? (
-                    <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                      当前会话没有 issue / research 范围，无法 @ 其他智能体。
+                  <>
+                    <div className="flex min-h-6 flex-shrink-0 items-center justify-between px-1 pb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                      <span>搜索到 {searchSessions.length} 个会话</span>
+                      {searchResult.truncated && <span>仅显示最相关结果</span>}
                     </div>
-                  ) : filteredAgents.length === 0 ? (
-                    <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                      没有找到可 @ 的智能体。
-                    </div>
-                  ) : (
-                    <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                    <div className="min-h-0 flex-1 overflow-y-auto pr-1" aria-label="搜索到的会话" data-testid="mention-session-search-tree">
                       <SessionGroupTree
-                        groups={agentGroups}
-                        domIdPrefix="mention-agent-group"
-                        renderSession={agent => {
-                          const active = agent.agent_status === 'running'
-                          const modelLabel = sessionModelLabel(agent.model, agent.model_label)
-                          const relationLabel = agent.group === 'same_scope'
-                            ? (agent.scope_type === 'research' ? '同 Research' : '同 Issue')
-                            : agent.group === 'same_project' ? '同项目' : '其他项目'
-                          return (
-                            <button
-                              type="button"
-                              onClick={() => pickAgent(agent)}
-                              className="relative mt-0.5 flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                              style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}
-                              title={`${agent.name || agent.session_id} · ${agent.session_id}`}
-                            >
-                              <span className="absolute -left-2.5 top-1/2 w-2 border-t" style={{ borderColor: 'var(--border-color)' }} aria-hidden="true" />
-                              <span className={`h-2 w-2 flex-shrink-0 rounded-full ${active ? 'bg-emerald-400' : 'bg-slate-400'}`} />
-                              <span className="min-w-0 flex-1">
-                                <span className="flex min-w-0 items-center gap-1.5">
-                                  <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-4" style={{ color: 'var(--text-primary)' }}>
-                                    {agent.name || agent.session_id}
-                                  </span>
-                                  {agent.last_active && <span className="flex-shrink-0 text-[9px] tabular-nums leading-3" style={{ color: 'var(--text-muted)' }}>{timeAgo(agent.last_active)}</span>}
-                                </span>
-                                <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1 text-[9px] leading-3" style={{ color: 'var(--text-muted)' }}>
-                                  <span className="max-w-[160px] truncate font-mono">{agent.session_id}</span>
-                                  <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{relationLabel}</span>
-                                  {modelLabel && <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{modelLabel}</span>}
-                                  {agent.backend && <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{agent.backend}</span>}
-                                  {agent.research_role && <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{agent.research_role}</span>}
-                                </span>
-                                {agent.description && (
-                                  <span className="mt-1 line-clamp-2 block text-[10px] leading-4" style={{ color: 'var(--text-secondary)' }}>
-                                    {agent.description}
-                                  </span>
-                                )}
-                              </span>
-                              <span className="flex flex-shrink-0 flex-col items-end gap-0.5">
-                                <span className="rounded border px-1.5 py-0.5 text-[9px] leading-3" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                                  选择模式
-                                </span>
-                              </span>
-                            </button>
-                          )
-                        }}
+                        groups={searchGroups}
+                        domIdPrefix="mention-search-group"
+                        renderSession={renderSessionRow}
                       />
                     </div>
-                  )}
-                </>
+                  </>
+                )
+              ) : recentLoading && recentSessions.length === 0 ? (
+                <div className="flex h-16 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
+                  <Loader2 className="h-4 w-4 animate-spin" />加载近期会话…
+                </div>
+              ) : recentError ? (
+                <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
+                  近期会话加载失败：{recentError}
+                </div>
+              ) : recentGroups.length === 0 ? (
+                <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
+                  暂无近期会话。
+                </div>
+              ) : (
+                <div className="min-h-0 flex-1 overflow-y-auto pr-1" aria-label="按项目与任务分组的近期会话" data-testid="mention-recent-session-tree">
+                  <SessionGroupTree
+                    groups={recentGroups}
+                    domIdPrefix="mention-recent-group"
+                    renderSession={renderSessionRow}
+                  />
+                </div>
               )}
               </div>
             </div>
