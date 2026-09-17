@@ -384,12 +384,10 @@ export default function IssuePage() {
                 title="隐藏任务信息"
                 aria-label="隐藏任务信息"
                 className="flex h-4 items-center justify-center px-0.5 rounded hover:bg-[var(--bg-hover)] transition-colors flex-shrink-0"
-                style={{ color: 'var(--text-muted)' }}>
+                style={{ color: issue?.status === 'completed' ? '#22c55e' : '#60a5fa' }}>
                 <PanelTopClose className="w-3.5 h-3.5" />
               </button>
               {!!issue?.pinned && <svg className="w-3 h-3 mt-0.5 flex-shrink-0" style={{ color: '#38bdf8' }} fill="currentColor" viewBox="0 0 24 24"><path d="M16 3l5 5-3 1-2 4-3 1-3-3-3 1-2-2 6-6-1-3 3-3-3-2 4-1z" /></svg>}
-              <svg className="w-4 h-4 flex-shrink-0" style={{ color: issue?.status === 'completed' ? '#22c55e' : '#60a5fa' }}
-                fill={issue?.status === 'completed' ? '#22c55e' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
               <div className="flex-1 min-w-0">
                 <button onClick={goToOverview}
                   data-tour="issue-overview-link"
