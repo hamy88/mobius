@@ -2589,6 +2589,18 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     return () => window.clearInterval(id)
   }, [pendingSendAt, messageSubmitting])
 
+  // 切会话时清空"发送阶段"状态. 以下状态全属于"发起它的那个会话", 而 ChatArea 在切会话时
+  // 不重挂 (同一实例, 只换 sessionId), 残留下来就会在新会话的输入框里显示上一个会话的
+  // 正在发送 / 正在唤醒中 提示, 也会让新会话的发送按钮被上一个会话的提交挡住.
+  useEffect(() => {
+    setPendingSendAt(null)
+    pendingUrgentRef.current = false
+    setSendingHint(null)
+    setMessageSubmitting(false)
+    setLastSendError('')
+    setProjectKnowledgeSending(false)
+  }, [sessionId])
+
   useEffect(() => {
     setStopFeedbackActive(false)
     if (stopFeedbackTimerRef.current) {
