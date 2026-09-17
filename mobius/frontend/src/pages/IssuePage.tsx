@@ -27,6 +27,7 @@ const CodeConversationPane = lazy(() => import('../components/workspace/code-con
 
 const GUIDED_DEMO_TOUR_EVENT = 'imac:guided-demo-tour:start'
 const SESSION_SIDEBAR_PAGE_SIZE = 16  // sidebar 会话列表每页 16, 超过即分页
+const ISSUE_SUMMARY_COLLAPSED_KEY = 'mobius:ui:sidebar:issue-summary:collapsed'
 
 type SessionListMode = 'issue' | 'recent'
 
@@ -92,6 +93,18 @@ export default function IssuePage() {
   const [recentSessionsError, setRecentSessionsError] = useState('')
   const [recentReloadVersion, setRecentReloadVersion] = useState(0)
   const [collapsedRecentGroups, setCollapsedRecentGroups] = useState<Set<string>>(() => new Set())
+  // Issue 元数据区 (data-tour="issue-created-summary") 可隐藏: 收起后只留标题行,
+  // 偏好存本浏览器 (与 sidebar 宽度/隐藏等 ui 偏好同族), 换项目/换会话都保持.
+  const [summaryCollapsed, setSummaryCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem(ISSUE_SUMMARY_COLLAPSED_KEY) === '1' } catch { return false }
+  })
+  const toggleSummaryCollapsed = useCallback(() => {
+    setSummaryCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem(ISSUE_SUMMARY_COLLAPSED_KEY, next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     if (!autoOpenNewSession || !issue) return
@@ -359,9 +372,21 @@ export default function IssuePage() {
           side="left"
           className="border-r flex flex-col"
           style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}>
-          {/* Issue 元数据 */}
-          <div data-tour="issue-created-summary" className="px-4 py-3 border-b" style={{ borderColor: 'var(--border-color)' }}>
-            <div className="flex items-start gap-2 mb-2">
+          {/* Issue 元数据 (可隐藏: 收起后只保留标题行, 底部会话列表获得更多空间) */}
+          <div data-tour="issue-created-summary" className={`border-b ${summaryCollapsed ? 'px-4 py-2' : 'px-4 py-3'}`} style={{ borderColor: 'var(--border-color)' }}>
+            <div className={`flex items-start gap-2 ${summaryCollapsed ? '' : 'mb-2'}`}>
+              <button type="button" onClick={toggleSummaryCollapsed}
+                aria-expanded={!summaryCollapsed}
+                aria-controls="issue-created-summary-body"
+                data-testid="issue-summary-toggle"
+                title={summaryCollapsed ? '显示任务信息' : '隐藏任务信息'}
+                aria-label={summaryCollapsed ? '显示任务信息' : '隐藏任务信息'}
+                className="flex h-4 items-center justify-center px-0.5 rounded hover:bg-[var(--bg-hover)] transition-colors flex-shrink-0"
+                style={{ color: 'var(--text-muted)' }}>
+                {summaryCollapsed
+                  ? <ChevronRight className="w-3.5 h-3.5" />
+                  : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
               {!!issue?.pinned && <svg className="w-3 h-3 mt-0.5 flex-shrink-0" style={{ color: '#38bdf8' }} fill="currentColor" viewBox="0 0 24 24"><path d="M16 3l5 5-3 1-2 4-3 1-3-3-3 1-2-2 6-6-1-3 3-3-3-2 4-1z" /></svg>}
               <svg className="w-4 h-4 flex-shrink-0" style={{ color: issue?.status === 'completed' ? '#22c55e' : '#60a5fa' }}
                 fill={issue?.status === 'completed' ? '#22c55e' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
@@ -390,36 +415,38 @@ export default function IssuePage() {
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
               </button>
             </div>
-            {selectedSession ? (
-              <div className="space-y-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+            <div id="issue-created-summary-body" hidden={summaryCollapsed}>
+              {selectedSession ? (
+                <div className="space-y-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                  <TruncatedText
+                    text={issueSummary || '暂无描述'}
+                    lines={2}
+                    prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>任务现状: </span>}
+                  />
+                  <TruncatedText
+                    text={selectedSessionName || '未命名会话'}
+                    lines={1}
+                    prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话名称: </span>}
+                  />
+                  <TruncatedText
+                    text={selectedSessionPurpose || '未填写'}
+                    lines={2}
+                    prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话目的: </span>}
+                  />
+                </div>
+              ) : issue?.description && (
                 <TruncatedText
-                  text={issueSummary || '暂无描述'}
-                  lines={2}
-                  prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>任务现状: </span>}
+                  text={issue.description}
+                  lines={3}
+                  className="text-[11px] leading-relaxed"
                 />
-                <TruncatedText
-                  text={selectedSessionName || '未命名会话'}
-                  lines={1}
-                  prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话名称: </span>}
-                />
-                <TruncatedText
-                  text={selectedSessionPurpose || '未填写'}
-                  lines={2}
-                  prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话目的: </span>}
-                />
-              </div>
-            ) : issue?.description && (
-              <TruncatedText
-                text={issue.description}
-                lines={3}
-                className="text-[11px] leading-relaxed"
-              />
-            )}
-            {issue && (
-              <div className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>
-                {issue.message_count || 0} 消息 · 活跃 {timeAgo(issue.last_active)}
-              </div>
-            )}
+              )}
+              {issue && (
+                <div className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>
+                  {issue.message_count || 0} 消息 · 活跃 {timeAgo(issue.last_active)}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* 当前任务会话与当前用户近期会话共用侧栏空间。 */}
