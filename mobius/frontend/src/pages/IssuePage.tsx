@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { CircleDot, ChevronDown, ChevronRight, FlaskConical, MessageSquarePlus, Plus } from 'lucide-react'
+import { CircleDot, ChevronDown, ChevronRight, FlaskConical, MessageSquarePlus, PanelTopClose, PanelTopOpen, Plus } from 'lucide-react'
 import { useStore, api } from '../store'
 import { TopNav, timeAgo } from '../components/shell'
 import { ResizablePanel, useIsMobile } from '../components/resizable-panel'
@@ -372,20 +372,20 @@ export default function IssuePage() {
           side="left"
           className="border-r flex flex-col"
           style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}>
-          {/* Issue 元数据 (可隐藏: 收起后只保留标题行, 底部会话列表获得更多空间) */}
-          <div data-tour="issue-created-summary" className={`border-b ${summaryCollapsed ? 'px-4 py-2' : 'px-4 py-3'}`} style={{ borderColor: 'var(--border-color)' }}>
-            <div className={`flex items-start gap-2 ${summaryCollapsed ? '' : 'mb-2'}`}>
+          {/* Issue 元数据 (可整体隐藏: 隐藏后靠会话范围栏的「显示任务信息」按钮恢复).
+              隐藏时保留节点 (display:none), 引导流程依赖的 data-tour 锚点不消失. */}
+          <div id="issue-created-summary" data-tour="issue-created-summary" hidden={summaryCollapsed}
+            className="border-b px-4 py-3" style={{ borderColor: 'var(--border-color)' }}>
+            <div className="flex items-start gap-2 mb-2">
               <button type="button" onClick={toggleSummaryCollapsed}
                 aria-expanded={!summaryCollapsed}
-                aria-controls="issue-created-summary-body"
+                aria-controls="issue-created-summary"
                 data-testid="issue-summary-toggle"
-                title={summaryCollapsed ? '显示任务信息' : '隐藏任务信息'}
-                aria-label={summaryCollapsed ? '显示任务信息' : '隐藏任务信息'}
+                title="隐藏任务信息"
+                aria-label="隐藏任务信息"
                 className="flex h-4 items-center justify-center px-0.5 rounded hover:bg-[var(--bg-hover)] transition-colors flex-shrink-0"
                 style={{ color: 'var(--text-muted)' }}>
-                {summaryCollapsed
-                  ? <ChevronRight className="w-3.5 h-3.5" />
-                  : <ChevronDown className="w-3.5 h-3.5" />}
+                <PanelTopClose className="w-3.5 h-3.5" />
               </button>
               {!!issue?.pinned && <svg className="w-3 h-3 mt-0.5 flex-shrink-0" style={{ color: '#38bdf8' }} fill="currentColor" viewBox="0 0 24 24"><path d="M16 3l5 5-3 1-2 4-3 1-3-3-3 1-2-2 6-6-1-3 3-3-3-2 4-1z" /></svg>}
               <svg className="w-4 h-4 flex-shrink-0" style={{ color: issue?.status === 'completed' ? '#22c55e' : '#60a5fa' }}
@@ -415,38 +415,36 @@ export default function IssuePage() {
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
               </button>
             </div>
-            <div id="issue-created-summary-body" hidden={summaryCollapsed}>
-              {selectedSession ? (
-                <div className="space-y-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-                  <TruncatedText
-                    text={issueSummary || '暂无描述'}
-                    lines={2}
-                    prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>任务现状: </span>}
-                  />
-                  <TruncatedText
-                    text={selectedSessionName || '未命名会话'}
-                    lines={1}
-                    prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话名称: </span>}
-                  />
-                  <TruncatedText
-                    text={selectedSessionPurpose || '未填写'}
-                    lines={2}
-                    prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话目的: </span>}
-                  />
-                </div>
-              ) : issue?.description && (
+            {selectedSession ? (
+              <div className="space-y-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                 <TruncatedText
-                  text={issue.description}
-                  lines={3}
-                  className="text-[11px] leading-relaxed"
+                  text={issueSummary || '暂无描述'}
+                  lines={2}
+                  prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>任务现状: </span>}
                 />
-              )}
-              {issue && (
-                <div className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>
-                  {issue.message_count || 0} 消息 · 活跃 {timeAgo(issue.last_active)}
-                </div>
-              )}
-            </div>
+                <TruncatedText
+                  text={selectedSessionName || '未命名会话'}
+                  lines={1}
+                  prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话名称: </span>}
+                />
+                <TruncatedText
+                  text={selectedSessionPurpose || '未填写'}
+                  lines={2}
+                  prefix={<span className="font-medium" style={{ color: 'var(--text-muted)' }}>会话目的: </span>}
+                />
+              </div>
+            ) : issue?.description && (
+              <TruncatedText
+                text={issue.description}
+                lines={3}
+                className="text-[11px] leading-relaxed"
+              />
+            )}
+            {issue && (
+              <div className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>
+                {issue.message_count || 0} 消息 · 活跃 {timeAgo(issue.last_active)}
+              </div>
+            )}
           </div>
 
           {/* 当前任务会话与当前用户近期会话共用侧栏空间。 */}
@@ -480,6 +478,21 @@ export default function IssuePage() {
                 )
               })}
             </div>
+            {summaryCollapsed && (
+              <button
+                type="button"
+                onClick={toggleSummaryCollapsed}
+                title="显示任务信息"
+                aria-label="显示任务信息"
+                aria-expanded={false}
+                aria-controls="issue-created-summary"
+                data-testid="issue-summary-restore"
+                className="inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[var(--bg-hover)]"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                <PanelTopOpen className="h-3.5 w-3.5" strokeWidth={2} />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowNewSession(true)}
