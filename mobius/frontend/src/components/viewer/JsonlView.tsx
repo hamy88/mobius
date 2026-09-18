@@ -504,11 +504,10 @@ export function JsonlView({
         onAutoOpen={cb.open}
         onAutoClose={cb.close}
         onRetry={cb.retry}
-        // Keep the owning group highlighted even when the exact card is still loading
-        // (or the target only resolved to group metadata). The card itself is marked once
-        // extFocusLineNo is known.
+        // 搜索定位仍需强制打开所属组，让具体卡片能够挂载并完成滚动；视觉高亮只留给
+        // 命中卡片本身，不再给所属 group 加红框或“搜索命中”徽章。
         forceOpen={searchNavigationActive && block.key === extTarget?.key}
-        searchHighlighted={block.key === extTarget?.key}
+        searchHighlighted={false}
         showMeta={showMeta}
         toolStatusMap={entries ? toolStatusMapFor(entries) : null}
         collapseLineNos={entries ? collapsedLineNosFor(entries, r.round.items) : undefined}
