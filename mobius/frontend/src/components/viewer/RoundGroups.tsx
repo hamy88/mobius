@@ -202,7 +202,7 @@ export function ContinuationGroup({ items, onlyGroup, forceExpandAll = false, sh
 // 自动规则: 用户没插手过 (sticky=false) 时跟随"末两轮展开"自动开合;
 // 用户点过一次后 sticky=true, 自动规则永不再接管. 展开即加载由 store 状态机保证.
 // memo: 未收数据的组全部 prop 身份稳定 (round 缓存 + 回调缓存 + map 缓存), 整组跳过重渲染.
-function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, searchHighlighted = false, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; searchHighlighted?: boolean; showMeta?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
+function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, searchActive = false, searchHighlighted = false, showMeta = true, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; searchActive?: boolean; searchHighlighted?: boolean; showMeta?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
   const autoOpen = isLast || isSecondLast
   // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
@@ -210,11 +210,11 @@ function RoundGroupInner({ round, isLast, isSecondLast, onlyGroup, open, sticky 
     if (forceOpen) { if (!open) onAutoOpen(); return }
     // 自动定位结束后只保留红色标记与当前开合状态；用户可以自行折叠，
     // 也不会被“旧轮次自动关闭”规则立刻收回去。
-    if (searchHighlighted) return
+    if (searchActive) return
     if (sticky) return
     if (onlyGroup || autoOpen) { if (!open) onAutoOpen(); return }
     if (open) onAutoClose()
-  }, [sticky, autoOpen, onlyGroup, forceOpen, searchHighlighted, open, onAutoOpen, onAutoClose])
+  }, [sticky, autoOpen, onlyGroup, forceOpen, searchActive, open, onAutoOpen, onAutoClose])
   // 首帧防闪: store 还没来得及转移时, 按"应展开"先行绘制 (视觉态), effect 随后对齐真实态.
   const openVisual = open || forceOpen || (!sticky && (onlyGroup || autoOpen))
 
