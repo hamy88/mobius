@@ -1968,7 +1968,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
 
   const hitKey = (hit: SearchHitTarget | null | undefined) => hit ? `${hit.uuid || ''}:${hit.timestamp || ''}` : ''
   useEffect(() => {
-    const targetKey = hitKey(searchHighlightTargetRef.current)
+    // Prefer the URL target while a navigation request is in flight. The panel
+    // updates its retained ref during its own render, which can lag one render
+    // behind a previous/next click; using the stale ref here would reset the
+    // index and make the following click jump to the wrong result.
+    const targetKey = hitKey(
+      (matchUuid || matchTs)
+        ? { uuid: matchUuid, timestamp: matchTs }
+        : searchHighlightTargetRef.current,
+    )
     const index = searchHits.findIndex((hit) => hitKey(hit) === targetKey)
     if (index >= 0) setSearchHitIndex(index)
   }, [searchHits, matchUuid, matchTs])
@@ -2003,10 +2011,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   }, [searchHitIndex, searchHits, targetForHit])
   const moveSearchHit = useCallback((delta: number) => {
     if (searchHits.length === 0) return
-    const nextIndex = (searchHitIndex + delta + searchHits.length) % searchHits.length
-    setSearchHitIndex(nextIndex)
-    targetForHit(searchHits[nextIndex])
-  }, [searchHitIndex, searchHits, targetForHit])
+    setSearchHitIndex((currentIndex) => {
+      const nextIndex = (currentIndex + delta + searchHits.length) % searchHits.length
+      targetForHit(searchHits[nextIndex])
+      return nextIndex
+    })
+  }, [searchHits, targetForHit])
   const clearSearchHits = useCallback(() => {
     searchHighlightActiveRef.current = false
     searchHighlightTargetRef.current = null
