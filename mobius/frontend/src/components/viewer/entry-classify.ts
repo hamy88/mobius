@@ -130,6 +130,11 @@ export function isFileAttachment(entry: AnyEntry): boolean {
   return entry?.type === 'attachment' && entry?.attachment?.type === 'file'
 }
 
+// Attachment entries are metadata carriers, not conversation content; hide all standalone cards.
+export function isAttachmentEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'attachment'
+}
+
 // mobius sidecar 的 task_state 快照载体条目: 数据已按 anchor_uuid 并入对应任务卡的
 // 计划视图, 单独再显示一张空壳卡是冗余, 整卡过滤隐藏.
 export function isTaskStateCarrierEntry(entry: AnyEntry): boolean {
@@ -197,6 +202,7 @@ export function isEventMessageEntry(entry: AnyEntry): boolean {
 //   - queued_command      : CLI/TUI 排队指令附件 (忙时用户输入的待执行指令)
 //   - compact_file_reference: Claude Code 文件附件引用元数据
 //   - file                 : 文件附件元数据
+//   - attachment           : 其它附件元数据
 //   - turn_context        : codex 每轮注入的本轮上下文元数据 (含 developer_instructions 系统提示词)
 //   - task_state          : mobius sidecar 任务快照载体 (数据并入 anchor 任务卡的计划视图)
 //   - empty task_reminder : 空 content 的 task_reminder 附件 (无任务时的空壳)
@@ -206,6 +212,7 @@ export function isEventMessageEntry(entry: AnyEntry): boolean {
 export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
   return (
     !MAJOR_JSONL_TYPES.has(entry?.type as string) ||
+    isAttachmentEntry(entry) ||
     isEventMessageEntry(entry) ||
     isTaskStartedEvent(entry) ||
     isMcpToolCallEndEvent(entry) ||
