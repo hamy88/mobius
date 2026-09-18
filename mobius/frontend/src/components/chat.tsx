@@ -3587,6 +3587,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     setTyping(false)
     setMessages([])
     setHistoryLoaded(false)
+    // 滚动接管态属于"上一个会话": ChatArea 切会话不重挂, 残留的 userScrolledUp 会让新会话
+    // 永不自动追底, 并在对话还没撑满屏时亮出"新消息"按钮.
+    userScrolledUpRef.current = false
+    setHasNewMessages(false)
     loadHistory()
     connectEventStream(sid)
     return () => {

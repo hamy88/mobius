@@ -163,6 +163,20 @@ function SessionJsonlPanelInner({
     : !!(backendAlive === true && backendWorking === true)
   // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
   const lastScrollTopRef = useRef<number | null>(null)
+  // 内容是否真的撑满视口 (有可滚动余量). 对话没满时下方并没有被遮住的内容, "新消息"
+  // 按钮纯属噪音 — 它此前会在空/短会话里亮着. 容器与内容根都盯: 容器管视口尺寸变化,
+  // 内容根 (第一个子元素, 高度随内容走) 管新条目长高.
+  const [hasScrollRoom, setHasScrollRoom] = useState(false)
+  useEffect(() => {
+    const el = chatContainerRef.current
+    if (!el) return
+    const measure = () => setHasScrollRoom(el.scrollHeight - el.clientHeight > 4)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    if (el.firstElementChild instanceof HTMLElement) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [chatContainerRef])
 
   // 用户输入意图监听: wheel / touchmove / keydown 一旦表达"向上翻"意图, 立即把
   // userScrolledUp 置 true (终止 EntriesAutoScroll 的追底), 不再依赖 onScroll 里
@@ -174,17 +188,20 @@ function SessionJsonlPanelInner({
     const el = chatContainerRef.current
     if (!el) return
 
+    // 内容没撑满视口时"上滚"不会产生任何位移, 不代表用户在看历史: 记成解除钉底会让
+    // 追底永久停摆 (连新会话都不再自动滚), 还会在底部亮出无意义的"新消息"按钮.
+    const roomToScroll = () => el.scrollHeight - el.clientHeight > 4
     // wheel 上滚 (deltaY<0) 才算向上翻; 向下滚留 onScroll 贴底判定恢复钉底.
     const onWheel = (e: WheelEvent) => {
       scrollDebug('wheel event: deltaY=', e.deltaY, e.deltaY < 0 ? '(上滚→flag true)' : '(下滚, 交给 onScroll)')
-      if (e.deltaY < 0) onScrollPositionChange(true)
+      if (e.deltaY < 0 && roomToScroll()) onScrollPositionChange(true)
     }
     // 手指下移 (clientY 增大) = 内容上滚 (向上翻); 反之回底部交给 onScroll 恢复.
     let lastTouchY: number | null = null
     const onTouchMove = (e: TouchEvent) => {
       const t = e.touches[0]
       if (!t) return
-      if (lastTouchY !== null && t.clientY > lastTouchY) {
+      if (lastTouchY !== null && t.clientY > lastTouchY && roomToScroll()) {
         scrollDebug('touchmove: 手指下移(内容上翻) → flag true')
         onScrollPositionChange(true)
       }
@@ -192,7 +209,7 @@ function SessionJsonlPanelInner({
     }
     // 仅"向上翻"类按键视为接管; 输入区与滚动容器是兄弟节点, 输入框方向键不会冒泡到此.
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') {
+      if ((e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') && roomToScroll()) {
         scrollDebug('keydown:', e.key, '→ flag true')
         onScrollPositionChange(true)
       }
@@ -282,7 +299,7 @@ function SessionJsonlPanelInner({
           ) : exclusiveContent}
         </div>
       </div>
-      {exclusiveContent == null && hasNewMessages && (
+      {exclusiveContent == null && hasNewMessages && hasScrollRoom && (
         <div className="flex justify-center py-1 flex-shrink-0">
           <button onClick={onJumpToBottom} className="px-4 py-1.5 text-[12px] bg-blue-500/90 text-white rounded-full hover:bg-blue-500 transition-colors shadow-md flex items-center gap-1.5">
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
