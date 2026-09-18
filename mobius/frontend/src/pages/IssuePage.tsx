@@ -28,6 +28,7 @@ const CodeConversationPane = lazy(() => import('../components/workspace/code-con
 const GUIDED_DEMO_TOUR_EVENT = 'imac:guided-demo-tour:start'
 const SESSION_SIDEBAR_PAGE_SIZE = 16  // sidebar 会话列表每页 16, 超过即分页
 const ISSUE_SUMMARY_COLLAPSED_KEY = 'mobius:ui:sidebar:issue-summary:collapsed'
+const SESSION_LIST_MODE_KEY = 'mobius:ui:sidebar:session-list-mode'
 
 type SessionListMode = 'issue' | 'recent'
 
@@ -87,7 +88,14 @@ export default function IssuePage() {
   const [editingIssue, setEditingIssue] = useState(false)
   const [deletingSession, setDeletingSession] = useState<any>(null)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
-  const [sessionListMode, setSessionListMode] = useState<SessionListMode>('issue')
+  // 侧栏"任务会话 / 近期会话"选择存本浏览器, 换项目/换会话/刷新都保持上次选择.
+  const [sessionListMode, setSessionListMode] = useState<SessionListMode>(() => {
+    try { return localStorage.getItem(SESSION_LIST_MODE_KEY) === 'recent' ? 'recent' : 'issue' } catch { return 'issue' }
+  })
+  const selectSessionListMode = useCallback((mode: SessionListMode) => {
+    setSessionListMode(mode)
+    try { localStorage.setItem(SESSION_LIST_MODE_KEY, mode) } catch {}
+  }, [])
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([])
   const [recentSessionsLoading, setRecentSessionsLoading] = useState(false)
   const [recentSessionsError, setRecentSessionsError] = useState('')
@@ -462,7 +470,7 @@ export default function IssuePage() {
                     role="tab"
                     aria-selected={active}
                     aria-controls="issue-sidebar-session-list"
-                    onClick={() => setSessionListMode(mode)}
+                    onClick={() => selectSessionListMode(mode)}
                     className="min-w-0 flex-1 truncate rounded px-1 py-1.5 text-[11px] font-medium leading-none transition-colors hover:text-[var(--text-primary)]"
                     style={{
                       color: active ? 'var(--text-primary)' : 'var(--text-muted)',
