@@ -286,11 +286,23 @@ function taskUpdateEntry() {
   assert.equal(plan.steps[1].status, 'in_progress')
 }
 
-// 5) 噪声过滤: task_state 载体与空 task_reminder 整卡隐藏
+// 5) 噪声过滤: task_state、空 task_reminder 与文件附件引用整卡隐藏
 {
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'task_state', mobius: {} }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'attachment', attachment: { type: 'task_reminder', content: [] } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'attachment', attachment: { type: 'task_reminder', content: [{ id: '1', subject: 'x', status: 'pending' }] } }), false)
+  const compactFileReference = {
+    type: 'attachment',
+    attachment: {
+      type: 'compact_file_reference',
+      filename: '/home/tianyi/imac-test/mobius/backend/agents/tmux-codex.ts',
+      displayPath: 'backend/agents/tmux-codex.ts',
+    },
+  }
+  assert.equal(classify.isCompactFileReferenceAttachment(compactFileReference), true)
+  assert.equal(classify.isHiddenJsonlNoiseEntry(compactFileReference), true)
+  assert.equal(classify.isCompactFileReferenceAttachment({ type: 'attachment', attachment: { type: 'file' } }), false)
+  assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'attachment', attachment: { type: 'file' } }), false)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'mcp_tool_call_end' } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'agent_message', phase: 'final' } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'future_event', message: 'metadata' } }), true)

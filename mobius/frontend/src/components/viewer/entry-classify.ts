@@ -119,6 +119,12 @@ export function isQueuedCommandAttachment(entry: AnyEntry): boolean {
   return entry?.type === 'attachment' && entry?.attachment?.type === 'queued_command'
 }
 
+// Claude Code emits compact_file_reference when a file is attached to a prompt. The file is
+// already represented by the user's message, so the standalone metadata card is redundant.
+export function isCompactFileReferenceAttachment(entry: AnyEntry): boolean {
+  return entry?.type === 'attachment' && entry?.attachment?.type === 'compact_file_reference'
+}
+
 // mobius sidecar 的 task_state 快照载体条目: 数据已按 anchor_uuid 并入对应任务卡的
 // 计划视图, 单独再显示一张空壳卡是冗余, 整卡过滤隐藏.
 export function isTaskStateCarrierEntry(entry: AnyEntry): boolean {
@@ -184,6 +190,7 @@ export function isEventMessageEntry(entry: AnyEntry): boolean {
 //   - skill_listing       : Claude Code 注入的可用 Skill 清单 (巨量 skill 描述文本)
 //   - agent_listing_delta : Claude Code 注入的可用 subagent 清单
 //   - queued_command      : CLI/TUI 排队指令附件 (忙时用户输入的待执行指令)
+//   - compact_file_reference: Claude Code 文件附件引用元数据
 //   - turn_context        : codex 每轮注入的本轮上下文元数据 (含 developer_instructions 系统提示词)
 //   - task_state          : mobius sidecar 任务快照载体 (数据并入 anchor 任务卡的计划视图)
 //   - empty task_reminder : 空 content 的 task_reminder 附件 (无任务时的空壳)
@@ -206,6 +213,7 @@ export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
     isSkillListingAttachment(entry) ||
     isAgentListingDeltaAttachment(entry) ||
     isQueuedCommandAttachment(entry) ||
+    isCompactFileReferenceAttachment(entry) ||
     isTaskStateCarrierEntry(entry) ||
     isEmptyTaskReminderAttachment(entry) ||
     isEmptyThinkingOnlyAssistantEntry(entry) ||
