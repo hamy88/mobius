@@ -1492,6 +1492,22 @@ router.post('/model-access/bestapi/sync', adminAuth, async (req: express.Request
   }
 });
 
+// 一键删除 BestAPI 注入的全部模型, 并清除连接状态 (保留连接会让自动同步立刻把模型加回来).
+router.delete('/model-access/bestapi/models', adminAuth, async (req: express.Request, res: express.Response) => {
+  try {
+    const result = await bestApiIntegration.removeAllBestApiModels();
+    AdminAuditLog.record({
+      adminId: adminReqUser(req).id,
+      action: 'remove-all-models',
+      resourceType: 'bestapi-model-access',
+      resourceId: 'bestapi',
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message || String(e) });
+  }
+});
+
 router.get('/model-access/claude-code', adminAuth, (_req: express.Request, res: express.Response) => {
   res.json(modelAccess.listClaudeCodeModels({ includeSettings: false }));
 });

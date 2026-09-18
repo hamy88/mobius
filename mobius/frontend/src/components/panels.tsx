@@ -3571,7 +3571,7 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
   const [showApiKey, setShowApiKey] = useState(false)
   const [reconfigure, setReconfigure] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [working, setWorking] = useState<'connect' | 'sync' | null>(null)
+  const [working, setWorking] = useState<'connect' | 'sync' | 'remove' | null>(null)
   const [error, setError] = useState('')
   const catalogVersionRef = useRef<string | null>(null)
 
@@ -3630,6 +3630,24 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
       }) as BestApiConnection
       setConnection(result)
       catalogVersionRef.current = result.catalog_version || null
+      setError('')
+      onSynced()
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    } finally {
+      setWorking(null)
+    }
+  }
+
+  // 一键删除: 清空该连接注入的全部模型并断开连接 (否则自动同步会立刻把模型加回来).
+  const removeAll = async () => {
+    const count = connection.model_count || (connection.models || []).length
+    if (!window.confirm(`确定删除 BestAPI 注入的全部 ${count} 个模型吗？\n\n这些模型会从 Mobius 模型配置中移除，连接状态一并清除（不再自动同步）。手动创建的模型不受影响。`)) return
+    setWorking('remove')
+    try {
+      await api('/api/admin/model-access/bestapi/models', { method: 'DELETE' })
+      setConnection({ connected: false })
+      catalogVersionRef.current = null
       setError('')
       onSynced()
     } catch (e: any) {
@@ -3732,6 +3750,12 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
               className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
               {working === 'sync' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               立即同步全部模型
+            </button>
+            <button type="button" onClick={removeAll} disabled={!!working || !(connection.model_count || (connection.models || []).length)}
+              title="删除 BestAPI 注入的全部模型并断开连接"
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-red-500/40 px-3 text-[12px] font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-60">
+              {working === 'remove' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+              删除全部模型
             </button>
           </div>
         </div>
