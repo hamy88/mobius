@@ -165,6 +165,62 @@ function SessionJsonlPanelInner({
   const liveCardVisible = liveCardMode === 'on' ? true
     : liveCardMode === 'off' ? false
     : !!(backendAlive === true && backendWorking === true)
+  const liveCardMounted = variant === 'standard' && exclusiveContent == null && liveCardVisible && !!lastTimestamp
+  const [liveTokenText, setLiveTokenText] = useState('')
+  const liveTokenBufferRef = useRef('')
+  const liveTokenClearTimerRef = useRef<number | null>(null)
+
+  // The LIVE card consumes only tokens produced after this subscription starts.
+  // The proxy's only_latest mode suppresses its historical snapshot; snapshot
+  // events are still ignored for compatibility with older proxy instances.
+  useEffect(() => {
+    if (!liveCardMounted || backendWorking !== true || !sessionIdentity) {
+      liveTokenBufferRef.current = ''
+      setLiveTokenText('')
+      if (liveTokenClearTimerRef.current !== null) {
+        window.clearTimeout(liveTokenClearTimerRef.current)
+        liveTokenClearTimerRef.current = null
+      }
+      return
+    }
+
+    const source = new EventSource(`/api/token_stream?session=${encodeURIComponent(sessionIdentity)}&only_latest=1`)
+    const handleToken = (event: MessageEvent<string>) => {
+      let payload: { text?: unknown }
+      try { payload = JSON.parse(event.data) } catch { return }
+      const text = typeof payload.text === 'string' ? payload.text : ''
+      if (!text) return
+
+      liveTokenBufferRef.current += text
+      const lines = liveTokenBufferRef.current.split(/\r?\n/)
+      // Keep the most recent non-empty line: the card has room for one line only.
+      const latestLine = [...lines].reverse().find((line) => line.length > 0) || ''
+      setLiveTokenText(latestLine)
+      if (liveTokenClearTimerRef.current !== null) window.clearTimeout(liveTokenClearTimerRef.current)
+      liveTokenClearTimerRef.current = window.setTimeout(() => {
+        liveTokenBufferRef.current = ''
+        liveTokenClearTimerRef.current = null
+        setLiveTokenText('')
+      }, 5000)
+    }
+    const handleSnapshot = () => {
+      // only_latest should never send this; ignore it if an older proxy does.
+    }
+    source.addEventListener('token', handleToken as EventListener)
+    source.addEventListener('snapshot', handleSnapshot as EventListener)
+
+    return () => {
+      source.removeEventListener('token', handleToken as EventListener)
+      source.removeEventListener('snapshot', handleSnapshot as EventListener)
+      source.close()
+      liveTokenBufferRef.current = ''
+      setLiveTokenText('')
+      if (liveTokenClearTimerRef.current !== null) {
+        window.clearTimeout(liveTokenClearTimerRef.current)
+        liveTokenClearTimerRef.current = null
+      }
+    }
+  }, [backendWorking, liveCardMounted, sessionIdentity])
   // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
   const lastScrollTopRef = useRef<number | null>(null)
   // 内容是否真的撑满视口 (有可滚动余量). 对话没满时下方并没有被遮住的内容, "新消息"
@@ -295,6 +351,7 @@ function SessionJsonlPanelInner({
                   lastTimestamp={lastTimestamp}
                   pid={backendPid}
                   realTimeInfo={realTimeInfo}
+                  liveTokenText={liveTokenText}
                   optimistic={liveCardMode === 'on'}
                 />
               )}

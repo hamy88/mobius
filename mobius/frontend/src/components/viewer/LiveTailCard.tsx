@@ -12,7 +12,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { formatDuration } from './utils'
 
-export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, optimistic = false }: { lastTimestamp: string | null | undefined; pid: number | null | undefined; realTimeInfo?: string | null; optimistic?: boolean }) {
+export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, liveTokenText, optimistic = false }: { lastTimestamp: string | null | undefined; pid: number | null | undefined; realTimeInfo?: string | null; liveTokenText?: string | null; optimistic?: boolean }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
@@ -35,7 +35,9 @@ export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, optimistic
   const silenceSec = lastMs ? Math.max(0, Math.floor((now - lastMs) / 1000)) : null
   // 还没有任何 jsonl entry → 不出 LIVE 卡片 (不再显示 "等首条 entry..." 占位).
   if (silenceSec == null) return null
-  const liveActive = !!liveTextRef.current && now <= liveUntilRef.current
+  const tokenText = (liveTokenText || '').trim()
+  const liveActive = !!tokenText || (!!liveTextRef.current && now <= liveUntilRef.current)
+  const activeLiveText = tokenText || liveTextRef.current
   // 乐观窗 (刚提交, 后端还没报 working) 内不按沉默时长判严重度: 此时 lastTimestamp 参照的
   // 还是上一条历史 entry, 照常渲染会闪一条"沉默 Xm"红卡, 与"刚提交"的动作相悖.
   const sev: 'normal' | 'warn' | 'stale' =
@@ -62,9 +64,9 @@ export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, optimistic
         <span className="text-[10px] text-[var(--text-muted)] font-mono flex-shrink-0">pid {pid}</span>
       )}
       */}
-      <span className="flex-1 text-[11px] truncate" style={{ color: 'var(--text-muted)' }} title={liveActive ? liveTextRef.current : undefined}>
+      <span className="flex-1 text-[11px] truncate" style={{ color: 'var(--text-muted)' }} title={liveActive ? activeLiveText : undefined}>
         {liveActive
-          ? liveTextRef.current
+          ? activeLiveText
           : optimistic ? '已提交 · 等待智能体响应…'
           : sev === 'normal' ? `生成中 · 距上条 entry ${formatDuration(silenceSec)}`
           : sev === 'warn'   ? `沉默 ${formatDuration(silenceSec)} — API 可能长尾, 继续等等`
