@@ -12,11 +12,6 @@ const LIVE_TOKEN_MAX_BUFFER_CHARS = 3200
 const LIVE_TOKEN_MAX_CHARS_PER_SECOND = 60
 const LIVE_TOKEN_TICK_MS = 50
 
-function latestLiveLine(value: string): string {
-  const lines = value.split(/\r?\n/)
-  return [...lines].reverse().find((line) => line.length > 0) || ''
-}
-
 // ── 最新可解析时间戳 (LIVE 卡锚点 / 诊断用). 从尾部向前找, 跳过无时间戳的元数据条目. ──
 // 从 chat.tsx 迁入 (Chat 不再订阅快照, 摊平条目的派生消费集中到本面板).
 function parseDebugTimestamp(value: unknown): number | null {
@@ -201,11 +196,12 @@ function SessionJsonlPanelInner({
       let payload: { text?: unknown }
       try { payload = JSON.parse(event.data) } catch { return }
       const text = typeof payload.text === 'string' ? payload.text : ''
-      if (!text) return
+      const normalizedText = text.replace(/\r\n?|\n/g, ' ')
+      if (!normalizedText) return
 
       // Keep the newest content when the model outruns the typewriter. This
       // bounds memory and prevents a stale backlog from appearing minutes later.
-      liveTokenBufferRef.current = (liveTokenBufferRef.current + text).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
+      liveTokenBufferRef.current = (liveTokenBufferRef.current + normalizedText).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
       if (liveTokenClearTimerRef.current !== null) window.clearTimeout(liveTokenClearTimerRef.current)
       liveTokenClearTimerRef.current = window.setTimeout(() => {
         liveTokenBufferRef.current = ''
@@ -226,7 +222,7 @@ function SessionJsonlPanelInner({
       const next = pending.slice(0, charsPerTick)
       liveTokenBufferRef.current = pending.slice(next.length)
       liveTokenDisplayRef.current = (liveTokenDisplayRef.current + next).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
-      setLiveTokenText(latestLiveLine(liveTokenDisplayRef.current))
+      setLiveTokenText(liveTokenDisplayRef.current)
     }, LIVE_TOKEN_TICK_MS)
 
     return () => {

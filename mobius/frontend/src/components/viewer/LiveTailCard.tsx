@@ -8,9 +8,47 @@
  *   120s+   红  长时间没输出, 建议终止重试
  * optimistic=true 时 (刚提交问题, 后端还没报 working) 固定按绿色"等待响应"渲染, 不判沉默.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { formatDuration } from './utils'
+
+function VirtualLiveTextBox({ text, cursorClassName }: { text: string; cursorClassName: string }) {
+  const viewportRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    viewport.scrollTop = viewport.scrollHeight
+  }, [text])
+
+  return (
+    <div
+      ref={viewportRef}
+      className="h-[1.3em] min-w-0 flex-1 overflow-hidden text-[11px] leading-[1.2]"
+      style={{ color: 'var(--text-muted)' }}
+      title={text}
+    >
+      <span className="block whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+        {text}
+        <span aria-hidden="true" className={`font-mono text-[12px] leading-none ${cursorClassName} animate-pulse`}>
+          ▍
+        </span>
+      </span>
+    </div>
+  )
+}
+
+function LegacyLiveText({ text }: { text: string }) {
+  return (
+    <span
+      className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11px]"
+      style={{ color: 'var(--text-muted)' }}
+      title={text}
+    >
+      {text}
+    </span>
+  )
+}
 
 export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, liveTokenText, optimistic = false }: { lastTimestamp: string | null | undefined; pid: number | null | undefined; realTimeInfo?: string | null; liveTokenText?: string | null; optimistic?: boolean }) {
   const [now, setNow] = useState(Date.now())
@@ -35,9 +73,8 @@ export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, liveTokenT
   const silenceSec = lastMs ? Math.max(0, Math.floor((now - lastMs) / 1000)) : null
   // 还没有任何 jsonl entry → 不出 LIVE 卡片 (不再显示 "等首条 entry..." 占位).
   if (silenceSec == null) return null
-  const tokenText = (liveTokenText || '').trim()
-  const liveActive = !!tokenText || (!!liveTextRef.current && now <= liveUntilRef.current)
-  const activeLiveText = tokenText || liveTextRef.current
+  const tokenText = liveTokenText || ''
+  const liveActive = tokenText.length > 0
   // 乐观窗 (刚提交, 后端还没报 working) 内不按沉默时长判严重度: 此时 lastTimestamp 参照的
   // 还是上一条历史 entry, 照常渲染会闪一条"沉默 Xm"红卡, 与"刚提交"的动作相悖.
   const sev: 'normal' | 'warn' | 'stale' =
@@ -45,6 +82,13 @@ export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, liveTokenT
     : silenceSec < 30 ? 'normal'
     : silenceSec < 120 ? 'warn'
     : 'stale'
+  const fallbackText = optimistic ? '已提交 · 等待智能体响应…'
+    : sev === 'normal' ? `生成中 · 距上条 entry ${formatDuration(silenceSec)}`
+    : sev === 'warn'   ? `沉默 ${formatDuration(silenceSec)} — API 可能长尾, 继续等等`
+    :                    `⚠ 沉默 ${formatDuration(silenceSec)} — API 可能长尾, 请耐心等待`
+  const legacyText = liveTextRef.current && now <= liveUntilRef.current
+    ? liveTextRef.current
+    : fallbackText
   const theme =
     sev === 'normal' ? { border: 'border-emerald-500/15', bg: 'bg-emerald-500/[0.05]', dot: 'bg-emerald-400', text: 'text-emerald-300', accent: '#34d399' }
     : sev === 'warn'   ? { border: 'border-amber-500/15',   bg: 'bg-amber-500/[0.05]',   dot: 'bg-amber-400',   text: 'text-amber-300',   accent: '#fbbf24' }
@@ -64,23 +108,9 @@ export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, liveTokenT
         <span className="text-[10px] text-[var(--text-muted)] font-mono flex-shrink-0">pid {pid}</span>
       )}
       */}
-      <span className="flex-1 text-[11px] truncate" style={{ color: 'var(--text-muted)' }} title={liveActive ? activeLiveText : undefined}>
-        {liveActive
-          ? activeLiveText
-          : optimistic ? '已提交 · 等待智能体响应…'
-          : sev === 'normal' ? `生成中 · 距上条 entry ${formatDuration(silenceSec)}`
-          : sev === 'warn'   ? `沉默 ${formatDuration(silenceSec)} — API 可能长尾, 继续等等`
-          :                    `⚠ 沉默 ${formatDuration(silenceSec)} — API 可能长尾, 请耐心等待`
-        }
-      </span>
-      {liveActive && (
-        <span
-          aria-hidden="true"
-          className={`font-mono text-[12px] leading-none ${theme.text} animate-pulse flex-shrink-0`}
-        >
-          ▍
-        </span>
-      )}
+      {liveActive
+        ? <VirtualLiveTextBox text={tokenText} cursorClassName={theme.text} />
+        : <LegacyLiveText text={legacyText} />}
     </div>
   )
 }
