@@ -73,6 +73,14 @@ export function JsonlLiveTailCard({ lastTimestamp, pid, realTimeInfo, liveTokenT
           :                    `⚠ 沉默 ${formatDuration(silenceSec)} — API 可能长尾, 请耐心等待`
         }
       </span>
+      {liveActive && (
+        <span
+          aria-hidden="true"
+          className={`font-mono text-[12px] leading-none ${theme.text} animate-pulse flex-shrink-0`}
+        >
+          ▍
+        </span>
+      )}
     </div>
   )
 }

@@ -8,8 +8,8 @@ import { scrollDebug } from './scroll-debug'
 const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
 
 // LIVE token output is deliberately paced instead of rendering every network chunk.
-const LIVE_TOKEN_MAX_CHARS_PER_SECOND = 42
-const LIVE_TOKEN_MAX_BUFFER_CHARS = 320
+const LIVE_TOKEN_MAX_BUFFER_CHARS = 3200
+const LIVE_TOKEN_MAX_CHARS_PER_SECOND = 60
 const LIVE_TOKEN_TICK_MS = 50
 
 function latestLiveLine(value: string): string {
