@@ -9,6 +9,7 @@
  * 当前规则:
  *   - forgotten-flag 收尾折叠: forgotten-flag-scanner 检测到 "agent 停工但 running.flag 未删" 时,
  *     会注入一条系统 user 消息; agent 随后通常执行一串机械收尾动作. 这类卡片默认折叠.
+ *   - 闭源模型加密 reasoning 折叠: 推理正文不可解码, 只保留标题摘要, 默认折叠.
  *
  * forgotten-flag 触发条件严格按用户规则:
  *   mobius 的 forgotten-flag-scanner 检测到 "agent 停工但 running.flag 未删" 时, 会自动
@@ -23,6 +24,7 @@
  */
 import type { AnyEntry, JsonlViewItem } from './types'
 import { extractBashCalls } from './entry-extract'
+import { isUnreadableEncryptedReasoningEntry } from './entry-classify'
 
 // forgotten-flag 系统注入消息的标志句 (DEFAULT_FORGOTTEN_FLAG_MESSAGE 的开头).
 // 用整句而非单词 "running flag" 避免误命中 agent 自己提到 flag 的普通回复.
@@ -154,13 +156,18 @@ export function computeCollapsedByForgottenFlag(items: JsonlViewItem[]): Set<num
   const collapsed = new Set<number>()
   for (let i = 0; i < items.length; i++) {
     const item = items[i]
-    if (!itemContainsRunningFlag(item)) continue
-    const start = Math.max(0, i - FOLD_LOOKBACK)
-    let triggered = false
-    for (let j = i - 1; j >= start; j--) {
-      if (isForgottenFlagUserEntry(items[j].entry)) { triggered = true; break }
+    // Encrypted reasoning has no readable body; keep the card available but collapse it by default.
+    if (isUnreadableEncryptedReasoningEntry(item.entry)) {
+      collapsed.add(item.lineNo)
     }
-    if (triggered) collapsed.add(item.lineNo)
+    if (itemContainsRunningFlag(item)) {
+      const start = Math.max(0, i - FOLD_LOOKBACK)
+      let triggered = false
+      for (let j = i - 1; j >= start; j--) {
+        if (isForgottenFlagUserEntry(items[j].entry)) { triggered = true; break }
+      }
+      if (triggered) collapsed.add(item.lineNo)
+    }
   }
   return collapsed
 }

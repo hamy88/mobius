@@ -302,7 +302,16 @@ function taskUpdateEntry() {
   assert.equal(classify.isCompactFileReferenceAttachment(compactFileReference), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry(compactFileReference), true)
   assert.equal(classify.isCompactFileReferenceAttachment({ type: 'attachment', attachment: { type: 'file' } }), false)
-  assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'attachment', attachment: { type: 'file' } }), false)
+  const fileAttachment = {
+    type: 'attachment',
+    attachment: {
+      type: 'file',
+      filename: '/home/tianyi/imac-test/mobius/backend/services/pc-client-context.ts',
+      displayPath: 'mobius/backend/services/pc-client-context.ts',
+    },
+  }
+  assert.equal(classify.isFileAttachment(fileAttachment), true)
+  assert.equal(classify.isHiddenJsonlNoiseEntry(fileAttachment), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'mcp_tool_call_end' } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'agent_message', phase: 'final' } }), true)
   assert.equal(classify.isHiddenJsonlNoiseEntry({ type: 'event_msg', payload: { type: 'future_event', message: 'metadata' } }), true)

@@ -16,6 +16,17 @@ const result = await build({
 const dataUrl = 'data:text/javascript;base64,' + Buffer.from(result.outputFiles[0].text).toString('base64')
 const visibilityRules = await import(dataUrl)
 
+const foldResult = await build({
+  entryPoints: [path.resolve(__dirname, '../src/components/viewer/fold-rules.ts')],
+  bundle: true,
+  format: 'esm',
+  target: 'node18',
+  write: false,
+  logLevel: 'silent',
+})
+const foldDataUrl = 'data:text/javascript;base64,' + Buffer.from(foldResult.outputFiles[0].text).toString('base64')
+const foldRules = await import(foldDataUrl)
+
 const encryptedReasoning = (id) => ({
   type: 'response_item',
   id,
@@ -53,4 +64,11 @@ const filtered = visibilityRules.hideRepeatedEncryptedReasoning([
 ])
 
 assert.deepEqual(filtered.map((entry) => entry.lineNo), [10, 13, 14, 15, 16, 18])
+
+const collapsed = foldRules.computeCollapsedByForgottenFlag([
+  item(answer('before-fold'), 20),
+  item(encryptedReasoning('fold-me'), 21),
+  item(readableEncryptedReasoning, 22),
+])
+assert.deepEqual([...collapsed], [21])
 console.log('visibility-rules: consecutive encrypted reasoning keeps only the last card')

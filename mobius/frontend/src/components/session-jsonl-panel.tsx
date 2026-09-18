@@ -40,6 +40,11 @@ export function findLatestEntryTimestamp(entries: any[]): {
 
 type SessionJsonlPanelProps = {
   currentProjectId: string
+  // Stable identity for the currently displayed session. History-store
+  // instances may be replaced while data is loading; search highlights must
+  // survive that replacement but must be cleared when the user changes
+  // sessions.
+  sessionIdentity?: string
   chatContainerRef: RefObject<HTMLDivElement>
   endRef: RefObject<HTMLDivElement>
   // agent-history-store 实例 (快照订阅在本面板内部 — Chat 不随每条数据重渲染).
@@ -81,6 +86,7 @@ type SessionJsonlPanelProps = {
 
 function SessionJsonlPanelInner({
   currentProjectId,
+  sessionIdentity = '',
   chatContainerRef,
   endRef,
   historyStore,
@@ -117,15 +123,13 @@ function SessionJsonlPanelInner({
   // 面板本地保留本次目标，直到切换到另一份 historyStore（即离开当前会话）。
   const highlightTargetRef = useRef<{ uuid: string | null; ts: string | null } | null>(null)
   const previousClearSignalRef = useRef(searchHighlightClearSignal)
-  const previousStoreRef = useRef(historyStore)
+  const previousSessionIdentityRef = useRef(sessionIdentity)
   // Keep the target synchronously while rendering. The parent removes match/ts as soon as
   // scrolling completes; a passive effect here can lose a frame (and the highlight) when
   // that URL cleanup races the initial target capture.
-  if (previousStoreRef.current !== historyStore) {
-    // Do not discard a URL target during the normal null -> store initialization
-    // transition; clear only after an already-bound session is replaced.
-    if (previousStoreRef.current !== null) highlightTargetRef.current = null
-    previousStoreRef.current = historyStore
+  if (previousSessionIdentityRef.current !== sessionIdentity) {
+    highlightTargetRef.current = null
+    previousSessionIdentityRef.current = sessionIdentity
   }
   if (scrollToEntryUuid || scrollToMatchTs) {
     highlightTargetRef.current = { uuid: scrollToEntryUuid || null, ts: scrollToMatchTs || null }

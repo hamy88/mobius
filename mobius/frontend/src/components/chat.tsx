@@ -1982,13 +1982,20 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   }, [searchHits, matchUuid, matchTs])
   const targetForHit = useCallback((hit: SearchHitTarget | undefined) => {
     if (!hit) return
+    // Keep the active target synchronously. The URL is intentionally cleaned
+    // after scrolling, so relying on the next render to repopulate this ref
+    // lets a store refresh briefly drop the card highlight.
+    searchHighlightTargetRef.current = {
+      uuid: hit.uuid || null,
+      ts: hit.timestamp || null,
+    }
+    searchHighlightActiveRef.current = true
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
       if (hit.uuid) next.set('match', hit.uuid); else next.delete('match')
       if (hit.timestamp) next.set('ts', hit.timestamp); else next.delete('ts')
       return next
     }, { replace: true })
-    searchHighlightActiveRef.current = true
   }, [setSearchParams])
   const applySessionSearchHits = useCallback((hits: SessionSearchHit[], selectedIndex: number) => {
     const targets = hits
@@ -4430,6 +4437,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             快照订阅在面板内部 (Chat 不随每条数据重渲染); 条目驱动的自动滚底由旁边的 EntriesAutoScroll 承担. */}
         <SessionJsonlPanel
           currentProjectId={currentProjectId}
+          sessionIdentity={sessionIdForSearchHits}
           chatContainerRef={chatContainerRef}
           endRef={endRef}
           historyStore={historyStore}
