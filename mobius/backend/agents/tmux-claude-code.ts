@@ -58,6 +58,14 @@ const HOME = os.homedir()
 // Env-var proxy config (formerly proxy_envs.bash): prefer the new name, fall back to the old file.
 const PROXY_ENVS_FILE = path.join(HOME, 'proxy_envs.conf')
 const PROXY_ENVS_FILE_LEGACY = path.join(HOME, 'proxy_envs.bash')
+/*
+ * Resolve which proxy env-var file counts as configured: the new
+ * proxy_envs.conf when present, otherwise the legacy proxy_envs.bash.
+ *
+ * Only the prereq check asks this; the spawn command tries both names
+ * itself, so a host set up before the rename keeps working with no
+ * migration.
+ */
 function resolveProxyEnvsFile() {
   return fs.existsSync(PROXY_ENVS_FILE) ? PROXY_ENVS_FILE : PROXY_ENVS_FILE_LEGACY
 }
@@ -108,30 +116,54 @@ const BYPASS_WARN_SENTINELS = [
 ]
 const BYPASS_WARN_INTERVAL_MS = 1500
 
-// Main path: mark the cwd trusted in this service user's ~/.claude.json before starting the TUI.
-// claude persists trust per project path as projects[absPath].hasTrustDialogAccepted, with no
-// official CLI to set it (`claude project` only purges); --dangerously-skip-permissions does not skip
-// the trust dialog and -p/--bare is incompatible with the interactive TUI.
-// Idempotent: skip when already true, only ADD the key for a brand-new cwd (no claude process there
-// yet, so no race); tmp+rename lands the file atomically; failures never block startup — the ready
-// poll's screenshot auto-confirm is the fallback (belt and braces).
+// User-level claude config; projects[absPath] holds the directory trust flag.
 const CLAUDE_CONFIG = path.join(HOME, '.claude.json')
 
+/*
+ * Pre-mark the project directory as trusted in this service user's
+ * ~/.claude.json, so claude's first-run "Do you trust the files in this
+ * folder?" dialog never appears in the TUI. Done this way because no
+ * official CLI sets that flag (`claude project` only purges) and
+ * --dangerously-skip-permissions does not skip the trust dialog either;
+ * -p/--bare is incompatible with the interactive TUI.
+ *
+ * Idempotent: an entry already marked trusted is left untouched, and the
+ * key is only ADDed for an entry that is missing or untrusted — an
+ * existing entry belongs to the claude processes running there, so
+ * overwriting it could drop their state. tmp file + atomic rename keeps
+ * the shared config readable at all times.
+ *
+ * Returns false on any failure and never throws: startup must not be
+ * blocked by this, because the ready poll's screenshot auto-confirm with
+ * Enter is the fallback (belt and braces).
+ */
 function ensureProjectTrusted(cwd: string) {
   try {
+    // 信任按绝对路径记账，先归一化再查表
+    // Trust is keyed by absolute path, normalize before looking it up
     const abs = path.resolve(cwd)
+    // 配置文件还没生成，交给截屏兜底，不凭空造一个
+    // No config yet, leave it to the screenshot fallback, do not invent one
     if (!fs.existsSync(CLAUDE_CONFIG)) return false
     const j = JSON.parse(fs.readFileSync(CLAUDE_CONFIG, 'utf8'))
     if (!j.projects || typeof j.projects !== 'object') j.projects = {}
     const cur = j.projects[abs]
+    // 已经信任过就直接返回，不动别人的状态
+    // Already trusted, return without touching anyone else's state
     if (cur && cur.hasTrustDialogAccepted === true) return true
+    // 保留原字段只置信任位，整条覆盖会丢状态
+    // Keep existing keys, set only the trust bit; a full overwrite loses state
     j.projects[abs] = { ...(cur || {}), hasTrustDialogAccepted: true }
+    // 先写临时文件再原子改名，配置不会被读到一半
+    // Write tmp then rename atomically, the config is never read half-written
     const tmp = `${CLAUDE_CONFIG}.imac-tmp-${process.pid}-${Date.now()}`
     fs.writeFileSync(tmp, JSON.stringify(j, null, 2))
     fs.renameSync(tmp, CLAUDE_CONFIG)
     log(`[tmux-claude-code] 预置目录信任: ${abs} → ~/.claude.json`)
     return true
   } catch (e) {
+    // 失败只告警不抛出，启动照常走截屏自动确认
+    // Warn instead of throwing, startup still has the screenshot auto-confirm
     console.warn(`[tmux-claude-code] 预置目录信任失败 (走截屏兜底): ${e.message}`)
     return false
   }
@@ -151,20 +183,48 @@ const INITIAL_CONTEXT_DELAY_MS = 5000
 const INITIAL_CONTEXT_GREETING_CHOICES = ['hello', 'greeting', 'are you there', 'good day']
 
 // ── Module-level helpers (stateless) ────────────────────
+/*
+ * Whether the shared tmux hub session exists. A missing hub is a normal
+ * answer, not an error (the first createNewSession brings it up), so the
+ * exit status is used as the boolean directly.
+ * Only for callers that just want to know; anything that needs the hub to
+ * be there uses ensureHub.
+ */
 function hubExists() {
   return tmux(['has-session', '-t', HUB]).status === 0
 }
 
+/*
+ * Make sure the hub session that hosts one window per mobius session
+ * exists. Idempotent, so every spawn path can call it unconditionally;
+ * the hub runs no agent itself, it only holds windows, and the
+ * placeholder window created here (name "_root") is never addressed again.
+ */
 function ensureHub() {
   if (hubExists()) return
   const r = tmux(['new-session', '-d', '-s', HUB, '-n', '_root'])
+  // 建不出hub说明tmux有问题，在这里报错最清楚
+  // A hub that cannot be created means tmux is broken, fail here
   if (r.status !== 0) throw new Error(`tmux new-session 失败: ${r.stderr}`)
   log(`[tmux-claude-code] created tmux session ${HUB}`)
 }
 
+/*
+ * Whether a window named after the mobius sessionId exists in the hub.
+ * A live query, deliberately never the cached rows: control flow (create,
+ * terminate, pause, recovery) decides life and death from this answer, and
+ * a 3s-stale "exists" could kill a window that was just created.
+ * A tmux failure is reported as "does not exist": the caller then treats
+ * it as an absent window (and re-spawns), which also covers the hub being
+ * gone.
+ */
 function windowExists(name: string) {
   const r = tmux(['list-windows', '-t', HUB, '-F', '#{window_name}'])
+  // 查询失败当作不存在，调用方会按没有窗口处理
+  // A failed query counts as absent, callers then treat it as no window
   if (r.status !== 0) return false
+  // 按整行比对，前缀相同的sessionId不会互相误判
+  // Compare whole lines, so ids sharing a prefix never match each other
   return r.stdout.split('\n').includes(name)
 }
 
@@ -196,8 +256,21 @@ const CLAUDE_WORKING_TAIL_BYTES = 256 * 1024
 // Strip ANSI escapes before matching, otherwise the dim code between the tag and the word keeps the
 // idle TUI stuck in `working` forever.
 const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]/g
+/*
+ * Whether a jsonl user entry is the completion receipt of a /compact, the
+ * "<local-command-stdout>Compacted ...</local-command-stdout>" record.
+ * Claude Code encodes the whole compact bookkeeping as synthetic
+ * type:user records, so without this check a finished compact looks like
+ * a fresh user turn and an idle TUI stays "working" forever; this receipt
+ * is what proves the compact is over, and isWorking / containDequeueEvent
+ * both rely on that reading.
+ * Deliberately narrow: only this receipt matches, so a compact still in
+ * flight keeps reading as working until its acknowledgement is written.
+ */
 function isCompactCompletionUserEvent(entry: any) {
   if (!entry || entry.type !== 'user') return false
+  // content可能是字符串或文本块数组，先统一取纯文本
+  // content is a string or text blocks, reduce it to plain text first
   const content = entry.message?.content
   const text = Array.isArray(content)
     ? content
@@ -205,6 +278,8 @@ function isCompactCompletionUserEvent(entry: any) {
       .map((block) => block.text || '')
       .join('\n')
     : content
+  // 先剥掉ANSI转义再匹配，暗色码会夹在标签和单词之间
+  // Strip ANSI before matching, the dim code sits between tag and word
   return typeof text === 'string'
     && /<local-command-stdout>\s*Compacted\b/i.test(String(text).replace(ANSI_ESCAPE_RE, ''))
 }
@@ -229,9 +304,20 @@ const CLAUDE_STATUS_LINE_RE = /\(\d+(?:s|m\s+\d+s|h\s+\d+m\s+\d+s)[^()]*\)/u
 // without touching the other rule.
 const CLAUDE_RETRYING_LINE_RE = /·\s*Retrying\s+in\s+\d+s\s*·/i
 
+/*
+ * Pick claude's current status line out of a captured pane, or "" when
+ * there is none. Scan from the bottom: the TUI renders only the newest
+ * status, so the first match is the live one and the older scrollback
+ * lines that also match are ignored.
+ * Either shape counts, the elapsed-time status group or the API-retry line
+ * (see the two regexes above). The whole line is returned on purpose, so
+ * the UI keeps the spinner, the task description and the token counters
+ * that surround the matched group.
+ */
 function findClaudeRealTimeInfo(paneText: string) {
   const lines = String(paneText || '').split('\n')
-  // Scan bottom-up for the nearest status line (the TUI shows only one at a time).
+  // 自下往上扫，最近的一行才是当前状态
+  // Scan bottom-up, the nearest line is the current state
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]
     if (line && (CLAUDE_STATUS_LINE_RE.test(line) || CLAUDE_RETRYING_LINE_RE.test(line))) {
@@ -274,14 +360,31 @@ const _dangerHealState = new Map() // sessionId → { healing: boolean, lastWarn
 // spawn, capping capture-pane at ≤1/5s/session. ANSI escapes stripped; failure or no hit returns "".
 const PANE_TAIL_TTL_MS = 5 * 1000
 const _paneTailCache = new Map() // sessionId → { ts: number, text: string }
+/*
+ * Plain-text tail of a session's pane: last 25 lines, ANSI stripped.
+ * Shared by isWorking's background-agent fallback and realTimeInfo.
+ *
+ * The 5s TTL cache exists because capture-pane is a blocking spawnSync.
+ * /status polls every 2s and both callers used to spawn their own, so one
+ * entry per session caps it at one spawn per 5s.
+ *
+ * Never throws: a failed or empty capture is cached as "" like any other
+ * blank screen.
+ */
 function capturePaneTail(sessionId: string) {
   const now = Date.now()
   const cached = _paneTailCache.get(sessionId)
+  // 命中缓存直接返回，空串也算命中，失败不重复截屏
+  // Serve a cache hit at once, "" included, so failures are not re-captured
   if (cached && now - cached.ts < PANE_TAIL_TTL_MS) return cached.text
   let text = ''
   try {
+    // -p在此指打印到标准输出，-S -25只截尾部
+    // -p is print-to-stdout here, -S -25 keeps only the tail
     const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-25'])
     if (pane.status === 0 && pane.stdout) {
+      // 去掉ANSI转义，调用方只做纯文本匹配
+      // Strip ANSI escapes, callers only match plain text
       text = pane.stdout.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
     }
   } catch { /* best-effort: a failure returns "" */ }
@@ -289,11 +392,19 @@ function capturePaneTail(sessionId: string) {
   return text
 }
 
-// For the /stop hard-kill fallback: capture the pane's latest text (bypassing the 5s cache, so it
-// shows the true state after C-c) to decide whether the claude TUI is still running a turn. Two busy
-// anchors: a status line "(... ↓ tokens ...)" and "Waiting for N background agents to finish".
-// Any hit → C-c×3 did not take, still working; no hit → back to the idle input state, C-c worked.
-// Failure/empty → false (no escalation, so a normally soft-stopped window is never killed by mistake).
+/*
+ * Hard-kill probe for /stop: reads the pane's newest text directly,
+ * bypassing the 5s cache, so it shows the state after the C-c burst and
+ * whether a turn is still running.
+ *
+ * Two busy anchors count: the elapsed-time status line, and "Waiting for N
+ * background agents to finish", the one state the jsonl cannot express.
+ *
+ * This only escalates a stop that already failed. _pauseImpl asks twice
+ * before killing, so a hit alone never kills anything; a failed or empty
+ * capture returns false (no escalation), so a normally soft-stopped window
+ * is never killed.
+ */
 function claudePaneStillBusy(sessionId: string) {
   let text = ''
   try {
@@ -303,30 +414,60 @@ function claudePaneStillBusy(sessionId: string) {
     }
   } catch { /* best-effort: a failure means not busy, no escalation */ }
   if (!text) return false
+  // 任一忙锚点命中即仍在跑，都不命中说明已空闲
+  // Either anchor hit means running, neither means back to idle
   return CLAUDE_STATUS_LINE_RE.test(text) || CLAUDE_BG_AGENTS_WAITING_RE.test(text)
 }
 
-// Whether the claude TUI is currently stuck on the dangerous-operation permission box. Returns
-// { pending, warning }, warning being the full "Dangerous <kind> operation on <reason>: <target>" line.
-// All three traits must hit — the danger line + "Do you want to proceed?" + "Esc to cancel" — to count
-// as "stuck on the box" (all three on screen is a strong signal, so stale danger text left in
-// scrollback or output cannot fool it).
+/*
+ * Whether the claude TUI is stuck on the dangerous-operation permission
+ * box, and which command it warns about: { pending, warning }, warning
+ * being the full "Dangerous <kind> operation on <reason>: <target>" line,
+ * or null.
+ *
+ * All three traits must be on screen at once (the danger line, "Do you
+ * want to proceed?" and "Esc to cancel"), so a stale danger sentence left
+ * in the scrollback, or printed by ordinary output, cannot fake a dialog.
+ */
 function detectDangerPermission(text: string) {
   if (!text) return { pending: false, warning: null }
   const m = text.match(CLAUDE_DANGER_OPERATION_RE)
+  // 没有危险命令行就不是这个框
+  // No danger line means this is not that dialog
   if (!m) return { pending: false, warning: null }
+  // 三个特征必须同时在屏，缺一个就不认
+  // All three traits must be on screen at once, one missing means no dialog
   if (!/Do you want to proceed\?/.test(text) || !/Esc to cancel/.test(text)) {
     return { pending: false, warning: null }
   }
+  // 返回整行警告，自愈提示词要原样引用它
+  // Return the whole warning line, the heal quotes it back verbatim
   return { pending: true, warning: m[0].trim() }
 }
 
+/*
+ * Parsed `list-windows -F` rows for the hub, served from a 3s cache. The
+ * columns are window_name, pane_pid, window_index, window_activity,
+ * pane_dead and pane_current_command — what isAlive / listSessions / the
+ * syncer read back on every poll.
+ *
+ * Status queries poll every 2~5s, and one /status used to spawn
+ * list-windows three times over (isAlive, isWorking's inner isAlive,
+ * listSessions), each one a blocking spawnSync; a single slow tmux then
+ * stalled the event loop and queued every request behind it.
+ *
+ * Control flow must NOT use this cache: acting on rows up to 3s old could
+ * kill a window that was just created. Create / terminate / pause call
+ * windowExists instead.
+ */
 function listWindowsRowsCached() {
   const now = Date.now()
   if (_listWindowsCache && now - _listWindowsCache.ts < LIST_WINDOWS_TTL_MS) {
     return _listWindowsCache.rows
   }
   const r = tmux(['list-windows', '-t', HUB, '-F', '#{window_name}|#{pane_pid}|#{window_index}|#{window_activity}|#{pane_dead}|#{pane_current_command}'])
+  // tmux失败也缓存空表，避免轮询里反复失败
+  // A failed tmux caches an empty list, so polls do not repeat the failure
   const rows = r.status === 0
     ? r.stdout.trim().split('\n').filter(Boolean).map((l: string) => l.split('|'))
     : []
@@ -334,28 +475,60 @@ function listWindowsRowsCached() {
   return rows
 }
 
-// cwd → subdirectory name under ~/.claude/projects/. Every non-alphanumeric character becomes '-'.
-// e.g. /home/u/cc-workspace/foo_bar → -home-u-cc-workspace-foo-bar
+/*
+ * Map a cwd to the directory name claude uses under ~/.claude/projects/:
+ * every character outside [a-zA-Z0-9] becomes '-', so the mapping is lossy
+ * and the name cannot be turned back into a path.
+ * e.g. /home/u/cc-workspace/foo_bar → -home-u-cc-workspace-foo-bar
+ */
 function encodeCwd(cwd: string) {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
+/*
+ * Absolute path of the transcript claude writes for one session:
+ * ~/.claude/projects/<encoded cwd>/<claude session uuid>.jsonl.
+ * Derived, never probed: callers run fs.existsSync themselves when they
+ * must know whether the file is there (a resume whose jsonl is missing
+ * degrades to a fresh session, see _spawnWindow).
+ */
 function jsonlPathOf(cwd: string, claudeSessionId: string) {
   return path.join(HOME, '.claude', 'projects', encodeCwd(cwd), `${claudeSessionId}.jsonl`)
 }
 
+/*
+ * Quote one value for the bash -lc command line, escaping embedded single
+ * quotes the '\'' way (close quote, escaped quote, reopen).
+ * Needed because the claude arguments are joined into a single shell
+ * string: a model id or a path with a space would otherwise split into two
+ * arguments.
+ */
 function shellQuote(s: string) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`
 }
 
+/*
+ * Normalize the legacy per-session useProxy flag, which arrives from json:
+ * a boolean, 0/1, or the strings "0" / "1" / "false" / "true".
+ * Anything unrecognized (null, undefined, a stray object) takes the
+ * caller's fallback rather than false: in that older data an absent field
+ * meant "not configured", not "off".
+ */
 function normalizeUseProxy(value: unknown, fallback = true) {
   if (value === false || value === 0 || value === '0' || value === 'false') return false
   if (value === true || value === 1 || value === '1' || value === 'true') return true
   return !!fallback
 }
 
-// Normalize the four proxy modes: direct | env | proxychains | env_proxychains.
-// Legacy booleans: true→env_proxychains (the old env+proxychains double track), false/null→direct.
+/*
+ * Normalize the four proxy modes to 'direct' | 'env' | 'proxychains' |
+ * 'env_proxychains'.
+ *
+ * The legacy booleans of rows written before modes existed keep their old
+ * meaning: true → 'env_proxychains' (the old env + proxychains double
+ * track), false/null → 'direct'. Anything unmapped takes the fallback, so
+ * a bad value in a persisted row cannot silently select a proxy path.
+ */
 function normalizeProxyMode4(value: unknown, fallback = 'direct') {
   if (value === 'env' || value === 'proxychains' || value === 'env_proxychains') return value
   if (value === 'direct') return 'direct'
@@ -364,8 +537,24 @@ function normalizeProxyMode4(value: unknown, fallback = 'direct') {
   return fallback
 }
 
+/*
+ * The single decision point for a session's proxy settings: both dispatch
+ * and spawn call it, which is what keeps forceNoProxy / useProxy /
+ * proxyMode from ever contradicting each other within one session.
+ *
+ * forceNoProxy wins outright (mode 'direct'); otherwise the explicit
+ * 4-value mode is used, and only a null mode falls back to the legacy
+ * useProxy boolean (true → 'env_proxychains', false → 'direct').
+ *
+ * The returned useProxy is derived from the mode ('direct' ⇔ false) rather
+ * than copied from the argument, and fallbackUseProxy supplies the legacy
+ * value for an old persisted row that carries neither a mode nor a usable
+ * flag.
+ */
 function resolveClaudeProxyMode(useProxy: boolean, forceNoProxy: boolean = false, fallbackUseProxy: boolean = false, proxyMode: string | null = null) {
   const forced = !!forceNoProxy
+  // 强制直连时不再看任何模式，一律判为direct
+  // A forced direct ignores every mode and resolves to 'direct'
   const mode = forced
     ? 'direct'
     : normalizeProxyMode4(proxyMode, normalizeUseProxy(useProxy, fallbackUseProxy) ? 'env_proxychains' : 'direct')
@@ -376,35 +565,60 @@ function resolveClaudeProxyMode(useProxy: boolean, forceNoProxy: boolean = false
   }
 }
 
-// Required deps per mode: the env mode needs the proxy_envs file, proxychains needs conf + bin.
+/*
+ * Which proxy dependencies the given mode is missing, as display strings
+ * ("file: ...", "bin (PATH): ..."; [] when complete). env modes need the
+ * env-var file, proxychains modes need the proxychains config (new name,
+ * legacy proxy_claude.conf accepted) plus the binary on PATH.
+ *
+ * Returned rather than thrown so both callers can pick their own severity:
+ * preflight warns (sessions on other modes still start),
+ * assertProxyAvailable fails the spawn.
+ */
 function proxyPrereqMissing(mode = 'env_proxychains') {
   const missing: string[] = []
+  // 只查该模式用到的依赖，没用到的不算缺失
+  // Check only what the mode uses, unused deps are not missing
   const needEnv = mode === 'env' || mode === 'env_proxychains'
   const needChains = mode === 'proxychains' || mode === 'env_proxychains'
   if (needEnv && !fs.existsSync(resolveProxyEnvsFile())) missing.push(`file: ${resolveProxyEnvsFile()}`)
   if (needChains) {
+    // 旧名配置仍算数，有一个在就算齐
+    // The legacy conf name still counts, either file satisfies it
     if (!fs.existsSync(PROXY_CONF) && !fs.existsSync(path.join(HOME, 'proxy_claude.conf'))) missing.push(`file: ${PROXY_CONF}`)
     if (spawnSync('which', ['proxychains']).status !== 0) missing.push('bin (PATH): proxychains')
   }
   return missing
 }
 
+/*
+ * Throwing wrapper around proxyPrereqMissing for the spawn path: a session
+ * configured to go through a proxy must never quietly start up direct,
+ * since that would leak the traffic the operator wanted routed, so a
+ * missing dependency fails the spawn with the full list.
+ * The message names the mode, so it stays clear which one was attempted.
+ */
 function assertProxyAvailable(mode = 'env_proxychains') {
   const missing = proxyPrereqMissing(mode)
   if (missing.length) throw new Error(`代理依赖缺失 (${mode}): ${missing.join(', ')}`)
 }
 
-// Task running flag: <root>/.imac/flags/<sessionId>/running.flag
-// root = flagRoot (the project repo root, bind_path); equal to cwd outside a worktree and the repo
-// root rather than cwd inside one — so the agent's first step of cleaning/rebuilding the worktree
-// directory cannot delete the flag by mistake. Every prompt submission refreshes running.flag and the
-// agent removes it on completion, success or failure (see the session-context hint).
-// isJobGoalAccomplished reads whether the file is still there.
-// dispatch contract: the caller passes modelLaunchOptions (the whole output of
-// model-registry.modelLaunchOptionsFor); this backend unpacks what it needs (model / settingsPath /
-// proxy mode), the old flat fields being a compatibility fallback.
+/*
+ * Read the launch fields this backend needs out of a dispatch: model,
+ * settingsPath and the proxy trio, plus captureStream. The flat legacy
+ * fields (opts.model, opts.useProxy, ...) are only a compatibility
+ * fallback for callers that never went through the model registry;
+ * modelLaunchOptions wins when it is present.
+ *
+ * Absent values stay null / false / 'direct' rather than being invented,
+ * so the callers, which prefer their persisted runtime row, can tell "not
+ * given" from "given as X". Keep useProxy and proxyMode in step: a forced
+ * direct pins both.
+ */
 function unpackLaunch(opts: ClaudeDispatchOpts): { model: string | null; settingsPath: string | null; useProxy: boolean; proxyMode: string; forceNoProxy: boolean; captureStream: boolean } {
   const launch = (opts?.modelLaunchOptions || {}) as Record<string, any>
+  // 布尔字段要求严格为true，字符串不算
+  // The booleans need a strict true, a string "true" does not count
   return {
     model: launch.model || opts.model || null,
     settingsPath: launch.settingsPath || opts.settingsPath || null,
@@ -415,29 +629,69 @@ function unpackLaunch(opts: ClaudeDispatchOpts): { model: string | null; setting
   }
 }
 
+/*
+ * Drop (and refresh) the session's running flag,
+ * <root>/.imac/flags/<sessionId>/running.flag: the out-of-process signal
+ * that a task is in flight. The agent removes it when the task ends,
+ * success or failure, per the session-context hint, and
+ * isJobGoalAccomplished reads its presence.
+ *
+ * root is flagRoot, the project repo root (bind_path): the same as cwd
+ * outside a worktree, but the repo root rather than cwd inside one, so the
+ * agent's first step of cleaning / rebuilding the worktree cannot delete
+ * the flag by mistake.
+ *
+ * safeWriteRunningFlag swallows fs errors: a flag that cannot be written
+ * must not fail the prompt dispatch.
+ */
 function markRunning(root: string | null | undefined, sessionId: string) {
   return safeWriteRunningFlag(root, sessionId, {}, 'tmux-claude-code')
 }
 
+/*
+ * Remove running.flag, i.e. declare the task finished from our side. Only
+ * the interrupt-only /stop path calls it (empty prompt: nothing new is
+ * queued, so nothing may stay marked as running); on a normal completion
+ * the agent removes the flag itself.
+ */
 function clearRunning(root: string | null | undefined, sessionId: string) {
   return safeRemoveRunningFlag(root, sessionId, 'tmux-claude-code')
 }
 
-// Trailing ASCII run of text (5~15 chars) used as the capture-pane marker for a paste landing.
-// CJK/special characters do not render glyph-for-glyph in a tmux pane, so an ASCII tail is safer.
+/*
+ * Trailing run of printable ASCII (5~15 chars) at the end of the prompt,
+ * used as the capture-pane probe that proves a paste landed.
+ * CJK and box-drawing characters do not render glyph-for-glyph in a tmux
+ * pane, so only an ASCII tail can be matched back reliably. Trailing
+ * whitespace is skipped first; a tail shorter than 5 chars, or one cut
+ * short by a non-ASCII character, returns null, which sends the caller to
+ * the length-scaled sleep instead.
+ */
 function findAsciiTailMarker(text: string) {
   const ASCII = /[\x20-\x7E]/
   let i = text.length - 1
+  // 先跳过末尾空白，否则探针会带上看不见的字符
+  // Skip trailing whitespace first, or the probe carries invisible chars
   while (i >= 0 && /\s/.test(text[i])) i--
   let tail = ''
+  // 从后往前收可打印ASCII，遇非ASCII即停
+  // Collect printable ASCII backwards, stop at non-ASCII (cap 15)
   while (i >= 0 && tail.length < 15) {
     if (!ASCII.test(text[i])) break
     tail = text[i] + tail
     i--
   }
+  // 太短的探针在面板里到处能撞上，宁可不探改用等待
+  // A probe this short matches all over the pane, sleep instead
   return tail.length >= 5 ? tail : null
 }
 
+/*
+ * Promise-based pause, the only sleep idiom this backend uses: the async
+ * paths (ready poll, paste probe, submit-echo gaps) must not block node's
+ * event loop the way a spawnSync('sleep') would — every session shares
+ * that loop with the HTTP server, so a blocking sleep freezes them all.
+ */
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }

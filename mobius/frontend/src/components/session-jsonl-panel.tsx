@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from 'react'
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import type { SessionHistoryStore } from '../services/agent-history-store'
@@ -72,6 +72,8 @@ type SessionJsonlPanelProps = {
   onEasyRoundCountChange?: (count: number) => void
   easyExpandAllSignal?: number
   variant?: 'standard' | 'easy'
+  // Replaces the conversation contents while preserving the panel and scroll container.
+  exclusiveContent?: ReactNode
 }
 
 function SessionJsonlPanelInner({
@@ -103,6 +105,7 @@ function SessionJsonlPanelInner({
   onEasyRoundCountChange,
   easyExpandAllSignal,
   variant = 'standard',
+  exclusiveContent,
 }: SessionJsonlPanelProps) {
   // 订阅下沉: 快照/摊平条目/派生值都在本组件内算, Chat 只递 store.
   const historySnapshot = useHistorySnapshotOf(historyStore)
@@ -223,50 +226,55 @@ function SessionJsonlPanelInner({
           }
         }}
       >
-        <div className="px-5 py-5" style={variant === 'easy' ? { paddingBottom: 176 } : undefined}>
-          <VSCodeOpenProvider projectId={currentProjectId}>
-            {variant === 'easy' ? (
-              <Suspense fallback={<div className="py-10 text-center text-[12px] text-[var(--text-muted)]">正在整理简易对话...</div>}>
-                <EasyJsonlView
-                  entries={visibleJsonl}
+        <div
+          className={exclusiveContent == null ? 'px-5 py-5' : 'flex min-h-full items-center justify-center p-4'}
+          style={exclusiveContent == null && variant === 'easy' ? { paddingBottom: 176 } : undefined}
+        >
+          {exclusiveContent == null ? (
+            <VSCodeOpenProvider projectId={currentProjectId}>
+              {variant === 'easy' ? (
+                <Suspense fallback={<div className="py-10 text-center text-[12px] text-[var(--text-muted)]">正在整理简易对话...</div>}>
+                  <EasyJsonlView
+                    entries={visibleJsonl}
+                    emptyLoadingText={jsonlEmptyLoadingText}
+                    initialLoading={jsonlInitialLoading}
+                    working={!!(backendAlive && backendWorking)}
+                    liveText={realTimeInfo}
+                    scrollToEntryUuid={effectiveScrollToEntryUuid}
+                    scrollToMatchTs={effectiveScrollToMatchTs}
+                    onScrollResolved={onMatchScrollResolved}
+                    onRoundCountChange={onEasyRoundCountChange}
+                    expandAllSignal={easyExpandAllSignal}
+                  />
+                </Suspense>
+              ) : (
+                <JsonlView
+                  snapshot={historySnapshot}
+                  store={historyStore}
+                  title=""
                   emptyLoadingText={jsonlEmptyLoadingText}
                   initialLoading={jsonlInitialLoading}
-                  working={!!(backendAlive && backendWorking)}
-                  liveText={realTimeInfo}
+                  showMeta={showJsonlMeta}
                   scrollToEntryUuid={effectiveScrollToEntryUuid}
                   scrollToMatchTs={effectiveScrollToMatchTs}
+                  searchNavigationRequested={!!(scrollToEntryUuid || scrollToMatchTs)}
                   onScrollResolved={onMatchScrollResolved}
-                  onRoundCountChange={onEasyRoundCountChange}
-                  expandAllSignal={easyExpandAllSignal}
+                  onPauseToDequeue={onPauseToDequeue}
                 />
-              </Suspense>
-            ) : (
-              <JsonlView
-                snapshot={historySnapshot}
-                store={historyStore}
-                title=""
-                emptyLoadingText={jsonlEmptyLoadingText}
-                initialLoading={jsonlInitialLoading}
-                showMeta={showJsonlMeta}
-                scrollToEntryUuid={effectiveScrollToEntryUuid}
-                scrollToMatchTs={effectiveScrollToMatchTs}
-                searchNavigationRequested={!!(scrollToEntryUuid || scrollToMatchTs)}
-                onScrollResolved={onMatchScrollResolved}
-                onPauseToDequeue={onPauseToDequeue}
-              />
-            )}
-            {variant === 'standard' && backendAlive && backendWorking && (
-              <JsonlLiveTailCard
-                lastTimestamp={lastTimestamp}
-                pid={backendPid}
-                realTimeInfo={realTimeInfo}
-              />
-            )}
-            <div ref={endRef} />
-          </VSCodeOpenProvider>
+              )}
+              {variant === 'standard' && backendAlive && backendWorking && (
+                <JsonlLiveTailCard
+                  lastTimestamp={lastTimestamp}
+                  pid={backendPid}
+                  realTimeInfo={realTimeInfo}
+                />
+              )}
+              <div ref={endRef} />
+            </VSCodeOpenProvider>
+          ) : exclusiveContent}
         </div>
       </div>
-      {hasNewMessages && (
+      {exclusiveContent == null && hasNewMessages && (
         <div className="flex justify-center py-1 flex-shrink-0">
           <button onClick={onJumpToBottom} className="px-4 py-1.5 text-[12px] bg-blue-500/90 text-white rounded-full hover:bg-blue-500 transition-colors shadow-md flex items-center gap-1.5">
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
@@ -274,7 +282,7 @@ function SessionJsonlPanelInner({
           </button>
         </div>
       )}
-      {searchHits.length > 0 && (searchHighlightActiveRef?.current || searchHighlightTargetRef?.current) && (
+      {exclusiveContent == null && searchHits.length > 0 && (searchHighlightActiveRef?.current || searchHighlightTargetRef?.current) && (
         <div className="flex justify-center py-1 flex-shrink-0">
           <div className="inline-flex items-center gap-1 rounded-full border border-red-500/50 bg-red-500/10 px-1.5 py-1 shadow-md" role="group" aria-label="搜索命中导航">
             <span className="px-2 text-[11px] font-semibold text-red-100">查看命中</span>

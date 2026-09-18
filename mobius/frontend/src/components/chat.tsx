@@ -3959,6 +3959,33 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     </div>
   )
 
+  const showSessionStartModal = !!(
+    currentSession
+    && historyLoaded
+    && ((currentSession as any).message_count || 0) === 0
+    && messages.length === 0
+    && !streamContent
+    && !isTyping
+    && !isFireAndForgetSession(sessionId)
+    && sessionId
+    && !startDismissed.has(sessionId)
+  )
+  const startModalSessionId = showSessionStartModal ? sessionId : null
+  const sessionStartContent = startModalSessionId ? (
+    <SessionStartModal
+      key={startModalSessionId}
+      sessionName={currentSession?.name}
+      sessionDescription={(currentSession as any)?.description || ''}
+      autoConfirm={!isGuidedDemoSession(startModalSessionId)}
+      onConfirm={async () => {
+        // Errors remain visible in the confirmation card; dismiss only after a successful send.
+        await startSession()
+        dismissStartModal(startModalSessionId)
+      }}
+      onDismiss={() => dismissStartModal(startModalSessionId)}
+    />
+  ) : null
+
   const renderAdvancedSessionActions = (variant: 'default' | 'compact' | 'menu') => (
     // 计数槽: Chat 不订阅快照, 条目计数由小组件自取 (只在计数变化时重渲染这一小块).
     <JsonlCountSlot store={historyStore}>
@@ -4371,6 +4398,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           onEasyRoundCountChange={handleEasyRoundCountChange}
           easyExpandAllSignal={easyExpandAllSignal}
           variant={layout === 'easy' ? 'easy' : 'standard'}
+          exclusiveContent={sessionStartContent}
         />
         <EntriesAutoScroll
           store={historyStore}
@@ -5094,31 +5122,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         </div>
       )}
 
-      {/* Session 尚未开始时弹出的"是否开始执行?"确认窗.
-          多重门禁防止打开瞬间闪烁:
-            1. historyLoaded=true: 必须等 bootstrap history 或 SSE history 至少成功返回一次, 否则连"是否为空"都还不知道.
-            2. message_count===0: 元数据上确认这个 session 从未产生过消息.
-            3. messages.length===0 && !typing && !stream: 本地视图当下也确实是空白态.
-            4. 用户尚未在本次浏览中 dismiss 过. */}
-      {currentSession
-        && historyLoaded
-        && ((currentSession as any).message_count || 0) === 0
-        && messages.length === 0
-        && !streamContent && !isTyping
-        && !isFireAndForgetSession(sessionId)
-        && sessionId && !startDismissed.has(sessionId) && (
-        <SessionStartModal
-          sessionName={currentSession.name}
-          sessionDescription={(currentSession as any).description || ''}
-          autoConfirm={!isGuidedDemoSession(sessionId)}
-          onConfirm={async () => {
-            // 抛错由 modal 内部 catch 后显示, 这里只在成功时 dismiss
-            await startSession()
-            dismissStartModal(sessionId)
-          }}
-          onDismiss={() => dismissStartModal(sessionId)}
-        />
-      )}
     </div>
   )
 }

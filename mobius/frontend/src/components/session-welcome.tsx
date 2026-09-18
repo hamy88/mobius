@@ -84,8 +84,9 @@ export function SessionStartModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 msg-enter"
-      style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)' }}
+      className="flex w-full items-center justify-center msg-enter"
+      role="dialog"
+      aria-labelledby="session-start-modal-title"
     >
       <div
         data-tour="session-start-modal"
@@ -99,7 +100,7 @@ export function SessionStartModal({
             <Rocket className="w-5 h-5" strokeWidth={1.75} />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-[15px] font-semibold mb-0.5" style={{ color: 'var(--text-primary)' }}>
+            <div id="session-start-modal-title" className="text-[15px] font-semibold mb-0.5" style={{ color: 'var(--text-primary)' }}>
               是否开始执行?
             </div>
             <div className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
