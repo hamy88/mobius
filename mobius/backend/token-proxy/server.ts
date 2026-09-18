@@ -17,6 +17,7 @@
  *
  * /token_stream:
  *   - SSE live tail (默认): 连上先推 snapshot(buckets 完整请求), 之后逐 delta 推 token(实时雨滴).
+ *   - ?only_latest=1: 只推订阅建立之后的新 token, 不发送历史 snapshot.
  *   - ?poll=1 返回 JSON 快照; ?session=<id> 过滤单会话.
  *   供主后端 /api/token_stream 反代 → matrix-rain 拓展消费.
  *
@@ -81,12 +82,31 @@ function flushRequest(bucket: AgentBucket, req: CompleteRequest, now: number): v
 
 // ── 实时订阅 (逐 delta 推送, 不入缓存) ─────────────────────────────────────
 // 缓存存完整请求; 数字雨实时渲染仍需逐 delta 的雨滴, 走这条实时推送.
-type Subscriber = (msg: any) => void
+interface LiveTokenMessage {
+  seq: number
+  session: string
+  agent: string | null
+  model: string
+  kind: 'content' | 'reason'
+  text: string
+  ts: number
+}
+
+type Subscriber = (msg: LiveTokenMessage) => void
 const subscribers = new Set<Subscriber>()
+let nextDeltaSequence = 0
 
 function pushDelta(sessionId: string, agent: string | null, model: string, kind: 'content' | 'reason', text: string): void {
   if (!text) return
-  const msg = { session: sessionId, agent, model, kind, text, ts: Date.now() }
+  const msg: LiveTokenMessage = {
+    seq: ++nextDeltaSequence,
+    session: sessionId,
+    agent,
+    model,
+    kind,
+    text,
+    ts: Date.now(),
+  }
   for (const sub of subscribers) {
     try { sub(msg) } catch { /* 单个订阅者异常不影响其他 */ }
   }
@@ -324,10 +344,12 @@ app.get('/healthz', (_req, res) => {
 })
 
 // /token_stream: SSE live tail (默认) 或 ?poll=1 JSON 快照. 支持 ?session=<id> 过滤.
+// SSE 加 ?only_latest=1 时跳过历史 snapshot, 只接收订阅建立后的 token.
 // 被主后端 /api/token_stream 反代; 纯只读 token 字符, 无敏感信息.
 app.get('/token_stream', (req, res) => {
   const wantPoll = req.query.poll === '1' || req.query.poll === 'true'
   const session = typeof req.query.session === 'string' && req.query.session ? req.query.session : null
+  const onlyLatest = Object.prototype.hasOwnProperty.call(req.query, 'only_latest')
 
   const snapshot = (): any[] => {
     const list: any[] = []
@@ -348,14 +370,22 @@ app.get('/token_stream', (req, res) => {
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   })
-  // 连接时先推一次快照 (完整请求), 前端立刻有料可回放.
-  res.write(`event: snapshot\ndata: ${sseDataLine({ buckets: snapshot() })}\n\n`)
+  // Capture the boundary before registering the subscriber. The handler is
+  // synchronous, so no delta can interleave between these two operations.
+  const subscriptionStartSequence = nextDeltaSequence
   const sub: Subscriber = (msg) => {
     if (session && msg.session !== session) return
+    if (onlyLatest && msg.seq <= subscriptionStartSequence) return
     if (res.writableEnded || res.destroyed) return
-    res.write(`event: token\ndata: ${sseDataLine(msg)}\n\n`)
+    const { seq: _seq, ...payload } = msg
+    res.write(`event: token\ndata: ${sseDataLine(payload)}\n\n`)
   }
   subscribers.add(sub)
+  // Default subscribers receive the complete history snapshot; only_latest
+  // starts empty and therefore shows exclusively text arriving afterwards.
+  if (!onlyLatest) {
+    res.write(`event: snapshot\ndata: ${sseDataLine({ buckets: snapshot() })}\n\n`)
+  }
   const keepalive = setInterval(() => {
     if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n')
   }, 20000)
