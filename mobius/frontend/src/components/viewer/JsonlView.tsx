@@ -108,6 +108,31 @@ function findItemInRounds(rounds: Round[], uuid: string | null | undefined, ts: 
   return null
 }
 
+// 搜索后端扫描的是原始 JSONL，而部分命中载体 (例如 event_msg / Codex
+// response_item 的镜像消息) 会在查看器中按噪声规则隐藏。精确时间戳因此可能找不到
+// 可见条目；在已经确定所属 group 后，退回到该 group 内时间最近的可见卡片，确保
+// 每个命中都能落到具体卡片并显示红框，而不是只停在 group 标题。
+function findClosestItemInRound(round: Round, ts: string | null | undefined): JsonlViewItem | null {
+  if (!ts) return null
+  const targetMs = Date.parse(ts)
+  if (!Number.isFinite(targetMs)) return null
+  let best: { item: JsonlViewItem; distance: number } | null = null
+  for (const item of round.items || []) {
+    const candidates = [
+      entryTimestamp(item.entry),
+      ...(item.bashResults || []).map((result: any) => entryTimestamp(result?.entry)),
+      ...(item.readResults || []).map((result: any) => entryTimestamp(result?.entry)),
+    ]
+    for (const value of candidates) {
+      const ms = Date.parse(value)
+      if (!Number.isFinite(ms)) continue
+      const distance = Math.abs(ms - targetMs)
+      if (!best || distance < best.distance) best = { item, distance }
+    }
+  }
+  return best?.item || null
+}
+
 // 组条目 → 渲染流水线 (与旧版整列表流水线相同, 逐组独立跑; lineNo = 组基址 + 组内序).
 function entryTimestamp(entry: AnyEntry): string {
   return String(entry?.timestamp || entry?.created_at || entry?.message?.created_at || entry?.payload?.timestamp || '')
@@ -404,7 +429,15 @@ export function JsonlView({
     if (!owner) owner = rounds[0]
     if (!owner) { onResolvedRef.current?.(); return }
     if (owner.entries.length === 0) { storeRef.current?.ensureGroupEntries(owner.meta.id); return }
-    // 组已加载但条目里没有 (被噪声过滤/窗口截掉): 至少滚到所属组.
+    // 原始命中可能来自查看器主动隐藏的 event_msg / 镜像消息。组已加载时，
+    // 用该组内时间最近的可见卡片承接命中，避免只滚到 group 标题而没有具体红框。
+    const closest = findClosestItemInRound(owner.round, scrollToMatchTs)
+    if (closest) {
+      setExtFocusLineNo(closest.lineNo)
+      setExtTarget({ key: roundKeyOf(owner.meta.id), offset: headerRef.current?.offsetHeight ?? 0 })
+      return
+    }
+    // 组已加载但条目里没有可见候选 (被噪声过滤/窗口截掉): 至少滚到所属组.
     setExtFocusLineNo(null)
     setExtTarget({ key: roundKeyOf(owner.meta.id), offset: headerRef.current?.offsetHeight ?? 0 })
     // eslint-disable-next-line react-hooks/exhaustive-deps
