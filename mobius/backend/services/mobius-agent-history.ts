@@ -598,7 +598,8 @@ function writeMobiusCoreEntry(args: {
   cwd?: any;
   backendName?: any;
   primaryPath?: string | null;
-  containDequeueEvent?: (entry: any) => boolean;
+  containDequeueEvent?: (entry: any, pendingInputs?: string[]) => boolean;
+  pendingInputs?: string[];
 } & MobiusCoreRecord): boolean {
   const sessionId = args.sessionId;
   if (!sessionId) return false;
@@ -614,7 +615,7 @@ function writeMobiusCoreEntry(args: {
     // 本轮 opener 排在最后 — 组序 = 时间序. (路径未知 = 新会话无迁移源, 直接建行,
     // 迁移标记保持 0, 由首次 sync 检查.)
     if (args.primaryPath) {
-      try { syncSession(sessionId, args.primaryPath, args.containDequeueEvent); } catch {}
+      try { syncSession(sessionId, args.primaryPath, args.containDequeueEvent, args.pendingInputs); } catch {}
     }
     if (!st.getState.get(sessionId)) {
       st.insertState.run(sessionId, args.primaryPath || '');
@@ -676,13 +677,14 @@ function writeMobiusErrorEntry(args: {
   cwd?: any;
   backendName?: any;
   primaryPath?: string | null;
-  containDequeueEvent?: (entry: any) => boolean;
+  containDequeueEvent?: (entry: any, pendingInputs?: string[]) => boolean;
+  pendingInputs?: string[];
   error?: any;
 }): boolean {
   const sessionId = args.sessionId;
   if (!sessionId) return false;
   if (args.primaryPath) {
-    try { syncSession(sessionId, args.primaryPath, args.containDequeueEvent); } catch {}
+    try { syncSession(sessionId, args.primaryPath, args.containDequeueEvent, args.pendingInputs); } catch {}
   }
   const st = S();
   if (!st.getState.get(sessionId)) {
@@ -749,7 +751,7 @@ function markError(sessionId: string, message: string): SyncResult {
 
 // [legacy-migration] 第四个参数: 迁移源 (无则纯原生轨扫描); 第五个: 本次调用是否结算迁移标记.
 // 第六个: 出队事件检测 (缺省恒 true = 立即出队). 删除迁移时一并删掉 legacy 相关参数.
-function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'members', legacy: LegacyBackfill | null, markLegacyDone: boolean, containDequeueEvent?: (entry: any) => boolean): SyncResult {
+function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'members', legacy: LegacyBackfill | null, markLegacyDone: boolean, containDequeueEvent?: (entry: any, pendingInputs?: string[]) => boolean, pendingInputs: string[] = []): SyncResult {
   const db = openStore();
   const st = S();
   const state = st.getState.get(sessionId) as any;
@@ -785,7 +787,7 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
       // [legacy-migration] 归并序: 迁移条目按时间戳插到原生行之前 (同刻原生优先; 无锚不 flush).
       if (legacy) pendingRows.push(...legacy.takeUpTo(anchorTs));
       // 出队触发: 本行是出队事件 且 有挂起的 opener → 先结清前导行到旧组, 再一次性开组.
-      if (detectDequeue(entry) && hasPendingOpeners(sessionId)) {
+      if (detectDequeue(entry, pendingInputs) && hasPendingOpeners(sessionId)) {
         commit();
         flushPendingOpenersToSink(sessionId, sink);
       }
@@ -827,7 +829,7 @@ function scanPrimary(sessionId: string, filePath: string, mode: 'initial' | 'mem
  * 首次 (无状态行) = backfill: 冻结的旧 .mobius.jsonl 与原生轨按时间戳归并,
  * 见开轮卡切组 (origin='legacy'). 之后旧文件永不再读.
  */
-function syncSession(sessionId: string, primaryPath: string | null | undefined, containDequeueEvent?: (entry: any) => boolean): SyncResult {
+function syncSession(sessionId: string, primaryPath: string | null | undefined, containDequeueEvent?: (entry: any, pendingInputs?: string[]) => boolean, pendingInputs: string[] = []): SyncResult {
   const st = S();
   let state = st.getState.get(sessionId) as any;
   let created = false;
@@ -844,7 +846,7 @@ function syncSession(sessionId: string, primaryPath: string | null | undefined, 
   if (state.primary_path && state.primary_path !== primaryPath) {
     const oldPath = state.primary_path;
     if (fs.existsSync(oldPath)) {
-      const r = scanPrimary(sessionId, oldPath, 'members', null, false, containDequeueEvent);
+      const r = scanPrimary(sessionId, oldPath, 'members', null, false, containDequeueEvent, pendingInputs);
       if (!r.ok) return r;
       openStore().prepare('UPDATE ingest_state SET primary_path = ?, primary_read_bytes = 0 WHERE session_id = ?')
         .run(primaryPath, sessionId);
@@ -860,7 +862,7 @@ function syncSession(sessionId: string, primaryPath: string | null | undefined, 
   // opener 提前写入也会建状态行, 若按 created 判定, 这些会话的旧文件会被永久跳过.
   const needLegacy = Number(state.legacy_read_bytes) === 0;
   const legacy = needLegacy ? loadLegacyBackfill(primaryPath) : null;
-  return scanPrimary(sessionId, primaryPath, created ? 'initial' : 'members', legacy, needLegacy, containDequeueEvent);
+  return scanPrimary(sessionId, primaryPath, created ? 'initial' : 'members', legacy, needLegacy, containDequeueEvent, pendingInputs);
 }
 
 // ── 对外: 查询 (① ② + 旧 getHistory 兼容) ───────────────────────────────
@@ -904,11 +906,11 @@ function getGroupEntries(sessionId: string, groupSeq: number): { group_id: strin
 }
 
 /** 旧 getHistory 语义的库版: 全部条目按到达序. assistant 快照 / 标题扫描仍在用. */
-function getHistorySnapshot(sessionId: string, primaryPath: string | null | undefined, containDequeueEvent?: (entry: any) => boolean): {
+function getHistorySnapshot(sessionId: string, primaryPath: string | null | undefined, containDequeueEvent?: (entry: any, pendingInputs?: string[]) => boolean, pendingInputs: string[] = []): {
   entries: any[]; total: number; truncated: boolean; sentinel: any;
 } {
   if (primaryPath) {
-    try { syncSession(sessionId, primaryPath, containDequeueEvent); } catch {}
+    try { syncSession(sessionId, primaryPath, containDequeueEvent, pendingInputs); } catch {}
   }
   const db = openStore();
   const rows = db.prepare('SELECT json FROM entries WHERE session_id = ? ORDER BY seq ASC').all(sessionId) as any[];

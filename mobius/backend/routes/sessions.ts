@@ -303,9 +303,16 @@ export function backendForSession(session: AnySession | null | undefined): AnyBa
 
 // 出队事件检测器 (透传给 history-store 的 sync): 按 backend 取 containDequeueEvent,
 // 拿不到则恒 true (立即出队, 与基类占位一致).
-function containDequeueEventOf(backend: AnyBackend): (entry: any) => boolean {
+function containDequeueEventOf(backend: AnyBackend, sessionId?: string): (entry: any, pendingInputs?: string[]) => boolean {
   return typeof backend?.containDequeueEvent === 'function'
-    ? backend.containDequeueEvent.bind(backend)
+    ? (entry: any, pendingInputs: string[] = []) => {
+      const inputs = pendingInputs.length || !sessionId
+        ? pendingInputs
+        : (backend.getPendingRequests?.(sessionId) || [])
+            .map((item: any) => typeof item === 'string' ? item : item?.content)
+            .filter((item: any): item is string => typeof item === 'string')
+      return backend.containDequeueEvent(entry, inputs)
+    }
     : () => true;
 }
 
@@ -897,7 +904,7 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
       let storeSyncError = '';
       if (initialPath) {
         try {
-          const synced = syncHistoryStore(sessionId, initialPath, containDequeueEventOf(backend));
+          const synced = syncHistoryStore(sessionId, initialPath, containDequeueEventOf(backend, sessionId));
           // 结构化失败 (书签错乱等): 取返回里的 error 文案.
           if (!synced.ok) storeSyncError = synced.error || 'history store sync failed';
         } catch (e) {
@@ -928,7 +935,7 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
           const primaryPath = resolvePrimary();
           if (!primaryPath) return;
           // 异常吞掉: 结构化 error 机制兜底.
-          try { syncHistoryStore(sessionId, primaryPath, containDequeueEventOf(backend)); } catch {}
+          try { syncHistoryStore(sessionId, primaryPath, containDequeueEventOf(backend, sessionId)); } catch {}
         };
         // 300ms 合批: agent 高频写文件时, 一条 raw 行最多引起一次 sync.
         const scheduleSync = () => {
@@ -985,7 +992,7 @@ router.get('/:id/groups', auth, (req: express.Request, res: express.Response) =>
     ? backend._resolveJsonlPath(id)
     : null;
   try {
-    const synced = syncHistoryStore(id, primaryPath, containDequeueEventOf(backend));
+    const synced = syncHistoryStore(id, primaryPath, containDequeueEventOf(backend, id));
     if (!synced.ok) {
       res.status(502).json({ error: synced.error || 'history store sync failed' });
       return;
@@ -1024,7 +1031,7 @@ router.get('/:id/groups/:gid/entries', auth, (req: express.Request, res: express
     ? backend._resolveJsonlPath(id)
     : null;
   try {
-    const synced = syncHistoryStore(id, primaryPath, containDequeueEventOf(backend));
+    const synced = syncHistoryStore(id, primaryPath, containDequeueEventOf(backend, id));
     if (!synced.ok) {
       res.status(502).json({ error: synced.error || 'history store sync failed' });
       return;
@@ -1449,7 +1456,7 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
             cwd: p.cwd || null,
             backendName: backend.name,
             primaryPath: jsonlPath,
-            containDequeueEvent: containDequeueEventOf(backend),
+            containDequeueEvent: containDequeueEventOf(backend, id),
             error: err,
           });
           console.log(`[sessions/status] error_scan hit sid=${id} backend=${backend.name} msg="${String(err.message).slice(0, 120)}"`);

@@ -17,18 +17,21 @@ const AGENT_TMUX_DEFAULT_TERM = 'tmux-256color'
 let warned = false
 let serverReady = false
 
-// tmux 调用选项: input = 写入 stdin 的文本; redactEnvironmentKeys = 日志脱敏的 env 前缀;
-// 其余字段原样透传给 spawnSync.
+// tmux call options: `input` is text written to stdin, `redactEnvironmentKeys` lists the env
+// prefixes to mask in the log. Any other field passes straight through to spawnSync.
 interface TmuxCallOpts {
   input?: string
   redactEnvironmentKeys?: string[]
   [key: string]: unknown
 }
 
+// POSIX single-quote escaping.
 function singleQuote(value: unknown): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`
 }
 
+// Bash $'...' escaping. Needed for values holding control characters, which single quotes
+// would pass through verbatim.
 function bashAnsiQuote(value: unknown): string {
   const escaped = String(value)
     .replace(/\\/g, '\\\\')
@@ -45,6 +48,8 @@ function bashAnsiQuote(value: unknown): string {
   return `$'${escaped}'`
 }
 
+// Bare when the value is shell-safe, $'...' when it holds control characters, single-quoted
+// otherwise.
 function shellQuote(value: unknown): string {
   const s = String(value)
   if (s.length > 0 && /^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s
@@ -52,12 +57,14 @@ function shellQuote(value: unknown): string {
   return singleQuote(s)
 }
 
+// The loggable form of a tmux call, including the printf pipe when input is supplied.
 function tmuxCommandString(args: string[], opts: TmuxCallOpts = {}) {
   const command = ['tmux', ...args].map(shellQuote).join(' ')
   if (!Object.prototype.hasOwnProperty.call(opts, 'input')) return command
   return `printf %s ${bashAnsiQuote(opts.input ?? '')} | ${command}`
 }
 
+// Replace `KEY=value` arguments with `KEY=***` for each given env key prefix.
 function redactEnvironmentArgs(args: string[], keys: string[] = []): string[] {
   const prefixes = new Set(
     (Array.isArray(keys) ? keys : [])
@@ -130,6 +137,8 @@ function ensureAgentTmuxServer() {
   log(`[tmux-agent-server] ready (socket=${AGENT_TMUX_SOCKET}, ${existed ? 'reused existing' : 'created new'} server, default-terminal=${AGENT_TMUX_DEFAULT_TERM})`)
 }
 
+// Kept out of the log: capture-pane, and list-windows scoped with -t. Both are the frequent
+// polling calls, and recording them would drown the signal.
 function shouldRecordTmuxCommand(args: string[]) {
   const commandArgs = args[0] === '-L' ? args.slice(2) : args
   if (commandArgs[0] === 'capture-pane') return false
@@ -137,6 +146,7 @@ function shouldRecordTmuxCommand(args: string[]) {
   return true
 }
 
+// Append the command to the log, with secrets redacted. Best-effort; warns once on failure.
 function recordTmuxCommand(args: string[], opts: TmuxCallOpts = {}) {
   if (!shouldRecordTmuxCommand(args)) return
 
@@ -152,6 +162,8 @@ function recordTmuxCommand(args: string[], opts: TmuxCallOpts = {}) {
   }
 }
 
+// Run tmux against the private agent server, retrying the call once if the server had been
+// killed externally.
 function tmux(args: string[], opts: TmuxCallOpts = {}) {
   ensureAgentTmuxServer()
   const effectiveArgs = ['-L', AGENT_TMUX_SOCKET, ...args]
@@ -169,6 +181,7 @@ function tmux(args: string[], opts: TmuxCallOpts = {}) {
   return result
 }
 
+// Append to the log file (best-effort) and echo to stdout.
 function log(...args: unknown[]) {
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true })

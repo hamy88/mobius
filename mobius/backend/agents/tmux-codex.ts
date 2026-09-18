@@ -1,23 +1,22 @@
 /**
- * tmux-codex.js — TmuxCodexBackend.
+ * tmux-codex.ts — TmuxCodexBackend.
  *
- * 在 Mobius Agent 专用 tmux server 中, 每个 MOBIUS session_id 对应一个 tmux
- * window, window 内运行 Codex 交互式 TUI.
- * 对外实现与 tmux-claude-code 相同的 AgentBackend 合同:
- *   - 输入: tmux load-buffer + paste-buffer -p + Enter
- *   - 读取: $CODEX_HOME/sessions/YYYY/MM/DD/rollout-...<thread-id>.jsonl tail
- *   - 中断: tmux send-keys C-c x 3
- *   - 终结: tmux kill-window
- *   - 任务完成判断: 与 Claude backend 共用 .imac/flags/<sessionId> 标记约定
+ * One tmux window per Mobius session_id inside Mobius's own tmux server; the window runs the
+ * interactive Codex TUI. Implements the same AgentBackend contract as tmux-claude-code:
+ *   - input:     tmux load-buffer + paste-buffer -p + Enter
+ *   - read:      tail of $CODEX_HOME/sessions/YYYY/MM/DD/rollout-...<thread-id>.jsonl
+ *   - interrupt: tmux send-keys C-c x 3
+ *   - terminate: tmux kill-window
+ *   - completion: shares the .imac/flags/<sessionId> flag convention with the Claude backend
  */
 const { spawnSync } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
 
-// Resolve the aimux binary to spawn as a stdio MCP server (for TUI sessions).
-// Mirrors backend/services/aimux-remote.ts AIMUX_BIN_CANDIDATES (kept inline to
-// avoid crossing the .js/.ts boundary from this CommonJS backend).
+// Resolve the aimux binary to spawn as a stdio MCP server (for TUI sessions). Mirrors
+// backend/services/aimux-remote.ts AIMUX_BIN_CANDIDATES; kept inline to avoid crossing the
+// .js/.ts boundary from this CommonJS backend.
 function resolveAimuxBin() {
   const candidates = [
     process.env.AIMUX_BIN,
@@ -28,7 +27,7 @@ function resolveAimuxBin() {
   return 'aimux'
 }
 
-const { AgentBackend } = require('./base')
+import { AgentBackend } from './base'
 import type { HistorySnapshot, QueryOpts } from './base'
 const {
   getHistorySnapshot,
@@ -59,63 +58,69 @@ try { Database = require('better-sqlite3') } catch {}
 
 const HUB = 'imac_codex_agent_hub'
 const HOME = os.homedir()
-// 环境变量代理配置 (曾名 proxy_envs.bash): 读新名优先, 老文件兜底.
+// Env-var proxy config (once named proxy_envs.bash): read the new name first, legacy file as fallback.
 const PROXY_ENVS_FILE = path.join(HOME, 'proxy_envs.conf')
 const PROXY_ENVS_FILE_LEGACY = path.join(HOME, 'proxy_envs.bash')
 function resolveProxyEnvsFile() {
   return fs.existsSync(PROXY_ENVS_FILE) ? PROXY_ENVS_FILE : PROXY_ENVS_FILE_LEGACY
 }
-// 模型 proxychains 配置 (曾名 proxy_claude.conf); 兼容期老文件存在则沿用.
+// Model proxychains config (once named proxy_claude.conf); the legacy file is honored while it exists.
 const PROXY_CONF = path.join(HOME, 'proxychains_config_for_llm_models.conf')
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex')
 const CODEX_CONFIG = path.join(CODEX_HOME, 'config.toml')
 const CODEX_STATE_DB = path.join(CODEX_HOME, 'state_5.sqlite')
-// 每个渠道 TOML 声明 env_key, 启动 tmux 时由本后端 export 对应环境变量.
+// Each channel TOML declares env_key; this backend exports the matching env var when the window starts.
 const RUNTIME_FILE = path.join(MOBIUS_DATA_PATH, 'codex-hub-runtime.json')
-// archive: 任何启动过的 session 都留一条 (sessionId → jsonlPath/agentSessionId/cwd...),
-// terminate 时不删. 用来在 admin 关 window / cleaner 清理之后, getHistory 仍能找到 jsonl 文件读历史.
+// archive: one row per session ever started (sessionId → jsonlPath/agentSessionId/cwd...), never
+// dropped on terminate, so getHistory still finds the jsonl after an admin window close or cleaner run.
 const ARCHIVE_FILE = path.join(MOBIUS_DATA_PATH, 'codex-hub-archive.json')
-// Legacy fallback: 旧 codex-hub-runtime.json 里 model 字段为空时 (理论不应发生, 新数据都从
-// 注册表来). 留作防御性兜底, 业务流都通过 model-registry.launchOptionsForSession 传 codexModel.
+// Defensive fallback for an empty model in an old codex-hub-runtime.json (new data all comes from the
+// registry, so this should not happen): flows pass codexModel via model-registry.launchOptionsForSession.
 const DEFAULT_MODEL = 'gpt-5.5'
 const CODEX_CHANNEL_RE = /^[A-Za-z]+$/
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
-// Codex TUI 错误扫描只看尾部 N 行: 状态接口会反复触发 getRecentError, 全量抓 scrollback 太重.
+// Codex TUI error scan reads only the last N lines: the status endpoint calls getRecentError
+// repeatedly and capturing the whole scrollback is far too heavy.
 const CODEX_ERROR_SCAN_TAIL_LINES = 50
-// rollout 文件"新鲜度"窗口: _readWorkingFromJsonl 在尾部找不到明确标记(多为密集流式
-// agent_message/token_count, 或后端重启后 entry.working 失效) 时, 若文件在此窗口内被写过,
-// 判定 codex 仍在产出 → working.
-// 为什么可以放宽到 60s (旧值 20s): 此分支只在"尾部窗口内完全无标记"时触达, 而 task_complete
-// 总是 turn 的末行 → 一个真正收工的 session 其 task_complete 必在尾部窗口内、会先命中并返回
-// false, 根本走不到这里. 所以本 freshness 只覆盖"turn 进行中但暂时没写文件"的间隙(codex 长思考 /
-// 等慢 LLM / 跑长命令期间 rollout 可能数十秒无写入). 20s 太短: 这类间隙常超 20s, 一旦过期就回落
-// entry.working, 而后端重启后 entry.working=false (watcher 从末尾起读、错过本 turn 的 task_started)
-// → 间歇性误判 not working. 提到 60s 覆盖绝大多数思考间隙, 又不会让收工 session 误显 working
-// (收工走 task_complete 早返回, 不经此分支).
+// rollout "freshness" window for _readWorkingFromJsonl: when the tail window carries no explicit
+// marker (usually dense streaming agent_message/token_count, or entry.working invalidated by a
+// backend restart) and the file was written inside this window, codex is still producing → working.
+//
+// Why 60s (was 20s): this branch is only reached when the tail window has no marker at all, and
+// task_complete always ends a turn → a truly finished session hits its task_complete inside the
+// tail window first, returns false, and never gets here. So freshness only covers an in-flight turn
+// with a temporary write gap (long thinking / slow LLM / long commands can leave the rollout silent
+// for tens of seconds). 20s was too short: such gaps often exceed it, expiry falls back to
+// entry.working, and after a backend restart that is false (the watcher starts at the file end and
+// misses this turn's task_started) → intermittent false "not working". 60s covers most thinking
+// gaps without making a finished session look working (a finish returns early on task_complete).
 const CODEX_WORKING_FRESH_MS = 60000
 
-// realTimeInfo: 识别 Codex TUI 当前的状态行 (status_indicator_widget.rs 渲染).
-// 行形态: "[•◦] <header> (<elapsed> • esc to interrupt)[ · <inline_message>]"
-//   - spinner: • (U+2022) / ◦ (U+25E6) 动画帧; reduced-motion hidden 时无 spinner
-//   - header: Working / Thinking / Idle / Reviewing ... 等 (可变, 故不强匹配)
+// realTimeInfo: recognize the Codex TUI status line (rendered by status_indicator_widget.rs).
+// Line shape: "[•◦] <header> (<elapsed> • esc to interrupt)[ · <inline_message>]"
+//   - spinner: • (U+2022) / ◦ (U+25E6) animation frames; absent when reduced-motion hiding is on
+//   - header: Working / Thinking / Idle / Reviewing ... (variable, so not matched on)
 //   - elapsed (fmt_elapsed_compact): Ns | Mm SSs | Hh MMm SSs
-//   - "esc to interrupt": show_interrupt_hint=true 时有 (生产正常工作时几乎恒开)
-// 分层正则 (降低假阳性):
-//   ① 主锚 "(<elapsed> • esc to interrupt)" — codex 独有串, 零假阳性, 覆盖生产常见态
-//   ② 兜底 "^[•◦] <header> (<elapsed>)" — 中断提示关时; spinner 是 TUI 独有, 排除散文 "(5s)"
+//   - "esc to interrupt": present when show_interrupt_hint=true (almost always on in production)
+// Layered regex to cut false positives:
+//   ① main anchor "(<elapsed> • esc to interrupt)" — codex-only string, zero false positives,
+//      covers the common production state
+//   ② fallback "^[•◦] <header> (<elapsed>)" — when the interrupt hint is off; the spinner is
+//      TUI-only, which rules out prose like "(5s)"
 const CODEX_STATUS_LINE_RE = /\(\d+(?:s|m\s+\d{2}s|h\s+\d{2}m\s+\d{2}s)\s*•\s*esc to interrupt\s*\)|^[•◦]\s+\S[^\n()]*?\(\d+(?:s|m\s+\d{2}s|h\s+\d{2}m\s+\d{2}s)\s*\)/u
-// TTL 5s 缓存: /status 每 2s 轮询, 缓存把 capture-pane 频次压到 ≤1/5s. 空 "" 也缓存.
+// 5s TTL cache: /status polls every 2s, so caching holds capture-pane to ≤1/5s. The empty "" is cached too.
 const REALTIME_INFO_TTL_MS = 5 * 1000
 const _realTimeInfoCache = new Map<string, any>() // sessionId → { ts: number, value: string }
 
-// getPendingRequests: codex 把"忙时提交的输入"缓存在 TUI 的 InputQueueState
-// (queued_user_messages / pending_steers, 见 tui/src/chatwidget/input_flow.rs
-// queue_user_message_with_options —— 忙时只入本地队列、不立即提交 core), 并在 bottom_pane
-// 渲染成预览块 (源码 tui/src/bottom_pane/pending_input_preview.rs). 三种头部 + 每条以
-// "  ↳ "(↳=U+21B3) 起行:
-//   • Queued follow-up inputs                       (普通排队消息)
-//   • Messages to be submitted after next tool call (pending steer)
-//   • Messages to be submitted at end of turn       (pending steer)
+// getPendingRequests: codex buffers input submitted while busy in the TUI's InputQueueState
+// (queued_user_messages / pending_steers, see tui/src/chatwidget/input_flow.rs
+// queue_user_message_with_options — when busy it only queues locally, it does not submit to core)
+// and renders it as a preview block in the bottom pane (source
+// tui/src/bottom_pane/pending_input_preview.rs). Three headers, every item starts a line with
+// "  ↳ " (↳ = U+21B3):
+//   - Queued follow-up inputs                        (ordinary queued messages)
+//   - Messages to be submitted after next tool call  (pending steer)
+//   - Messages to be submitted at end of turn        (pending steer)
 const CODEX_PENDING_HEADER_RE = /Queued follow-up|Messages to be submitted/
 const CODEX_PENDING_ITEM_RE = /^\s*↳\s+(.*)$/
 
@@ -133,11 +138,13 @@ const CODEX_FALLBACK_MODEL_METADATA_NOTICE_RE =
 // chatwidget/mcp_startup.rs). Treat them as ignorable, same as the fallback metadata banner.
 const CODEX_MCP_STARTUP_NOTICE_RE = /^⚠\s*MCP startup (?:incomplete|interrupted)\b/i
 
+// Newest error/warning notice in a captured pane, or null. See getRecentError for the signal design.
 function findCodexRecentErrorInPane(paneText: string) {
   const ANSI_RE = /\x1b\[[0-9;]*m/g
   const lines = String(paneText || '').split('\n')
   // Reverse scan so the newest Codex notice wins. If that newest notice is the normal
-  // user-interrupt or fallback metadata banner, stop immediately instead of falling through to an older stale error.
+  // user-interrupt or fallback metadata banner, stop immediately instead of falling through to an
+  // older stale error.
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]
     const cleaned = line.replace(ANSI_RE, '').trimStart()
@@ -164,10 +171,12 @@ function findCodexRecentErrorInPane(paneText: string) {
   return null
 }
 
-// /stop 强杀托底用: 抓 pane 最新文本 (绕过 5s 缓存, 反映 C-c 后真实状态), 判断 codex TUI
-// 是否仍在跑 turn. busy 锚点 = CODEX_STATUS_LINE_RE ("(<elapsed> • esc to interrupt)" 等).
-// 命中 → C-c×3 未生效, 仍在工作; 不命中/失败 → 已回 idle 态, C-c 生效.
-// 失败/空 → false (不 escalate, 避免误杀正常软停的 window).
+// Hard-kill safety net for /stop: capture the newest pane text (bypassing the 5s cache so it shows
+// the real post-C-c state) and decide whether the codex TUI is still running a turn. Busy anchor =
+// CODEX_STATUS_LINE_RE ("(<elapsed> • esc to interrupt)" etc.).
+//   - hit:           C-c×3 did not take, still working
+//   - miss/failure:  back to idle, C-c worked
+//   - failure/empty: false, so nothing escalates and a window that stopped softly is not killed
 function codexPaneStillBusy(sessionId: string) {
   let text = ''
   try {
@@ -175,7 +184,7 @@ function codexPaneStillBusy(sessionId: string) {
     if (pane.status === 0 && pane.stdout) {
       text = pane.stdout.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
     }
-  } catch { /* best-effort: 失败即不忙, 不 escalate */ }
+  } catch { /* best-effort: a failure means not busy, so no escalation */ }
   if (!text) return false
   return text.split('\n').some((l) => CODEX_STATUS_LINE_RE.test(l))
 }
@@ -200,16 +209,27 @@ const UPDATE_PROMPT_SENTINELS = [
 ]
 const UPDATE_PRESS_INTERVAL_MS = 1500
 
-const PASTE_PROBE_TIMEOUT_MS = 8000
 const PASTE_PROBE_INTERVAL_MS = 200
-const PASTE_SLEEP_BASE_MS = 800
 const PASTE_SLEEP_MAX_MS = 5000
+// Reopening an old session shows "Resuming session…" (U+2026 ellipsis in the installed binary)
+// while codex reloads the rollout; Enter is swallowed for that whole window. Matching the bare
+// prefix keeps it working whether the TUI renders the ellipsis character or three dots.
+const RESUME_SENTINEL = 'Resuming session'
+const RESUME_WAIT_MAX_MS = 16000
+const RESUME_POLL_MS = 2000
+// A paste past the TUI's collapse threshold is replaced on screen by a placeholder, so the prompt
+// text never reaches the pane and the tail probe can never match. Codex collapses above 1000
+// chars (LARGE_PASTE_CHAR_THRESHOLD in chat_composer.rs) into "[Pasted Content N chars]", with a
+// "#2"-style suffix when the same size repeats; Claude Code renders "[Pasted text #2 +22 lines]".
+// Either form proves the paste landed, so the wait below accepts a placeholder hit as success.
+const PASTE_PLACEHOLDER_RE = /\[Pasted (?:Content \d+ chars|text\b[^\]]*)\]/
 const SUBMIT_ENTER_ATTEMPTS = 3
 const SUBMIT_ENTER_INTERVAL_MS = 500
 const THREAD_BIND_TIMEOUT_MS = 30000
 const THREAD_BIND_POLL_MS = 300
 const THREAD_BIND_UPDATED_SKEW_MS = 1000
 
+// Whether the hub tmux session that hosts every agent window exists.
 function hubExists() {
   return tmux(['has-session', '-t', HUB]).status === 0
 }
@@ -227,12 +247,13 @@ function windowExists(name: string) {
   return r.stdout.split('\n').includes(name)
 }
 
-// list-windows 结果缓存 (仅状态查询用).
-// /status / syncer 每 2~5s 轮询, 一次 /status 内 isAlive + isWorking(内部再 isAlive)
-// + listSessions + getRecentError 的 isAlive 会重复 list-windows 多达 5 次 (全是 spawnSync,
-// 阻塞 Node 单事件循环). 缓存解析结果 12s 内复用, 把单次 /status 的 spawnSync 降到 0~1 次,
-// 消除"偶发某次 tmux 慢 → 事件循环被占 → 期间请求全部排队"的雪崩.
-// 控制流 (create/terminate/pause/recovery 里的 windowExists) 仍走实时查询, 不受 TTL 影响.
+// list-windows result cache (status queries only).
+// /status and the syncer poll every 2~5s; within one /status, isAlive + isWorking (which calls
+// isAlive itself) + listSessions + getRecentError's isAlive repeat list-windows up to 5 times, all
+// via spawnSync, which blocks Node's single event loop. Reusing the parsed rows within
+// LIST_WINDOWS_TTL_MS (3s) drops that to 0~1 spawnSync per /status and removes the "one slow tmux
+// call occupies the event loop and every request behind it queues up" avalanche.
+// Control flow (windowExists inside create/terminate/pause/recovery) still queries live, unaffected by the TTL.
 const LIST_WINDOWS_TTL_MS = 3 * 1000
 let _listWindowsCache: { ts: number; rows: string[][] } | null = null // { ts: number, rows: string[][] }
 
@@ -253,8 +274,9 @@ function shellQuote(s: string) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`
 }
 
-// dispatch 契约: 调用方传 modelLaunchOptions (model-registry.modelLaunchOptionsFor 的整包输出).
-// 本后端在此解包出自己需要的字段 (model/settingsPath/codex*/代理挡位), 旧扁平字段作兼容兜底.
+// Dispatch contract: the caller passes modelLaunchOptions (the whole output of
+// model-registry.modelLaunchOptionsFor). This backend unpacks the fields it needs here
+// (model/settingsPath/codex*/proxy tier), with the old flat fields as a compatibility fallback.
 function unpackLaunch(opts: CodexDispatchOpts): { model: string | null; settingsPath: string | null; useProxy: boolean; proxyMode: string; codexProfileKey: string | null; codexChannel: string | null; codexConfigPath: string | null; codexSecretEnvKey: string | null; codexSecretValue: string | null; captureStream: boolean } {
   const launch = (opts?.modelLaunchOptions || {}) as Record<string, any>
   return {
@@ -271,12 +293,13 @@ function unpackLaunch(opts: CodexDispatchOpts): { model: string | null; settings
   }
 }
 
-// 数字雨 · codex per-session withproxy: base_url→token-proxy, api_key→mpx1 token (wire=openai).
+// Digital-rain codex per-session withproxy: base_url→token-proxy, api_key→mpx1 token (wire=openai).
 function codexWithProxyPathFor(profileKey: string, sessionId: string): string {
   const safe = String(sessionId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_')
   return path.join(CODEX_HOME, `${profileKey}.withproxy.${safe}.config.toml`)
 }
 
+// Copy the profile TOML with base_url/api_key rewritten to the token proxy; throws when either key is absent.
 function writeCodexWithProxy(srcPath: string, profileKey: string, sessionId: string, upstream: any): string {
   const raw = fs.readFileSync(srcPath, 'utf8')
   const proxyToken = encodeProxyToken(upstream)
@@ -298,6 +321,7 @@ function writeCodexWithProxy(srcPath: string, profileKey: string, sessionId: str
   return outPath
 }
 
+// Codex --profile accepts letters only; a missing or malformed channel is a hard error.
 function normalizeCodexChannel(value: unknown) {
   const channel = String(value || '').trim()
   if (!channel) throw new Error('tmux-codex requires codex channel (--profile)')
@@ -307,6 +331,7 @@ function normalizeCodexChannel(value: unknown) {
   return channel
 }
 
+// Secret env var names must be export-safe.
 function normalizeSecretEnvKey(value: unknown) {
   const key = String(value || '').trim()
   if (!key) throw new Error('tmux-codex requires codex secret env key')
@@ -314,6 +339,7 @@ function normalizeSecretEnvKey(value: unknown) {
   return key
 }
 
+// Explicit value wins; otherwise the process environment; an empty result is an error.
 function resolveSecretValue(secretEnvKey: string, secretValue: string | null | undefined) {
   const explicit = secretValue == null ? '' : String(secretValue)
   const value = explicit || process.env[secretEnvKey] || ''
@@ -321,25 +347,28 @@ function resolveSecretValue(secretEnvKey: string, secretValue: string | null | u
   return value
 }
 
+// Quoted string value of a top-level TOML key, or "" when absent.
 function tomlStringValue(tomlText: string, key: string) {
   const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const match = String(tomlText || '').match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*=\\s*(['"])([^'"]+)\\1`))
   return match ? match[2].trim() : ''
 }
 
+// api_key from the profile TOML, but a placeholder (e.g. <API_KEY>) defers to the fallback value.
 function resolveCodexConfigSecretValue(configText: string, fallbackValue: string | null | undefined) {
   const configured = tomlStringValue(configText, 'api_key')
   return resolveSecretCandidate(configured, fallbackValue)
 }
 
+// Booleans and their 0/1 and "true"/"false" string forms; anything else falls back.
 function normalizeUseProxy(value: unknown, fallback = false) {
   if (value === false || value === 0 || value === '0' || value === 'false') return false
   if (value === true || value === 1 || value === '1' || value === 'true') return true
   return !!fallback
 }
 
-// 四挡代理模式归一: direct | env | proxychains | env_proxychains.
-// 兼容旧 boolean: true→env_proxychains, false/null→direct.
+// Normalize the four proxy tiers: direct | env | proxychains | env_proxychains.
+// Legacy booleans: true→env_proxychains, false/null→direct.
 function normalizeProxyMode4(value: unknown, fallback = 'direct') {
   if (value === 'env' || value === 'proxychains' || value === 'env_proxychains') return value
   if (value === 'direct') return 'direct'
@@ -348,7 +377,7 @@ function normalizeProxyMode4(value: unknown, fallback = 'direct') {
   return fallback
 }
 
-// 按四挡检查所需依赖: env 挡需要 proxy_envs 文件; proxychains 挡需要 conf + bin.
+// Per-tier dependency check: the env tier needs the proxy_envs file; proxychains needs conf + bin.
 function proxyPrereqMissing(mode = 'env_proxychains') {
   const missing: string[] = []
   const needEnv = mode === 'env' || mode === 'env_proxychains'
@@ -374,6 +403,8 @@ function codexProjectHeader(cwd: string) {
   return `[projects.${tomlBasicString(path.resolve(cwd))}]`
 }
 
+// Pre-write trust_level = "trusted" for [projects.<cwd>] in config.toml so the TUI skips the trust
+// prompt. Writes through a temp file + rename; a failure leaves the on-screen fallback to handle it.
 function ensureProjectTrusted(cwd: string) {
   try {
     fs.mkdirSync(CODEX_HOME, { recursive: true })
@@ -411,6 +442,7 @@ function ensureProjectTrusted(cwd: string) {
   }
 }
 
+// Last 16 non-empty trimmed lines, capped at 2000 chars, for a timeout message.
 function summarizeScreen(screen: string) {
   return String(screen || '')
     .split('\n')
@@ -429,20 +461,15 @@ function clearRunning(root: string | null | undefined, sessionId: string) {
   return safeRemoveRunningFlag(root, sessionId, 'tmux-codex')
 }
 
-function findAsciiTailMarker(text: string) {
-  const ASCII = /[\x20-\x7E]/
-  let i = text.length - 1
-  while (i >= 0 && /\s/.test(text[i])) i--
-  let tail = ''
-  while (i >= 0 && tail.length < 15) {
-    if (!ASCII.test(text[i])) break
-    tail = text[i] + tail
-    i--
-  }
-  return tail.length >= 5 ? tail : null
+// Last 10 chars of the prompt once all whitespace is stripped, or null when nothing is left.
+// The pane is stripped the same way before comparing, so the TUI wrapping or re-spacing the
+// pasted text across lines cannot break the match.
+function findPasteMarker(text: string) {
+  const compact = String(text ?? '').replace(/\s+/g, '')
+  return compact ? compact.slice(-10) : null
 }
 
-// ── 启动时 preflight (模块加载时一次性, 缺失降级为警告) ────
+// ── Startup preflight (once at module load; a miss degrades to a warning) ────
 ;(function preflight() {
   const missing: string[] = []
   for (const bin of ['tmux', 'codex']) {
@@ -461,6 +488,7 @@ function findAsciiTailMarker(text: string) {
   log(`[tmux-codex] ✅ preflight pass (SOCKET=${AGENT_TMUX_SOCKET}, HUB=${HUB}, CODEX_HOME=${CODEX_HOME})`)
 })()
 
+// Read-only handle on codex's state_5.sqlite; null when better-sqlite3 or the file is missing.
 function openStateDb() {
   if (!Database || !fs.existsSync(CODEX_STATE_DB)) return null
   try { return new Database(CODEX_STATE_DB, { readonly: true, fileMustExist: true }) }
@@ -470,6 +498,7 @@ function openStateDb() {
   }
 }
 
+// Every thread id already recorded for this cwd; empty when the state db is unreadable.
 function snapshotThreadIds(cwd: string | null | undefined) {
   const db = openStateDb()
   if (!db) return new Set()
@@ -483,6 +512,7 @@ function snapshotThreadIds(cwd: string | null | undefined) {
   }
 }
 
+// One thread row by id (rollout_path/cwd/model and ms-normalized timestamps), or null.
 function codexThreadById(threadId: string) {
   if (!threadId) return null
   const db = openStateDb()
@@ -503,6 +533,7 @@ function codexThreadById(threadId: string) {
   }
 }
 
+// rollout_path from the state db, else a recursive walk of $CODEX_HOME/sessions for <threadId>.jsonl.
 function findRolloutPathByThreadId(threadId: string) {
   const row = codexThreadById(threadId)
   if (row?.rollout_path) return row.rollout_path
@@ -524,6 +555,8 @@ function findRolloutPathByThreadId(threadId: string) {
   return null
 }
 
+// Newest thread created in this cwd at/after sinceMs, among the latest 20 rows, skipping excludeIds
+// and any model mismatch. A model of "" or null matches anything.
 function findNewestThread({ cwd, model, sinceMs, excludeIds }: { cwd: string; model: string; sinceMs: number; excludeIds?: Set<string> | null }) {
   const db = openStateDb()
   if (!db) return null
@@ -552,6 +585,8 @@ function findNewestThread({ cwd, model, sinceMs, excludeIds }: { cwd: string; mo
   }
 }
 
+// Newest thread updated in this cwd at/after sinceMs, among the latest 20 rows, model-checked.
+// Fallback for a pre-existing window whose thread was created before the dispatch.
 function findRecentlyUpdatedThread({ cwd, model, sinceMs }: { cwd: string; model: string; sinceMs: number }) {
   const db = openStateDb()
   if (!db) return null
@@ -592,9 +627,9 @@ function isCodexTaskStart(entry: any) {
 }
 
 
-// runtime 条目: 每个 mobius session 对应一个 tmux window + codex TUI 运行态.
+// Runtime entry: one tmux window + codex TUI state per Mobius session.
 interface CodexRuntimeEntry {
-  agentSessionId: string | null // restore 阶段 thread 尚未绑定时为 null
+  agentSessionId: string | null // null while restore has not bound the thread yet
   cwd: string
   flagRoot: string
   model: string
@@ -606,16 +641,17 @@ interface CodexRuntimeEntry {
   useProxy: boolean
   proxyMode: string
   displayName: string | null
-  jsonlPath: string | null // 同上, 绑定前未知
+  jsonlPath: string | null // as above, unknown until bound
   startedAt: number
   working?: boolean
   watch: { stop?: () => void } | null
   [key: string]: unknown
 }
 
-// dispatch 契约: createNewSession / queue / pause 共用 (modelLaunchOptions 整包 + 兼容扁平).
+// Dispatch contract shared by createNewSession / queue / pause: the whole modelLaunchOptions
+// bundle plus the flat legacy fields.
 interface CodexDispatchOpts {
-  sessionId?: string
+  sessionId: string
   prompt?: string
   initialPrompt?: string
   cwd?: string
@@ -647,6 +683,8 @@ class TmuxCodexBackend extends AgentBackend {
     this._restoreFromPersisted()
   }
 
+  // Rebuild the in-memory runtime from codex-hub-runtime.json: recover a still-open window's
+  // thread, keep a pending entry that has no thread yet, and drop rows whose rollout jsonl is gone.
   _restoreFromPersisted() {
     let total = 0
     for (const [sid, p] of Object.entries(this.persisted) as Array<[string, any]>) {
@@ -742,10 +780,13 @@ class TmuxCodexBackend extends AgentBackend {
     log(`[tmux-codex] runtime loaded ${this.runtime.size}/${total}`)
   }
 
+  // Attach the jsonl watcher once a path is known; a second call is a no-op. Entries are emitted
+  // raw and folded into entry.working.
   _ensureWatcher(sessionId: string, startOffset: any = null) {
     const entry = this.runtime.get(sessionId)
     if (!entry?.jsonlPath || entry.watch) return
-    // startOffset: null = 从当前文件尾起 (只推增量); 0 = 从头 (重建 working 状态用).
+    // startOffset: null = from the current end of file (incremental only); 0 = from the beginning
+    // (used to rebuild working state).
     let from = Math.max(0, Math.floor(Number(startOffset) || 0))
     if (startOffset == null) {
       try { from = fs.existsSync(entry.jsonlPath) ? fs.statSync(entry.jsonlPath).size : 0 } catch { from = 0 }
@@ -773,19 +814,22 @@ class TmuxCodexBackend extends AgentBackend {
     this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
   }
+  // Interrupt the running turn so codex consumes the next queued instruction.
   pauseCurrentToDequeueQuery(sessionId: string) {
     return this._withLock(sessionId, async () => {
       if (!sessionId) throw new Error('sessionId required')
       if (!windowExists(sessionId)) return
-      // codex 的中断键是 Esc (不是 C-c). 单次 Esc 打断当前 turn, 让 agent 停下当前 turn
-      // 去消费下一条排队指令. 不追加新 prompt / 不发 M-Enter (这里只打断).
+      // Codex's interrupt key is Esc, not C-c. A single Esc breaks the current turn so the agent
+      // stops to consume the next queued instruction. No new prompt is appended and no M-Enter is
+      // sent — this only interrupts.
       tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Escape'])
       await new Promise((r) => setTimeout(r, 250))
     })
   }
 
-  // opener 提前: dispatch 一进来 (进锁/启动 CLI 之前) 就把用户卡写库开轮.
-  // 若等 spawn+绑定路径 (~10s) 再写, 首趟 sync 会抢先把启动前导落进 "第0轮".
+  // Open the round early: the moment dispatch is entered (before the lock and the CLI start) the
+  // user card is written to the store. Waiting for the spawn+bind path (~10s) lets the first sync
+  // file the startup preamble into "round 0" instead.
   _writeMobiusPromptEarly(opts: CodexDispatchOpts) {
     if (!opts?.sessionId || !opts?.mobiusPromptRecord) return
     try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
@@ -793,17 +837,23 @@ class TmuxCodexBackend extends AgentBackend {
   terminateSession(sessionId: string) {
     return this._withLock(sessionId, async () => {
       const r = await this._terminateImpl(sessionId)
-      // session 终止兜底: 挂起的 pending_round_openers 立即出队 (防 agent 崩溃后 dequeue 永不出现).
+      // Terminate safety net: flush pending_round_openers immediately, in case the agent crashed
+      // and no dequeue will ever arrive.
       try { flushPendingOpeners(sessionId) } catch {}
       return r
     })
   }
 
+  // Window still listed in the hub. Status path, so it reads the cache; control flow must use
+  // windowExists instead.
   isAlive(sessionId: string) {
-    // 状态查询走缓存 (12s TTL); 控制流 (create/terminate 等) 请用 windowExists (实时).
+    // Status queries go through the cache (3s TTL); control flow (create/terminate etc.) must call
+    // windowExists for a live answer.
     return listWindowsRowsCached().some((cols: string[]) => cols[0] === sessionId)
   }
 
+  // The rollout jsonl decides when it can; entry.working is the fallback, and a session with a
+  // known working flag but no jsonl path yet (spawn in flight) is working.
   isWorking(sessionId: string) {
     if (!this.isAlive(sessionId)) return false
     const entry = this.runtime.get(sessionId)
@@ -812,6 +862,8 @@ class TmuxCodexBackend extends AgentBackend {
     return fromJsonl == null ? !!entry?.working : fromJsonl
   }
 
+  // Working state from the rollout tail: true/false on a definite marker, null when the tail window
+  // has none and the file is cold (caller then falls back to entry.working).
   _readWorkingFromJsonl(jsonlPath: string | null): boolean | null {
     if (!jsonlPath || !fs.existsSync(jsonlPath)) return null
     let stat
@@ -819,9 +871,11 @@ class TmuxCodexBackend extends AgentBackend {
     try {
       stat = fs.statSync(jsonlPath)
       if (stat.size === 0) return null
-      // 128KB: 远大于单条 rollout 记录(巨型 function_call_output / 长 agent_message 可达数十 KB),
-      // 让本 turn 的 task_started 不易被密集流式事件挤出窗口. 不必更大: 扫描遇首个标记即停,
-      // 大窗口只在"无标记"的罕见分支多解析几行; 且 freshness 已兜底无标记情形.
+      // 128KB: far larger than a single rollout record (a huge function_call_output / long
+      // agent_message can reach tens of KB), so this turn's task_started is not pushed out of the
+      // window by dense streaming events. Larger buys nothing: the scan stops at the first marker,
+      // a bigger window only parses a few more lines in the rare no-marker branch, and freshness
+      // already covers that case.
       const len = Math.min(stat.size, 128 * 1024)
       const buf = Buffer.alloc(len)
       const fd = fs.openSync(jsonlPath, 'r')
@@ -840,13 +894,15 @@ class TmuxCodexBackend extends AgentBackend {
       }
       if (e.type === 'turn_context') return true
     }
-    // 尾部窗口内无明确标记: 多为密集流式 agent_message/token_count 把标记挤出窗口,
-    // 或后端重启后 entry.working 失效. 此时若 rollout 仍在被写 (mtime 很新) 说明 codex
-    // 正在产出 → 视为 working; 文件冷才回落 entry.working (isWorking 内处理).
+    // No explicit marker in the tail window: usually dense streaming agent_message/token_count
+    // pushed it out, or entry.working went stale after a backend restart. If the rollout is still
+    // being written (very fresh mtime) codex is producing → working; only a cold file falls back to
+    // entry.working (handled inside isWorking).
     if (stat && Date.now() - stat.mtimeMs < CODEX_WORKING_FRESH_MS) return true
     return null
   }
 
+  // Done when the session's running flag is gone (the agent removes it on completion).
   isJobGoalAccomplished(sessionId: string) {
     const entry = this.runtime.get(sessionId)
     const root = entry?.flagRoot || entry?.cwd
@@ -854,6 +910,7 @@ class TmuxCodexBackend extends AgentBackend {
     return !fs.existsSync(runningFlagPathOf(root, sessionId))
   }
 
+  // A stuck agent leaves failed.flag behind (see the forgotten-flag-scanner copy).
   isFailed(sessionId: string) {
     const entry = this.runtime.get(sessionId)
     const root = entry?.flagRoot || entry?.cwd
@@ -861,9 +918,10 @@ class TmuxCodexBackend extends AgentBackend {
     return fs.existsSync(failedFlagPathOf(root, sessionId))
   }
 
-  // 实时状态行 (给 session 页 LIVE 卡片): 抓 tmux pane 倒数 15 行, 找 Codex TUI 状态行
-  // ("• Working (4s • esc to interrupt)" 等). 非 alive / 非 working → "". TTL 5s 缓存 (含空结果),
-  // 把 capture-pane 频次压到 ≤1/5s. 锦上添花: 失败静默 "", 绝不抛错压垮 /status 轮询.
+  // Live status line for the session page's LIVE card: capture the last 15 tmux pane lines and find
+  // the Codex TUI status line ("• Working (4s • esc to interrupt)" etc.). "" when not alive or not
+  // working; a 5s TTL cache (empty result included) holds capture-pane to ≤1/5s. Nice-to-have only:
+  // failures stay silent and never throw into the /status poll.
   realTimeInfo(sessionId: string) {
     const now = Date.now()
     const cached = _realTimeInfoCache.get(sessionId)
@@ -871,37 +929,42 @@ class TmuxCodexBackend extends AgentBackend {
     let value = ''
     try {
       if (this.isAlive(sessionId) && this.isWorking(sessionId)) {
-        // -S -15: 倒数 15 行; -p: 纯文本 (去 ANSI); -J: 拼接折行 (窄终端状态行被折行时还原).
+        // -S -15: last 15 lines; -p: plain text (ANSI stripped); -J: join wrapped lines (restores a
+        // status line wrapped by a narrow terminal).
         const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-J', '-S', '-15'])
         if (pane.status === 0 && pane.stdout) {
           const lines = pane.stdout.split('\n')
-          // 状态行在底部 (bottom pane), 从末尾往上找最近一条.
+          // The status line sits in the bottom pane; walk up from the end for the newest one.
           for (let i = lines.length - 1; i >= 0; i--) {
             const line = lines[i]
             if (line && CODEX_STATUS_LINE_RE.test(line)) {
-              // "esc to interrupt" 易误导用户按 Esc 中断正常工作 → 替换成 "working".
+              // "esc to interrupt" invites users to press Esc and break normal work → replace with "working".
               value = line.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/esc to interrupt/gi, 'working').trim()
               break
             }
           }
         }
       }
-    } catch { /* best-effort: 失败即 "" */ }
+    } catch { /* best-effort: a failure yields "" */ }
     _realTimeInfoCache.set(sessionId, { ts: now, value })
     return value
   }
 
-  // 待处理请求: codex 忙时提交的输入不进 rollout JSONL, 而是缓存在 TUI 的 InputQueueState
-  // 并在 bottom_pane 渲染成预览块 (源码见上方 CODEX_PENDING_HEADER_RE 注释). 故截 tmux pane
-  // 解析"预览块"即可 —— 与 getRecentError/realTimeInfo 同源(都截 TUI 屏).
-  // 与 claude-code 的差异:claude-code 读 JSONL 的 queue-operation/enqueue(完整 content+timestamp);
-  // codex 只能拿到**截断预览**且**无时间戳**(TUI 不暴露)→ enqueuedAt 恒 null. 仅 alive 时扫, 失败静默 [].
-  // capture-pane -J 拼接折行, 故一条多行 pending 仍是一行 ↳. 见到首个头部后收集所有 ↳ 行.
+  // Pending requests: input submitted while codex is busy never enters the rollout JSONL — it is
+  // buffered in the TUI's InputQueueState and rendered as a preview block in the bottom pane (see
+  // the CODEX_PENDING_HEADER_RE note above), so parsing that block off the tmux pane is enough.
+  // Same source as getRecentError/realTimeInfo: both capture the TUI screen.
+  //   - vs claude-code: claude-code reads queue-operation/enqueue from the JSONL with full content
+  //     and a timestamp; codex gets only a truncated preview and no timestamp (the TUI does not
+  //     expose one) → enqueuedAt is always null. Scanned only while alive, silent [] on failure.
+  //   - capture-pane -J joins wrapped lines, so a multi-line pending entry is still one ↳ line;
+  //     collect every ↳ line after the first header.
   getPendingRequests(sessionId: string) {
     if (!this.isAlive(sessionId)) return []
     let text = ''
     try {
-      // -S -30: 预览块在 bottom_pane(状态行之上), 比 realTimeInfo(-15) 多取几行确保抓到头部.
+      // -S -30: the preview block sits in the bottom pane above the status line, a few lines more
+      // than realTimeInfo (-15) so the header is always caught.
       const cap = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-J', '-S', '-30'])
       if (cap.status === 0 && cap.stdout) text = cap.stdout.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
     } catch { return [] }
@@ -914,35 +977,47 @@ class TmuxCodexBackend extends AgentBackend {
       if (!inBlock) continue
       const m = line.match(CODEX_PENDING_ITEM_RE)
       if (m) pending.push({ content: m[1].trim(), enqueuedAt: null })
-      // 其它行 (折行续行 / "press esc" / "edit last queued" / 空行) 忽略, 保持 inBlock 直到 capture 结束.
+      // Other lines (wrap continuations / "press esc" / "edit last queued" / blanks) are ignored;
+      // inBlock stays set until the capture ends.
     }
     return pending
   }
 
-  // 扫 Codex TUI 屏幕找最近一条错误/警告通知, 转交前端.
-  // 信号设计 (源码实证 codex-rs/tui/src/history_cell/notices.rs, openai/codex):
-  //   - ■ (U+25A0) 行首 → new_error_event, 致命错误 (源码标红, 如 403 余额不足 / image banned)
-  //   - ⚠ (U+26A0) 行首 → new_warning_event(黄)/DeprecationNotice(红粗), 警告类 (如 model at capacity)
-  //   其余字形不扫: • info(dim) / ✨ update(青) / ⓘ safety(青) 都不是错误.
-  // 判定 = 剥 ANSI 后"行首是 ■ 或 ⚠", 不依赖颜色. 原因 (这是关键的"颜色问题"修复):
-  //   ① 警告类用 ⚠ 不是 ■, 旧"必须含 ■"直接漏掉所有警告;
-  //   ② 实测新版 codex 的 ⚠ 通知 (Selected model is at capacity...) 可完全不带 ANSI 颜色
-  //      (hexdump 确认行首 e2 9a a0 后无任何 \x1b), 旧"必须命中红色 ANSI"也漏;
-  //   ③ 依赖具体红色码本身就脆弱 (colored crate 视 terminfo 选 31/38;5;1/38;2;255, 跨版本/终端不一).
-  //   ■/⚠ 这两个字形 codex 只用于通知渲染, 行首出现即通知, 假阳性极低 (agent 正文不会以裸 ■/⚠ 起行).
-  // 特例: "■ Conversation interrupted ..." 是用户主动中断的正常提示, 不是错误;
-  //       且它是最新通知时直接返回 null, 避免继续向前捞出已过期错误.
-  // 坑: Codex TUI 用 alt screen, 进程退出时内容会被销毁; 因此仅在 isAlive 时扫,
-  //     历史 session 拿不到. 调用方需要时应另开后台 capture 循环落盘.
+  // Newest error/warning notice off the Codex TUI screen, as { message, rawLine, contextFingerprint,
+  // capturedAt }, or null.
+  // Signal design (source-verified: codex-rs/tui/src/history_cell/notices.rs, openai/codex):
+  //   - ■ (U+25A0) line prefix → new_error_event, fatal errors (the source marks them red, e.g. a
+  //     403 insufficient balance / image banned)
+  //   - ⚠ (U+26A0) line prefix → new_warning_event (yellow) / DeprecationNotice (bold red), warnings
+  //     (e.g. model at capacity)
+  //   Other glyphs are not scanned: • info (dim) / ✨ update (cyan) / ⓘ safety (cyan) are not errors.
+  // Verdict = "line starts with ■ or ⚠" after ANSI stripping; the colour is irrelevant. Why (this is
+  // the key "colour" fix):
+  //   ① warnings use ⚠, not ■, so the old "must contain ■" rule missed every warning;
+  //   ② a real recent-codex ⚠ notice (Selected model is at capacity...) can carry no ANSI colour at
+  //      all (hexdump confirms nothing after the e2 9a a0 prefix, no \x1b), so "must hit a red ANSI
+  //      code" missed those too;
+  //   ③ depending on a specific red code is fragile anyway (the colored crate picks 31/38;5;1/38;2;255
+  //      from terminfo, which differs across versions and terminals).
+  //   ■/⚠ are used by codex only for notice rendering, so a line prefix means a notice and the false
+  //   positive rate is very low (agent prose never starts a line with a bare ■/⚠).
+  // Special case: "■ Conversation interrupted ..." is a normal user-triggered interruption, not an
+  // error, and when it is the newest notice we return null instead of reaching further back for a
+  // stale error.
+  // Gotcha: the Codex TUI uses the alt screen, so its content is destroyed when the process exits;
+  // hence the scan only runs while alive and a historical session sees nothing. A caller that needs
+  // it must run its own background capture loop to disk.
   getRecentError(sessionId: string) {
     if (!this.isAlive(sessionId)) return null
-    // -p stdout; -e 保留 ANSI; -S -N 只抓尾部 N 行 (避免全量 scrollback 扫描); -J 拼接折行避免错误被切行.
+    // -p: stdout; -e: keep ANSI; -S -N: tail N lines only (avoids a full scrollback scan);
+    // -J: join wrapped lines so an error is not split across lines.
     const cap = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-e', '-S', `-${CODEX_ERROR_SCAN_TAIL_LINES}`, '-J'])
     if (cap.status !== 0) return null
     const found = findCodexRecentErrorInPane(cap.stdout)
     return found ? { ...found, capturedAt: new Date().toISOString() } : null
   }
 
+  // One row per hub window: ids, pid/index, last activity (tmux reports seconds → ms), and pane state.
   listSessions() {
     return listWindowsRowsCached().map((cols: string[]) => {
       const [name, pid, idx, activity, paneDead, paneCurrentCommand] = cols
@@ -965,8 +1040,8 @@ class TmuxCodexBackend extends AgentBackend {
     })
   }
 
-  // sessionId → jsonl 文件路径的三级查表 (跟 tmux-claude-code 对称):
-  //   runtime (Map, 进程内) > persisted (codex-hub-runtime.json, live) > archive (codex-hub-archive.json, all-time)
+  // Three-level sessionId → jsonl path lookup, symmetric with tmux-claude-code:
+  //   runtime (in-process Map) > persisted (codex-hub-runtime.json, live) > archive (codex-hub-archive.json, all-time)
   _resolveJsonlPath(sessionId: string) {
     return this.runtime.get(sessionId)?.jsonlPath
         || this._lookupPersistedJsonlPath(sessionId)
@@ -974,39 +1049,45 @@ class TmuxCodexBackend extends AgentBackend {
         || null
   }
 
-  // 出队事件检测: codex 的「人类输入真正被 agent 消费」有两种落盘形态, 任一中即视为出队:
-  //   ① response_item.message.role=='user' — 人类输入作为 user 消息写进 rollout (input_text 内容).
-  //   ② event_msg.task_started — 新一轮 turn 开始 (task_started 携带对应 turn_id).
-  // 其余 (assistant/tool/function_call 等) 都不是出队信号.
-  containDequeueEvent(entry: any): boolean {
+  // Dequeue detection: codex records "human input actually consumed by the agent" in two shapes,
+  // either of which counts as a dequeue:
+  //   ① response_item.message.role=='user' — human input written into the rollout as a user message
+  //      (input_text content).
+  //   ② event_msg.task_started — a new turn begins (task_started carries the matching turn_id).
+  // Anything else (assistant/tool/function_call) is not a dequeue signal.
+  containDequeueEvent(entry: any, _pendingInputs: string[] = []): boolean {
     if (!entry || typeof entry !== 'object') return false
     if (entry.type === 'response_item' && entry.payload?.type === 'message' && entry.payload?.role === 'user') return true
     if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') return true
     return false
   }
 
-  // 历史快照: agent-history-store 数据库 (读前自动补齐原生 jsonl 增量).
+  // History snapshot from the agent-history-store DB (native jsonl increments are backfilled before the read).
   getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
-    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this)) as HistorySnapshot
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this), []) as HistorySnapshot
   }
 
+  // Per-step timings derived from the jsonl, cached beside it (see time-consume-waterfall).
   get_time_consume_waterfall(sessionId: string, opts: any = {}) {
     return timeConsumeWaterfallFromBackend(this, sessionId, opts)
   }
 
+  // Drop that cached waterfall, forcing the next read to recompute.
   clear_time_consume_waterfall(sessionId: string, opts: any = {}) {
     return clearTimeConsumeWaterfallForBackend(this, sessionId, opts)
   }
 
-  // 订阅 raw 流: 基类 EventEmitter (后端共享 watcher emit 的 live 流).
-  // 历史补齐由 agent-history-store 负责, 不再有 fromSentinel 续读语义.
+  // Subscribe to the raw stream: the base EventEmitter carries the live stream emitted by the
+  // shared watcher. Backfilling is the agent-history-store's job, so fromSentinel resume semantics
+  // no longer exist.
   getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, opts: QueryOpts = {}) {
     return super.getAgentRawThoughtStream(sessionId, listener, opts)
   }
 
-  // 发送链路写入 user_input/compact 卡 = 开新轮 (写进 agent-history-store, 不再落文件).
-  // 不要求 runtime 已绑定 jsonl 路径: 调用点已提前到 dispatch 入口, 新会话 spawn 期间
-  // 路径未知也要先开轮; 路径留 null, 由首次 sync 认领.
+  // A send-path user_input/compact card opens a new round (written into the agent-history-store, no
+  // file involved). The runtime need not have a bound jsonl path: the call site moved up to the
+  // dispatch entry, so a round must open during a new session's spawn even with an unknown path;
+  // the path stays null and the first sync claims it.
   harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined, cwdHint?: string) {
     if (!mobiusPromptRecord) return false
     const entry = this.runtime.get(sessionId)
@@ -1019,6 +1100,7 @@ class TmuxCodexBackend extends AgentBackend {
         primaryPath: entry?.jsonlPath || null,
         ...mobiusPromptRecord,
         containDequeueEvent: this.containDequeueEvent.bind(this),
+        pendingInputs: [],
       })
     } catch (e) {
       console.warn(`[tmux-codex] mobius core entry failed (${sessionId}): ${e.message}`)
@@ -1026,6 +1108,8 @@ class TmuxCodexBackend extends AgentBackend {
     }
   }
 
+  // Create path: reuse a live window (binding its existing thread) or spawn one, send the initial
+  // prompt, then bind the codex thread that the new rollout created.
   async _createImpl(opts: CodexDispatchOpts) {
     const { sessionId, cwd, flagRoot, displayName, initialPrompt, agentSessionId, aimuxRemoteName } = opts
     const { model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue } = unpackLaunch(opts)
@@ -1074,6 +1158,8 @@ class TmuxCodexBackend extends AgentBackend {
     }
   }
 
+  // Queue path: respawn the window when it is gone (falling back to the last persisted cwd/model/
+  // proxy/thread), otherwise reuse it; then send the prompt and bind if still unbound.
   async _queueImpl(opts: CodexDispatchOpts) {
     const { sessionId, prompt, agentSessionId, mobiusPromptRecord = null, suppressRunningFlag = false, aimuxRemoteName } = opts
     let { cwd, flagRoot, displayName } = opts
@@ -1148,32 +1234,38 @@ class TmuxCodexBackend extends AgentBackend {
     }
   }
 
+  // Pause path for a live window: two flavours of interrupt, then either stop for good (no prompt,
+  // clears the running flag) or queue the new prompt through _queueImpl.
   async _pauseImpl({ sessionId, prompt, cwd, flagRoot, urgent = false, mobiusPromptRecord = null }: CodexDispatchOpts) {
     if (!sessionId) throw new Error('sessionId required')
     const persisted = this.runtime.get(sessionId)
 
     if (windowExists(sessionId)) {
       if (urgent) {
-        // 加急: 单次 C-c 中断当前 turn (实测单次足够). 用 await setTimeout 间隔,
-        // 不能用 spawnSync('sleep') 那会阻塞 event loop, 冻住整个 node 进程.
+        // Urgent: a single C-c interrupts the current turn (measured: one is enough). Spacing uses
+        // await setTimeout; spawnSync('sleep') would block the event loop and freeze the node process.
         tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
         await new Promise((r) => setTimeout(r, 250))
-        // 中断后旧输入可能回到输入区, 先 Alt+Enter 换行隔开, 否则和新 prompt 粘一起
+        // After the interrupt the old input may return to the input area: Alt+Enter first to
+        // separate it, otherwise it fuses with the new prompt
         tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'M-Enter'])
         await new Promise((r) => setTimeout(r, 80))
       } else {
-        // /stop: 3 个 C-c 中断当前 turn (不 kill window). 实测一次会被 TUI 吞.
+        // /stop: three C-c presses interrupt the current turn without killing the window (measured:
+        // the TUI swallows a single one).
         for (let i = 0; i < 3; i++) {
           tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
           if (i < 2) await new Promise((r) => setTimeout(r, 50))
         }
         if (persisted) persisted.working = false
         await new Promise((r) => setTimeout(r, 300))
-        // 兜底: C-c×3 偶发被 TUI 吞没停下. 空 prompt 软停 (/stop) 场景 escalate 到
-        // tmux kill-window 强杀托底, 保证 /stop 一定能让后台 agent 停下来 (window 死了
-        // 下次发消息会 respawn, 不影响会话续接). urgent+新 prompt 路径要保留 window 接
-        // 新输入, 不走强杀. 双重确认 (capture busy → 再等 700ms 让 TUI 消化 → 仍 busy)
-        // 避免状态行短暂残留导致误杀正常软停的 window.
+        // Safety net: C-c×3 is occasionally swallowed by the TUI and the turn keeps running. For a
+        // soft stop with an empty prompt (/stop) escalate to tmux kill-window as a hard stop, so
+        // /stop always stops the background agent (a dead window respawns on the next message, so
+        // the session still continues). The urgent + new-prompt path must keep the window for new
+        // input and never hard-kills. Double confirmation (capture busy → wait 700ms for the TUI to
+        // settle → still busy) avoids killing a window that stopped softly but still shows a stale
+        // status line.
         if (!prompt) {
           _realTimeInfoCache.delete(sessionId)
           if (codexPaneStillBusy(sessionId)) {
@@ -1208,12 +1300,14 @@ class TmuxCodexBackend extends AgentBackend {
     })
   }
 
+  // Stop the watcher, remove the per-session withproxy file, drop the runtime + persisted rows,
+  // kill the window and clear the session's flag dir. Archive keeps its row.
   async _terminateImpl(sessionId: string) {
     const wasAlive = windowExists(sessionId)
     const wasWorking = wasAlive && this.isWorking(sessionId)
     const entry = this.runtime.get(sessionId)
     if (entry?.watch?.stop) { try { entry.watch.stop() } catch {} }
-    // 清理 per-session withproxy (数字雨 token 文件).
+    // Clean up the per-session withproxy file (digital-rain token).
     if (entry?.withProxyPath) { try { fs.unlinkSync(entry.withProxyPath) } catch {} }
     this.runtime.delete(sessionId)
     this._forgetPersisted(sessionId)
@@ -1228,6 +1322,7 @@ class TmuxCodexBackend extends AgentBackend {
     return { sessionId, killed: wasAlive, wasWorking }
   }
 
+  // Register the runtime entry for an already-known thread, for a window that is still open.
   async _ensureRuntimeFromKnownThread({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexConfigPath, codexSecretEnvKey, displayName, agentSessionId }: CodexDispatchOpts) {
     if (!sessionId || !cwd) return null
     if (this.runtime.has(sessionId)) return this.runtime.get(sessionId)
@@ -1270,6 +1365,9 @@ class TmuxCodexBackend extends AgentBackend {
     return entry
   }
 
+  // Poll the sqlite thread table until the thread this dispatch created shows up (excluding the
+  // pre-spawn snapshot), with an "updated" fallback for a reused window. Times out after
+  // THREAD_BIND_TIMEOUT_MS; the jsonl watcher then starts from byte 0.
   async _bindRuntimeAfterPrompt({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexConfigPath, codexSecretEnvKey, displayName, sinceMs, knownThreadIds, allowUpdatedThreadFallback }: CodexDispatchOpts) {
     if (!sessionId || !cwd) throw new Error('_bindRuntimeAfterPrompt requires sessionId + cwd')
     const deadline = Date.now() + THREAD_BIND_TIMEOUT_MS
@@ -1341,6 +1439,8 @@ class TmuxCodexBackend extends AgentBackend {
     return entry
   }
 
+  // Fold one rollout entry into entry.working: task_complete ends it, task_started or any real
+  // agent activity (function call/output, reasoning, message, custom tool call) keeps it working.
   _updateWorkingFromEntry(entry: any, raw: any) {
     if (!entry) return
     if (isCodexTaskComplete(raw)) entry.working = false
@@ -1351,41 +1451,41 @@ class TmuxCodexBackend extends AgentBackend {
     }
   }
 
-  // 启动一个新的 Codex tmux 窗口，并返回用于后续绑定 rollout 的启动信息。
+  // Start a new Codex tmux window and return the launch info used to bind its rollout later.
   async _spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue, displayName, agentSessionId, captureStream = false, aimuxRemoteName }: CodexDispatchOpts) {
     if (!sessionId || !cwd) throw new Error('_spawnWindow requires sessionId + cwd')
-    // 确保承载 agent 窗口的 tmux hub session 已经存在。
+    // Make sure the tmux hub session that hosts agent windows exists.
     ensureHub()
-    // 记录启动时间，后续会写入 runtime 和持久化状态。
+    // Launch time, later written into runtime and persisted state.
     const startedAt = Date.now()
-    // 启动前先快照当前 cwd 下已有的 Codex thread，便于新会话后续识别新增 rollout。
+    // Snapshot existing Codex threads for this cwd so a new session can spot the added rollout later.
     const knownThreadIds = snapshotThreadIds(cwd)
-    // 运行标记默认写在 cwd 下；调用方传 flagRoot 时优先使用稳定根目录。
+    // Running flags default to cwd; a caller-supplied flagRoot wins as the stable root.
     const effFlagRoot = flagRoot || cwd
-    // 未指定模型时使用 Codex backend 的默认模型。
+    // Fall back to the backend's default model when none is given.
     const finalModel = model || DEFAULT_MODEL
-    // codexChannel 优先，其次兼容旧的 codexProfileKey，并统一归一化。
+    // codexChannel first, legacy codexProfileKey second, normalized either way.
     const profileKey = normalizeCodexChannel(codexChannel || codexProfileKey)
-    // Codex profile 对应 $CODEX_HOME/<profile>.config.toml。
+    // A Codex profile maps to $CODEX_HOME/<profile>.config.toml.
     const expectedConfigPath = path.join(CODEX_HOME, `${profileKey}.config.toml`)
-    // 启动前确认 profile 配置文件存在。
+    // The profile config must exist before launch.
     if (!fs.existsSync(expectedConfigPath)) {
-      // 配置缺失时直接失败，避免 Codex 用错误 profile 启动。
+      // Fail hard on a missing config so Codex never starts on the wrong profile.
       throw new Error(`codex channel config missing: ${expectedConfigPath}`)
     }
-    // 读取 profile 配置，用来解析 env_key 和可能内嵌的 api_key。
+    // Read the profile config to resolve env_key and any embedded api_key.
     const configText = fs.readFileSync(expectedConfigPath, 'utf8')
-    // 从 TOML 中提取秘钥环境变量名。
+    // Secret env var name from the TOML.
     const configEnvKey = tomlStringValue(configText, 'env_key')
-    // 对环境变量名做规范化，避免非法或空白值进入 export 命令。
+    // Normalize the name so no illegal or blank value reaches the export command.
     const secretEnvKey = configEnvKey ? normalizeSecretEnvKey(configEnvKey) : null
-    // 如果 profile 指定了 env_key，就解析最终要注入 tmux 命令的秘钥值。
+    // With an env_key, resolve the secret value injected into the tmux command.
     const secretValue = secretEnvKey
-      // TOML 中是真实 api_key 时优先使用；若为 <API_KEY> 占位符或缺失，则使用服务端保存值。
+      // A real api_key in the TOML wins; an <API_KEY> placeholder or a missing one defers to the server-stored value.
       ? resolveSecretValue(secretEnvKey, resolveCodexConfigSecretValue(configText, codexSecretValue))
-      // 没有 env_key 时不导出秘钥。
+      // No env_key means no exported secret.
       : ''
-    // 数字雨 captureStream: per-session 生成 codex withproxy toml (base_url→token-proxy, api_key→mpx1 token).
+    // Digital-rain captureStream: per-session codex withproxy toml (base_url→token-proxy, api_key→mpx1 token).
     let finalProfileKey = profileKey
     let withProxyPath: string | null = null
     if (captureStream) {
@@ -1401,116 +1501,122 @@ class TmuxCodexBackend extends AgentBackend {
         withProxyPath = null
       }
     }
-    // useProxy 与 profile 完全解耦: 只决定网络层挡位.
-    // 四挡: direct | env | proxychains | env_proxychains (兼容旧 boolean).
+    // useProxy is fully decoupled from the profile: it only picks the network tier.
+    // Four tiers: direct | env | proxychains | env_proxychains (legacy booleans accepted).
     const finalProxyMode = normalizeProxyMode4(proxyMode, normalizeUseProxy(useProxy, false) ? 'env_proxychains' : 'direct')
     const finalUseProxy = finalProxyMode !== 'direct'
-    // 需要代理时按挡位检查依赖 (env 挡只查 env 文件, proxychains 挡只查 conf+bin).
+    // With a proxy, check that tier's dependencies (env checks only the env file, proxychains only conf+bin).
     if (finalUseProxy) assertProxyAvailable(finalProxyMode)
 
-    // agentSessionId 存在表示希望恢复已有 Codex thread。
+    // A present agentSessionId means an existing Codex thread should be resumed.
     let useResume = !!agentSessionId
-    // rolloutPath 会在 resume 成功时指向已有 Codex rollout jsonl。
+    // rolloutPath points at the existing Codex rollout jsonl once resume succeeds.
     let rolloutPath = null
-    // 只有 resume 模式需要查找旧 rollout。
+    // Only resume needs an old rollout lookup.
     if (useResume) {
-      // 根据 Codex thread id 查找对应 rollout 文件。
+      // Locate the rollout file for this Codex thread id.
       rolloutPath = codexRolloutPathOf(agentSessionId!)
-      // 找不到 rollout 时不能可靠 resume。
+      // Without a rollout, the resume cannot be trusted.
       if (!rolloutPath) {
-        // 打印警告，并退化为新建 thread。
+        // Warn and degrade to a fresh thread.
         console.warn(`[tmux-codex] resume target rollout not found (${agentSessionId}), starting a new thread`)
-        // 关闭 resume 路径，后面会按新会话处理。
+        // Turn off the resume path; the code below treats it as a new session.
         useResume = false
       }
     }
 
-    // 系统调用 codex 强制走 --profile: 加载 $CODEX_HOME/<channel>.config.toml,
-    // 并在 tmux 命令中 export TOML env_key 对应的秘钥环境变量.
-    // 组装 Codex CLI 参数：模型、工作目录以及自动审批/沙箱绕过参数。
+    // System calls force codex through --profile: load $CODEX_HOME/<channel>.config.toml and export
+    // the secret env var named by the TOML env_key inside the tmux command.
+    // Assemble the Codex CLI args: model, cwd, and the approval/sandbox bypass.
     const codexArgs = ['-m', finalModel, '-C', cwd, '--dangerously-bypass-approvals-and-sandbox']
-    // TUI/Electron 会话 (add_remote_aimux_mcp + aimux_id): 注入 aimux stdio MCP server, 让 codex 经 MCP
-    // 工具 (remote_execute/read_file/write_file/ping/apply_patch) 操作远程工作站.
-    // codex `-c key=value` 按 TOML 解析 value, args 用 inline array.
+    // TUI/Electron sessions (add_remote_aimux_mcp + aimux_id): inject the aimux stdio MCP server so
+    // codex drives the remote workstation through its MCP tools
+    // (remote_execute/read_file/write_file/ping/apply_patch).
+    // codex parses `-c key=value` values as TOML, so the args use an inline array.
     if (aimuxRemoteName) {
       const aimuxBinPath = resolveAimuxBin()
-      // enable_mcp_apps 是 codex 加载 mcp_servers 的特性开关 (profile 默认 false,
-      // 端到端实测: 不开则 mcp_servers 不加载, MCP 工具不可用). 同时抑制 under-development 警告.
+      // enable_mcp_apps is codex's feature gate for loading mcp_servers (false in the profile by
+      // default; end-to-end test: without it mcp_servers never load and the MCP tools are
+      // unavailable). It also suppresses the under-development warning.
       codexArgs.push('-c', 'features.enable_mcp_apps=true')
       codexArgs.push('-c', 'suppress_unstable_features_warning=true')
       codexArgs.push('-c', `mcp_servers.aimux.command=${aimuxBinPath}`)
       codexArgs.push('-c', `mcp_servers.aimux.args=["mcp","serve","--remote","${aimuxRemoteName}"]`)
     }
-    // resume 模式下把 thread id 追加给 codex resume 子命令。
+    // In resume mode the thread id is appended to the codex resume subcommand.
     if (useResume && agentSessionId) codexArgs.push(agentSessionId)
-    // Codex 新会话不需要子命令，resume 模式需要 "resume " 前缀。
+    // A new Codex session needs no subcommand; resume needs the "resume " prefix.
     const subcommand = useResume ? 'resume ' : ''
-    // 对每个 Codex 参数做 shell 转义后拼成命令行字符串。
+    // Shell-quote every Codex arg and join them into the command string.
     const argStr = codexArgs.filter((a: unknown): a is string => typeof a === 'string').map(shellQuote).join(' ')
-    // profile 参数固定指向归一化后的 channel/profile。
+    // The profile arg always points at the normalized channel/profile.
     const profileArg = `--profile ${shellQuote(finalProfileKey)}`
 
-    // 逐行构造 bash -lc 命令，最后用 && 串起来。
+    // Build the bash -lc command line by line, joined with && at the end.
     const cmdLines = [
-      // 清掉 VS Code 相关 IPC 环境，避免 CLI 误连到宿主 IDE。
+      // Drop VS Code IPC env vars so the CLI cannot attach to a host IDE.
       'unset VSCODE_IPC_HOOK_CLI VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_MAIN',
-      // 标记当前进程运行在受控沙箱环境中。
+      // Mark this process as running in a controlled sandbox.
       'export IS_SANDBOX=1',
     ]
-    // 按四挡分流: env 挡加载环境变量代理; proxychains 挡套 chains; env_proxychains 双轨; direct 裸启.
+    // Split by tier: env loads env-var proxies; proxychains wraps chains; env_proxychains does both;
+    // direct starts bare.
     if (finalProxyMode === 'env' || finalProxyMode === 'env_proxychains') {
-      // 加载代理相关环境变量 (新名优先, 老 .bash 兜底). set -a 让 source 里的裸赋值
-      // (无 export 前缀的存量 conf) 也进环境被子进程继承; 结束后 set +a 收回.
+      // Load the proxy env vars (new name first, legacy .bash as fallback). set -a lets bare
+      // assignments in the sourced file (legacy conf with no export prefix) reach the environment
+      // and be inherited by child processes; set +a reverts it afterwards.
       cmdLines.push(`set -a && source ${shellQuote(resolveProxyEnvsFile())} && set +a`)
     }
     if (finalProxyMode === 'proxychains' || finalProxyMode === 'env_proxychains') {
-      // 通过 proxychains 启动 Codex，并传入 profile、子命令和参数。
+      // Start Codex through proxychains, passing the profile, subcommand and args.
       cmdLines.push(`exec proxychains -q -f ${shellQuote(PROXY_CONF)} codex ${profileArg} ${subcommand}${argStr}`)
     } else {
-      // direct / env 挡直接启动 Codex。
+      // direct / env start Codex directly.
       cmdLines.push(`exec codex ${profileArg} ${subcommand}${argStr}`)
     }
-    // 用 && 串联命令，确保任何前置步骤失败都会阻止后续 exec。
+    // Join with && so a failing earlier step prevents the exec.
     const cmd = cmdLines.join(' && ')
 
-    // 提前写入项目可信状态，减少 TUI 启动时的交互弹窗。
+    // Pre-write project trust to cut the TUI's startup prompts.
     ensureProjectTrusted(cwd)
 
-    // 渠道密钥只挂在当前窗口的环境上, 不嵌入 shell 命令、不落后端 runtime 文件.
+    // The channel secret rides only on this window's environment: never embedded in the shell
+    // command, never written to the backend runtime file.
     const windowEnvEntries = secretEnvKey ? [[secretEnvKey, secretValue]] : []
     const runtimeArgs = windowEnvEntries.flatMap(([key, value]) => ['-e', `${key}=${value}`])
-    // 在 hub session 下创建后台 tmux window，并在 cwd 中执行 bash -lc cmd。
+    // Create the background tmux window under the hub session and run bash -lc cmd in cwd.
     const r = tmux(
       ['new-window', '-d', ...runtimeArgs, '-t', HUB, '-n', sessionId, '-c', cwd, 'bash', '-lc', cmd],
       { redactEnvironmentKeys: windowEnvEntries.map(([key]) => key) },
     )
-    // tmux 创建失败时把 stderr 带出，方便定位命令层问题。
+    // Surface stderr on failure so command-level problems are diagnosable.
     if (r.status !== 0) throw new Error(`tmux new-window failed: ${r.stderr}`)
-    // 记录启动参数，包含模型、代理、profile、秘钥环境变量和 resume 信息。
+    // Log the launch parameters: model, proxy, profile, secret env key and resume info.
     log(`[tmux-codex] started: window=${sessionId} cwd=${cwd} model=${finalModel} use_proxy=${finalUseProxy ? 1 : 0} profile-v2=${profileKey} secret_env=${secretEnvKey} config=${codexConfigPath || expectedConfigPath}${useResume ? ` resume=${agentSessionId}` : ''}`)
 
-    // 设置等待 TUI ready 的截止时间。
+    // Deadline for the TUI to become ready.
     const deadline = Date.now() + READY_TIMEOUT_MS
-    // ready 标记会在探测到所有 Codex ready 哨兵文本时置为 true。
+    // ready flips true once every Codex ready sentinel is on screen.
     let ready = false
     let readyReason = ''
     let historyReadyPolls = 0
-    // 记录上次自动按信任确认的时间，用来限频。
+    // Last auto trust-confirm press, for rate limiting.
     let lastTrustPress = 0
-    // 记录上次跳过更新提示的时间，用来限频。
+    // Last auto skip-update press, for rate limiting.
     let lastUpdatePress = 0
-    // 保留最后一次非空屏幕内容，超时报错时给调用方看。
+    // Last non-empty screen, shown to the caller on timeout.
     let lastScreen = ''
     const target = `${HUB}:${sessionId}`
-    // 在超时前持续轮询 tmux pane 内容。
+    // Poll the tmux pane contents until the deadline.
     while (Date.now() < deadline) {
-      // capture 失败时按空屏幕处理，下一轮继续尝试。
+      // A failed capture counts as an empty screen; the next poll retries.
       const { text: screen, historySize } = take_tmux_window_text(target, 100)
-      // 如果当前屏幕非空，就保存为最新屏幕快照。
+      // Keep the newest non-empty screen as the snapshot.
       lastScreen = screen || lastScreen
       const hasUpdatePrompt = UPDATE_PROMPT_SENTINELS.every((s) => screen.includes(s))
       const hasTrustPrompt = TRUST_PROMPT_SENTINELS.some((s) => screen.includes(s))
-      // 看到所有 ready 哨兵文本，或恢复长会话后 tmux 历史行数稳定超过阈值，就结束等待。
+      // Done when every ready sentinel is visible, or when a restored long session keeps its tmux
+      // history above the size threshold.
       if (READY_SENTINELS.every((s) => screen.includes(s))) {
         ready = true
         readyReason = 'sentinels'
@@ -1524,212 +1630,344 @@ class TmuxCodexBackend extends AgentBackend {
         readyReason = `history_size=${historySize}>${READY_HISTORY_SIZE_THRESHOLD}`
         break
       }
-      // 如果出现 Codex 更新提示，就自动选择跳过更新。
+      // Codex update prompt on screen: pick skip automatically.
       if (hasUpdatePrompt) {
-        // 读取当前时间，用于判断是否到达下一次按键间隔。
+        // Current time, to check the key-press interval.
         const now = Date.now()
-        // 防止过于频繁地向 TUI 发送跳过更新按键。
+        // Rate-limit the skip-update key press.
         if (now - lastUpdatePress > UPDATE_PRESS_INTERVAL_MS) {
-          // 发送 "2" 和 Enter，选择更新提示里的跳过选项。
+          // Send "2" and Enter to pick the skip option in the update prompt.
           tmux(['send-keys', '-t', `${HUB}:${sessionId}`, '2', 'Enter'])
-          // 更新上次跳过更新提示的时间。
+          // Record the time of this skip-update press.
           lastUpdatePress = now
-          // 写日志说明已自动跳过 Codex 更新提示。
+          // Log that the Codex update prompt was skipped automatically.
           log(`[tmux-codex] window=${sessionId} skipped Codex update prompt (cwd=${cwd})`)
         }
       }
-      // 如果屏幕上出现目录信任提示，就进入自动确认逻辑。
+      // Directory trust prompt on screen: auto-confirm.
       if (hasTrustPrompt) {
-        // 读取当前时间，用于判断是否到达下一次按键间隔。
+        // Current time, to check the key-press interval.
         const now = Date.now()
-        // 防止过于频繁地向 TUI 发送 Enter。
+        // Rate-limit the Enter key press.
         if (now - lastTrustPress > TRUST_PRESS_INTERVAL_MS) {
-          // 向当前 tmux window 发送 Enter，确认信任目录。
+          // Send Enter to the current tmux window, confirming directory trust.
           tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
-          // 更新上次发送 Enter 的时间。
+          // Record the time of this Enter press.
           lastTrustPress = now
-          // 写日志说明已自动处理信任弹窗。
+          // Log that the trust prompt was handled automatically.
           log(`[tmux-codex] window=${sessionId} confirmed Codex directory trust (cwd=${cwd})`)
         }
       }
-      // 等待一个轮询间隔后继续检查屏幕内容。
+      // Wait one poll interval, then re-check the screen.
       await new Promise((r) => setTimeout(r, READY_POLL_MS))
     }
-    // 超时仍未 ready 时清理刚创建的 window 并抛错。
+    // Not ready by the deadline: clean up the freshly created window and throw.
     if (!ready) {
-      // 避免留下不可用的后台窗口。
+      // Do not leave an unusable background window behind.
       tmux(['kill-window', '-t', `${HUB}:${sessionId}`])
-      // 把最后屏幕内容整理成更短的错误详情。
+      // Condense the last screen into a shorter error detail.
       const detail = summarizeScreen(lastScreen)
-      // 把超时信息、cwd 和最后屏幕摘要带给调用方。
+      // Hand the caller the timeout, the cwd and the screen summary.
       throw new Error(`Codex TUI was not ready within ${READY_TIMEOUT_MS}ms (cwd=${cwd})${detail ? `; last screen:\n${detail}` : ''}`)
     }
-    // 记录 TUI 已可用。
+    // Log that the TUI is usable.
     log(`[tmux-codex] window=${sessionId} TUI ready reason=${readyReason}`)
 
-    // 新会话此时还不知道 Codex thread id，需要后续通过新增 rollout 绑定。
+    // A new session does not know its Codex thread id yet; it binds through the added rollout later.
     if (!useResume) {
-      // 构造新会话的内存 runtime 条目；agentSessionId/jsonlPath 先留空。
+      // Build the in-memory runtime entry for the new session; agentSessionId/jsonlPath stay empty.
       const entry = {
-        // 新会话启动后才会发现 Codex thread id。
+        // The Codex thread id is only discovered after startup.
         agentSessionId: null,
-        // 工作目录。
+        // Working directory.
         cwd,
-        // running flag 写入根目录。
+        // Root the running flag is written under.
         flagRoot: effFlagRoot,
-        // 实际使用的模型。
+        // Model actually used.
         model: finalModel,
-        // 实际使用的 Codex profile。
+        // Codex profile actually used.
         codexProfileKey: finalProfileKey,
-        // 实际使用的 Codex 配置路径。
+        // Codex config path actually used.
         codexConfigPath: codexConfigPath || expectedConfigPath,
         withProxyPath,
         captureStream: !!captureStream,
-        // 注入给 Codex 的秘钥环境变量名。
+        // Secret env var name injected into Codex.
         codexSecretEnvKey: secretEnvKey,
-        // 实际使用的代理开关。
+        // Proxy toggle actually used.
         useProxy: finalUseProxy,
-        // 代理模式四挡.
+        // Proxy tier.
         proxyMode: finalProxyMode,
-        // UI 展示名。
+        // Display name for the UI.
         displayName: displayName || null,
-        // 新会话尚未绑定 rollout，因此 jsonlPath 为空。
+        // No rollout bound yet, so jsonlPath is empty.
         jsonlPath: null,
-        // 启动时间。
+        // Launch time.
         startedAt,
-        // 刚启动时还未提交 prompt，标记为非工作中。
+        // No prompt submitted at launch yet, so not working.
         working: false,
-        // watcher 会在绑定 rollout 后再创建。
+        // The watcher is created once the rollout is bound.
         watch: null,
       }
-      // 把新会话运行态写入内存。
+      // Put the new session's runtime state into memory.
       this.runtime.set(sessionId, entry)
-      // 持久化新会话启动参数，并标记 pendingBind 等待绑定 rollout。
+      // Persist the launch parameters and set pendingBind until the rollout binds.
       this._persistEntry(sessionId, {
-        // 工作目录和 running flag 根目录。
+        // Working directory and running-flag root.
         cwd,
         flagRoot: effFlagRoot,
-        // 模型、profile、配置路径和秘钥环境变量名。
+        // Model, profile, config path and secret env var name.
         model: finalModel,
         codexProfileKey: finalProfileKey,
         codexConfigPath: codexConfigPath || expectedConfigPath,
         withProxyPath,
         captureStream: !!captureStream,
         codexSecretEnvKey: secretEnvKey,
-        // 代理开关、展示名和启动时间。
+        // Proxy toggle, display name and launch time.
         useProxy: finalUseProxy,
         displayName: displayName || null,
         startedAt,
-        // 新会话需要后续根据新增 rollout 绑定 thread/jsonl。
+        // The thread/jsonl bind later from the added rollout.
         pendingBind: true,
       })
     } else {
-      // resume 会话已经知道 thread id 和 rollout 路径，可以立即登记完整状态。
+      // A resume session already knows its thread id and rollout path, so it registers full state now.
       const entry = {
-        // 恢复的 Codex thread id (useResume 为真时必非空).
+        // Restored Codex thread id (non-null whenever useResume holds).
         agentSessionId: agentSessionId || null,
-        // 工作目录。
+        // Working directory.
         cwd,
-        // running flag 写入根目录。
+        // Root the running flag is written under.
         flagRoot: effFlagRoot,
-        // 实际使用的模型。
+        // Model actually used.
         model: finalModel,
-        // 实际使用的 Codex profile。
+        // Codex profile actually used.
         codexProfileKey: finalProfileKey,
-        // 实际使用的 Codex 配置路径。
+        // Codex config path actually used.
         codexConfigPath: codexConfigPath || expectedConfigPath,
         withProxyPath,
         captureStream: !!captureStream,
-        // 注入给 Codex 的秘钥环境变量名。
+        // Secret env var name injected into Codex.
         codexSecretEnvKey: secretEnvKey,
-        // 实际使用的代理开关。
+        // Proxy toggle actually used.
         useProxy: finalUseProxy,
-        // 代理模式四挡.
+        // Proxy tier.
         proxyMode: finalProxyMode,
-        // UI 展示名。
+        // Display name for the UI.
         displayName: displayName || null,
-        // 已找到的 Codex rollout jsonl 路径。
+        // Codex rollout jsonl path already found.
         jsonlPath: rolloutPath,
-        // 启动时间。
+        // Launch time.
         startedAt,
-        // 刚恢复时还未提交新 prompt，标记为非工作中。
+        // No new prompt submitted yet after the resume, so not working.
         working: false,
-        // watcher 占位，下面会立即创建。
+        // Watcher placeholder, created immediately below.
         watch: null,
       }
-      // 把 resume 会话运行态写入内存。
+      // Put the resume session's runtime state into memory.
       this.runtime.set(sessionId, entry)
-      // 持久化 resume 会话的完整状态。
+      // Persist the full resume session state.
       this._persistEntry(sessionId, {
-        // 恢复的 Codex thread id。
+        // Restored Codex thread id.
         agentSessionId,
-        // 工作目录和 running flag 根目录。
+        // Working directory and running-flag root.
         cwd,
         flagRoot: effFlagRoot,
-        // 模型、profile、配置路径和秘钥环境变量名。
+        // Model, profile, config path and secret env var name.
         model: finalModel,
         codexProfileKey: finalProfileKey,
         codexConfigPath: codexConfigPath || expectedConfigPath,
         withProxyPath,
         captureStream: !!captureStream,
         codexSecretEnvKey: secretEnvKey,
-        // 代理开关、展示名和 rollout 路径。
+        // Proxy toggle, display name and rollout path.
         useProxy: finalUseProxy,
         displayName: displayName || null,
         jsonlPath: rolloutPath,
-        // 启动时间。
+        // Launch time.
         startedAt,
-        // resume 已经绑定 rollout，不需要 pendingBind。
+        // Already bound to a rollout, so no pendingBind.
         pendingBind: false,
       })
-      // resume 已有 jsonlPath，可以立即启动 watcher。
+      // jsonlPath already exists, so the watcher starts right away.
       this._ensureWatcher(sessionId)
     }
 
-    // 写入 running flag，让外部逻辑知道该 session 正在运行。
+    // Write the running flag so external logic sees this session as running.
     markRunning(effFlagRoot, sessionId)
-    // 返回启动时间和旧 thread 快照，供调用方在新会话场景下定位新增 thread。
+    // Return the launch time and the old thread snapshot so the caller can spot the added thread of
+    // a new session.
     return { startedAt, knownThreadIds }
   }
 
+  /*
+   * Deliver a prompt into an already-running codex TUI window: stage the text in a tmux buffer,
+   * paste it as one bracketed block, wait until the pane proves it landed, then press Enter.
+   * Shared by the initial-context dispatch and the normal queue path; both call it only after
+   * ensuring the window exists.
+   *
+   * The prompt never goes through argv (load-buffer reads stdin), so a long prompt cannot hit
+   * ARG_MAX and its text never shows up in ps. Bracketed paste (-p) delivers the text as one
+   * atomic block, so the input box does not act on newlines mid-prompt. Enter is withheld until
+   * the pane shows the text, because pressing it early submits an empty box.
+   *
+   * Note the two meanings of -p: bracketed paste for paste-buffer, print-to-stdout for
+   * capture-pane.
+   */
   async _sendPromptToWindow(sessionId: string, text: string) {
+    // 检查tmux窗口是否存在，不存在抛出错误
+    // Check tmux window exist, if not, throw error
     if (!windowExists(sessionId)) throw new Error(`window ${sessionId} does not exist`)
-    const marker = findAsciiTailMarker(text)
+
+    // 取提示词去掉空白后的最后10个字符作为粘贴探针，取不到返回null
+    // Take the last 10 whitespace-stripped chars of the prompt as paste probe, null if unusable
+    const marker = findPasteMarker(text)
+
+    // 打印窗口、长度和探针，探针可能含中文，用JSON.stringify加引号便于辨认
+    // Log window, length and probe; JSON.stringify quotes it, the probe may hold CJK
     log(`[tmux-codex] sendPrompt window=${sessionId} len=${text.length} marker=${marker ? JSON.stringify(marker) : '(none)'}`)
 
+    // tmux buffer是全局共享的，用进程号加毫秒命名避免并发互相覆盖
+    // tmux buffers are server-global, name by pid and ms so concurrent sends do not clash
     const bufName = `imac_codex_${process.pid}_${Date.now()}`
+
+    // 末尾的-表示从stdin读，提示词不进命令行，避免超长和泄漏
+    // Trailing - reads stdin, keeps the prompt out of argv and ps
     const r1 = tmux(['load-buffer', '-b', bufName, '-'], { input: text })
+    // 装载buffer失败直接抛出错误
+    // Throw when loading the buffer fails
     if (r1.status !== 0) throw new Error(`tmux load-buffer failed: ${r1.stderr}`)
 
+    // -p括号粘贴，-d粘贴成功后删buffer，-t指定目标窗口
+    // -p bracketed paste, -d drop the buffer, -t target window
     const r2 = tmux(['paste-buffer', '-p', '-d', '-b', bufName, '-t', `${HUB}:${sessionId}`])
     if (r2.status !== 0) {
+      // -d只在成功时生效，失败要手动清理buffer
+      // -d only fires on success, clean the buffer by hand here
       tmux(['delete-buffer', '-b', bufName])
+      // 粘贴失败抛出错误
+      // Throw when pasting fails
       throw new Error(`tmux paste-buffer failed: ${r2.stderr}`)
     }
 
-    if (marker) {
-      const deadline = Date.now() + PASTE_PROBE_TIMEOUT_MS
-      let saw = false
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, PASTE_PROBE_INTERVAL_MS))
-        const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-80'])
-        if (pane.status === 0 && pane.stdout.includes(marker)) { saw = true; break }
-      }
-      if (!saw) console.warn(`[tmux-codex] paste marker did not appear within ${PASTE_PROBE_TIMEOUT_MS}ms; sending Enter anyway`)
-    } else {
-      const sleepMs = Math.min(PASTE_SLEEP_MAX_MS, Math.max(PASTE_SLEEP_BASE_MS, Math.floor(text.length * 0.5)))
-      await new Promise((r) => setTimeout(r, sleepMs))
-    }
+    // 记录等待起点，命中日志里要算耗时
+    // Record the wait start, the hit log reports elapsed time
+    const pasteWaitStartedAt = Date.now()
 
+    // 轮询面板直到探针或折叠占位符出现，说明文字已渲染或已被折叠接收
+    // Poll the pane until the probe or the collapsed-paste placeholder shows
+    const deadline = pasteWaitStartedAt + PASTE_SLEEP_MAX_MS
+    let saw = false
+    let attempt = 0
+    while (Date.now() < deadline) {
+      // 每200ms截屏一次
+      // Capture the pane every 200ms
+      await new Promise((r) => setTimeout(r, PASTE_PROBE_INTERVAL_MS))
+      attempt += 1
+      // 只截最后80行，够覆盖输入框且开销小
+      // Only the last 80 lines, enough for the input box and cheap
+      const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-80'])
+      // 截屏失败也要记一笔，排查时能区分没粘上还是没截到
+      // Log a failed capture too, so a miss can be told apart from a blank screen
+      if (pane.status !== 0) {
+        log(`[tmux-codex] paste poll window=${sessionId} attempt=${attempt} capture=failed`)
+        continue
+      }
+      // 比对前去掉面板里的空格和换行，避免TUI折行导致匹配不上
+      // Strip the pane's whitespace before comparing, so TUI wrapping cannot break the match
+      const compactPane = pane.stdout.replace(/\s+/g, '')
+      const hitMarker = !!marker && compactPane.includes(marker)
+      const hitPlaceholder = PASTE_PLACEHOLDER_RE.test(pane.stdout)
+      // 每次轮询都记录结果，命中与否都要能看到
+      // Log every poll, hit or miss, so the whole match stays visible when debugging
+      log(`[tmux-codex] paste poll window=${sessionId} attempt=${attempt} marker=${hitMarker} placeholder=${hitPlaceholder} elapsed=${Date.now() - pasteWaitStartedAt}ms`)
+      if (hitMarker || hitPlaceholder) {
+        saw = true
+        break
+      }
+    }
+    // 超时也照样按回车，不能把这一轮卡死
+    // Send Enter anyway on timeout, do not strand the turn
+    if (!saw) console.warn(`[tmux-codex] paste marker/placeholder did not appear within ${PASTE_SLEEP_MAX_MS}ms (attempts=${attempt}); sending Enter anyway`)
+
+    // 按回车前先标记为工作中，避免状态轮询误判这一轮已结束
+    // Mark busy before Enter, so a status poll does not read idle
     const entry = this.runtime.get(sessionId)
     if (entry) entry.working = true
+
+    // TUI偶发吞掉第一次回车，重发三次，重发是幂等的
+    // The TUI sometimes swallows the first Enter, retries are idempotent
     for (let i = 0; i < SUBMIT_ENTER_ATTEMPTS; i++) {
+      // 发送回车提交提示词
+      // Send Enter to submit the prompt
       const r = tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+      // 回车发不出去说明窗口有问题，直接抛出错误
+      // A window that cannot take Enter will not recover, throw
       if (r.status !== 0) throw new Error(`tmux send-keys Enter failed: ${r.stderr}`)
+      // 最后一次不用再等
+      // No wait after the last attempt
       if (i < SUBMIT_ENTER_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, SUBMIT_ENTER_INTERVAL_MS))
     }
 
+    // 恢复旧会话时TUI显示Resume提示并吞掉回车，三次重发都无效，交给它专门等
+    // Reopening an old session shows a Resume notice and swallows Enter, hand off to the waiter
+    await this._patchSlowSessionLoading(sessionId)
+
+    // 记录一次提示词投递，内部吞掉异常，不影响投递
+    // Record one prompt delivery, it swallows its own failures
     recordPromptPaste({ backendName: this.name, sessionId, contentLength: text.length })
+  }
+
+  /*
+   * Reopening an old session makes codex reload the rollout while showing "Resuming session…",
+   * and Enter is swallowed for that whole window, so a prompt pasted in the meantime sits in the
+   * input box unsent.
+   *
+   * Wait the notice out: while it is still on screen, nudge with an Enter every RESUME_POLL_MS
+   * until RESUME_WAIT_MAX_MS. Once it disappears, send one final Enter to land the submit that
+   * was dropped. On timeout send no extra Enter at all, because a prompt that may already have
+   * been submitted must not be submitted twice.
+   */
+  async _patchSlowSessionLoading(sessionId: string) {
+    // 先截一次屏，屏幕上没有Resume提示就直接返回，正常发送不会走这里
+    // Capture once first, return when the notice is absent, a normal send never gets here
+    const resumeCheck = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-20'])
+    if (resumeCheck.status !== 0 || !resumeCheck.stdout.includes(RESUME_SENTINEL)) return
+
+    const resumeStartedAt = Date.now()
+    log(`[tmux-codex] resuming session detected window=${sessionId}, waiting up to ${RESUME_WAIT_MAX_MS}ms`)
+    const resumeDeadline = resumeStartedAt + RESUME_WAIT_MAX_MS
+    let resumeFinished = false
+    let resumeAttempt = 0
+    while (Date.now() < resumeDeadline) {
+      // 每2秒看一次屏幕
+      // Check the pane every 2 seconds
+      await new Promise((r) => setTimeout(r, RESUME_POLL_MS))
+      resumeAttempt += 1
+      const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-20'])
+      // 截屏失败也要记一笔，排查时能区分没恢复完还是没截到屏
+      // Log a failed capture too, so a stuck resume can be told apart from a blank screen
+      if (pane.status !== 0) {
+        log(`[tmux-codex] resume poll window=${sessionId} attempt=${resumeAttempt} capture=failed`)
+        continue
+      }
+      // 提示消失说明恢复完成，跳出等待
+      // The notice is gone, the resume finished, stop waiting
+      if (!pane.stdout.includes(RESUME_SENTINEL)) { resumeFinished = true; break }
+      // 还在恢复中，先记一笔再补一次回车
+      // Still resuming: log the round first, then nudge with another Enter
+      log(`[tmux-codex] still resuming window=${sessionId} attempt=${resumeAttempt} elapsed=${Date.now() - resumeStartedAt}ms`)
+      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+    }
+    // 恢复完成后补最后一次回车，把之前被吞掉的提交补上
+    // One final Enter once the notice is gone, landing the submit that was dropped
+    if (resumeFinished) {
+      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+      log(`[tmux-codex] resuming session finished window=${sessionId}, attempts=${resumeAttempt} final Enter sent`)
+    // 超时就不再补回车，避免把提示词提交两次
+    // On timeout send no extra Enter, so the prompt is never submitted twice
+    } else {
+      log(`[tmux-codex] still resuming window=${sessionId} gave up after ${RESUME_WAIT_MAX_MS}ms attempts=${resumeAttempt}`)
+    }
   }
 }
 
