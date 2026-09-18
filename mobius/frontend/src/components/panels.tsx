@@ -1920,31 +1920,31 @@ function ModelPromptLimitsCard() {
                 setDraggingModelKey(null)
                 setDragOverModelKey(null)
               }}
-              className={`group px-1 py-3 transition-colors first:pt-1 last:pb-1 ${
+              className={`group px-2 py-2.5 transition-colors first:pt-1 last:pb-1 ${
                 dragOverModelKey === row.key ? 'bg-blue-500/10' : ''
               } ${draggingModelKey === row.key ? 'opacity-60' : ''}`}
               style={{
                 borderLeft: dragOverModelKey === row.key ? '3px solid rgba(59,130,246,0.65)' : '3px solid transparent',
               }}>
-              <div className="mb-2 flex items-start justify-between gap-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-start gap-2">
                   <span
-                    className="mt-0.5 inline-flex h-7 w-5 shrink-0 cursor-grab items-center justify-center text-[var(--text-muted)] opacity-60 transition-opacity group-hover:opacity-100 active:cursor-grabbing"
+                    className="mt-0.5 inline-flex h-6 w-5 shrink-0 cursor-grab items-center justify-center text-[var(--text-muted)] opacity-60 transition-opacity group-hover:opacity-100 active:cursor-grabbing"
                     title="拖动调整模型顺序"
                     aria-label="拖动调整模型顺序"
                   >
                     <GripVertical className="h-4 w-4" />
                   </span>
-                  <div className="min-w-0">
-                  <div className="truncate text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                    {row.title || row.label}
-                  </div>
-                  <div className="truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                    {row.key} · {row.sub}
-                  </div>
-                  <div className="mt-1 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }} title={row.config_path || ''}>
-                    {row.config_path || '未找到配置文件路径'}
-                  </div>
+                  <div className="min-w-0 leading-tight">
+                    <div className="truncate text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                      {row.title || row.label}
+                    </div>
+                    <div className="truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                      {row.key} · {row.sub}
+                      <span className="ml-1 font-mono opacity-75" title={row.config_path || ''}>
+                        · {row.config_path || '未找到配置文件路径'}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -1966,12 +1966,12 @@ function ModelPromptLimitsCard() {
                   </span>
                 </div>
               </div>
-              <div className="mb-2 grid grid-cols-2 gap-2 md:grid-cols-5">
+              <div className="mb-2 grid grid-cols-2 gap-1.5 sm:grid-cols-5">
                 {limitFields.map(field => {
                   const isTmux = field.key === 'tmuxWindows'
                   return (
                     <label key={field.key} className={isTmux ? 'col-span-2 md:col-span-1' : ''}>
-                      <div className="mb-1 flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                      <div className="mb-0.5 flex items-center justify-between gap-1 text-[9px]" style={{ color: 'var(--text-muted)' }}>
                         <span>{field.label}</span>
                         <span>{field.hint}</span>
                       </div>
@@ -1981,114 +1981,113 @@ function ModelPromptLimitsCard() {
                         inputMode="numeric"
                         min={0}
                         placeholder={field.placeholder}
-                        className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none"
+                        className="h-7 w-full rounded border border-[var(--input-border)] bg-[var(--bg-card)] px-1.5 text-[11px] text-[var(--text-primary)] outline-none"
                       />
                     </label>
                   )
                 })}
               </div>
-              {isDsh ? (
-                <div className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
-                  style={{ background: 'var(--bg-card)', borderColor: 'var(--input-border)' }}>
-                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>代理模式</span>
-                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>DSH 不使用代理 (直连)</span>
-                </div>
-              ) : (
-              <div className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
-                style={{
-                  background: proxyMode !== 'direct' ? 'rgba(16,185,129,0.10)' : 'var(--bg-card)',
-                  borderColor: proxyMode !== 'direct' ? 'rgba(16,185,129,0.36)' : 'var(--input-border)',
-                }}>
-                <span className="text-[11px]" style={{ color: proxyMode !== 'direct' ? '#16a34a' : 'var(--text-muted)' }}>
-                  代理模式
-                </span>
-                <select
-                  value={proxyMode}
-                  disabled={savingProxy || loading}
-                  onChange={e => setProxyMode(row, e.target.value)}
-                  className="h-7 rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-1.5 text-[11px]"
-                  style={{ color: 'var(--text-primary)' }}>
-                  <option value="direct">直连</option>
-                  <option value="env">环境变量代理</option>
-                  <option value="proxychains">proxychains 代理</option>
-                  <option value="env_proxychains">环境变量代理 + proxychains</option>
-                </select>
-              </div>
-              )}
-              {(isClaudeCode || isCodex) && (
+              <div className="mb-2 grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+                {isDsh ? (
+                  <div className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
+                    style={{ background: 'var(--bg-card)', borderColor: 'var(--input-border)' }}>
+                    <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>代理模式</span>
+                    <span className="truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>DSH 直连</span>
+                  </div>
+                ) : (
+                  <div className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
+                    style={{
+                      background: proxyMode !== 'direct' ? 'rgba(16,185,129,0.10)' : 'var(--bg-card)',
+                      borderColor: proxyMode !== 'direct' ? 'rgba(16,185,129,0.36)' : 'var(--input-border)',
+                    }}>
+                    <span className="shrink-0 text-[10px]" style={{ color: proxyMode !== 'direct' ? '#16a34a' : 'var(--text-muted)' }}>
+                      代理模式
+                    </span>
+                    <select
+                      value={proxyMode}
+                      disabled={savingProxy || loading}
+                      onChange={e => setProxyMode(row, e.target.value)}
+                      className="h-6 min-w-0 rounded border border-[var(--input-border)] bg-[var(--input-bg)] px-1 text-[10px]"
+                      style={{ color: 'var(--text-primary)' }}>
+                      <option value="direct">直连</option>
+                      <option value="env">环境变量代理</option>
+                      <option value="proxychains">proxychains 代理</option>
+                      <option value="env_proxychains">环境变量代理 + proxychains</option>
+                    </select>
+                  </div>
+                )}
+                {(isClaudeCode || isCodex) && (
+                  <ToggleSwitch
+                    checked={capture}
+                    disabled={savingCapture || loading}
+                    loading={savingCapture}
+                    onChange={next => toggleCapture(row, next)}
+                    switchPosition="end"
+                    activeColor="#00ff41"
+                    className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
+                    style={{
+                      background: capture ? 'rgba(0,255,65,0.10)' : 'var(--bg-card)',
+                      borderColor: capture ? 'rgba(0,255,65,0.40)' : 'var(--input-border)',
+                    }}>
+                    <span className="truncate text-[10px]" style={{ color: capture ? '#00ff41' : 'var(--text-muted)' }}>
+                      {capture ? '实时输出 · 数字雨' : '捕获实时输出'}
+                    </span>
+                  </ToggleSwitch>
+                )}
+                {/* 手动上下文限制 (auto-compact): 开关 + 触发压缩的 token 阈值. */}
                 <ToggleSwitch
-                  checked={capture}
-                  disabled={savingCapture || loading}
-                  loading={savingCapture}
-                  onChange={next => toggleCapture(row, next)}
+                  checked={compactEnabled}
+                  disabled={savingCompact || savingCompactToken || loading}
+                  loading={savingCompact}
+                  onChange={next => toggleCompact(row, next)}
                   switchPosition="end"
-                  activeColor="#00ff41"
-                  className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
+                  activeColor="#f59e0b"
+                  className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
                   style={{
-                    background: capture ? 'rgba(0,255,65,0.10)' : 'var(--bg-card)',
-                    borderColor: capture ? 'rgba(0,255,65,0.40)' : 'var(--input-border)',
+                    background: compactEnabled ? 'rgba(245,158,11,0.10)' : 'var(--bg-card)',
+                    borderColor: compactEnabled ? 'rgba(245,158,11,0.40)' : 'var(--input-border)',
                   }}>
-                  <span className="text-[11px]" style={{ color: capture ? '#00ff41' : 'var(--text-muted)' }}>
-                    {capture ? '捕获实时输出 · 数字雨' : '捕获实时输出'}
+                  <span className="truncate text-[10px]" style={{ color: compactEnabled ? '#d97706' : 'var(--text-muted)' }}>
+                    {compactEnabled ? '上下文限制 · 已开启' : '手动上下文限制'}
                   </span>
                 </ToggleSwitch>
-              )}
-              {/* 手动上下文限制 (auto-compact): 开关 + 触发压缩的 token 阈值.
-                  claude code → settings.json 的 env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
-                  codex → ~/.codex/<channel>.config.toml 的 model_auto_compact_token_limit. */}
-              <ToggleSwitch
-                checked={compactEnabled}
-                disabled={savingCompact || savingCompactToken || loading}
-                loading={savingCompact}
-                onChange={next => toggleCompact(row, next)}
-                switchPosition="end"
-                activeColor="#f59e0b"
-                className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
-                style={{
-                  background: compactEnabled ? 'rgba(245,158,11,0.10)' : 'var(--bg-card)',
-                  borderColor: compactEnabled ? 'rgba(245,158,11,0.40)' : 'var(--input-border)',
-                }}>
-                <span className="text-[11px]" style={{ color: compactEnabled ? '#d97706' : 'var(--text-muted)' }}>
-                  {compactEnabled ? '手动上下文限制 · 已开启' : '手动上下文限制'}
-                </span>
-              </ToggleSwitch>
+              </div>
               {compactEnabled && (
-                <div className="mb-2">
-                  <div className="mb-1 flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                <div className="mb-2 flex items-center gap-2">
+                  <div className="min-w-0 flex-1 text-[9px]" style={{ color: 'var(--text-muted)' }}>
                     <span>触发压缩的 Token 数</span>
-                    <span className="truncate font-mono" title={isClaudeCode ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'model_auto_compact_token_limit'}>
+                    <span className="ml-1 truncate font-mono opacity-75" title={isClaudeCode ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'model_auto_compact_token_limit'}>
                       {isClaudeCode ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'model_auto_compact_token_limit'}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      value={readCompactInput(row)}
-                      onChange={e => updateCompactInput(row, e.target.value)}
-                      inputMode="numeric"
-                      min={0}
-                      placeholder="如 120000"
-                      disabled={savingCompactToken}
-                      className="h-8 min-w-0 flex-1 rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none disabled:opacity-60"
-                    />
-                    <button type="button" title="保存压缩阈值"
-                      onClick={() => saveCompactToken(row)}
-                      disabled={savingCompactToken || loading}
-                      className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-amber-600 px-2.5 text-[12px] text-white transition-colors hover:bg-amber-500 disabled:opacity-60">
-                      {savingCompactToken ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
+                  <input
+                    value={readCompactInput(row)}
+                    onChange={e => updateCompactInput(row, e.target.value)}
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="如 120000"
+                    disabled={savingCompactToken}
+                    className="h-7 w-32 rounded border border-[var(--input-border)] bg-[var(--bg-card)] px-1.5 text-[11px] text-[var(--text-primary)] outline-none disabled:opacity-60"
+                  />
+                  <button type="button" title="保存压缩阈值"
+                    onClick={() => saveCompactToken(row)}
+                    disabled={savingCompactToken || loading}
+                    className="inline-flex h-7 shrink-0 items-center gap-1 rounded bg-amber-600 px-2 text-[10px] text-white transition-colors hover:bg-amber-500 disabled:opacity-60">
+                    {savingCompactToken ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                    保存
+                  </button>
                 </div>
               )}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center justify-end gap-1.5">
                 <button type="button" title="保存限制" onClick={() => save(row)} disabled={saving || loading}
-                  className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
-                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                  保存
+                  className="inline-flex h-7 items-center justify-center gap-1 rounded bg-blue-600 px-2.5 text-[10px] text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                  保存限制
                 </button>
                 <button type="button" title="恢复默认限制" onClick={() => setDefaults(row)} disabled={saving || loading || !configured}
-                  className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-40">
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  默认
+                  className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] px-2.5 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-40">
+                  <RotateCcw className="h-3 w-3" />
+                  恢复默认
                 </button>
               </div>
             </div>
