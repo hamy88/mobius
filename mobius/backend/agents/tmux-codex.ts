@@ -1992,6 +1992,7 @@ class TmuxCodexBackend extends AgentBackend {
 
     // 提交校验：占位符还在屏幕上，说明这一轮没被提交
     // Submit check: the placeholder still on screen means this turn was never submitted
+    await new Promise((r) => setTimeout(r, 200))
     if (!codexComposerHoldsPastedText(sessionId)) return
     log(`[tmux-codex] submit check window=${sessionId} paste placeholder still on screen, re-Enter in ${SUBMIT_RECHECK_DELAY_MS}ms`)
     await new Promise((r) => setTimeout(r, SUBMIT_RECHECK_DELAY_MS))

@@ -1964,6 +1964,16 @@ function ModelPromptLimitsCard() {
                     style={{ color: configured ? '#3b82f6' : 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
                     {configured ? '已配置' : '默认'}
                   </span>
+                  <button type="button" title="保存限制" onClick={() => save(row)} disabled={saving || loading}
+                    className="inline-flex h-7 items-center justify-center gap-1 rounded bg-blue-600 px-2 text-[10px] text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                    保存
+                  </button>
+                  <button type="button" title="恢复默认限制" onClick={() => setDefaults(row)} disabled={saving || loading || !configured}
+                    className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] px-2 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-40">
+                    <RotateCcw className="h-3 w-3" />
+                    默认
+                  </button>
                 </div>
               </div>
               <div className="mb-2 grid grid-cols-2 gap-1.5 sm:grid-cols-5">
@@ -2078,18 +2088,6 @@ function ModelPromptLimitsCard() {
                   </button>
                 </div>
               )}
-              <div className="flex items-center justify-end gap-1.5">
-                <button type="button" title="保存限制" onClick={() => save(row)} disabled={saving || loading}
-                  className="inline-flex h-7 items-center justify-center gap-1 rounded bg-blue-600 px-2.5 text-[10px] text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
-                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-                  保存限制
-                </button>
-                <button type="button" title="恢复默认限制" onClick={() => setDefaults(row)} disabled={saving || loading || !configured}
-                  className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] px-2.5 text-[10px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-40">
-                  <RotateCcw className="h-3 w-3" />
-                  恢复默认
-                </button>
-              </div>
             </div>
           )
         })}
