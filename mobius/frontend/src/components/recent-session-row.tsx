@@ -7,8 +7,8 @@ import type { RecentSession } from '../services/recent-sessions'
 export function recentSessionStatusPill(session: RecentSession): { label: string; color: string; bg: string } {
   if (session.agent_status === 'running') return { label: '执行中', color: '#f59e0b', bg: 'rgba(245,158,11,.10)' }
   if (session.agent_status === 'pending') return { label: '启动中', color: '#fbbf24', bg: 'rgba(251,191,36,.10)' }
-  if (session.agent_status === 'waiting') return { label: '待命', color: '#38bdf8', bg: 'rgba(56,189,248,.10)' }
-  if (session.agent_status === 'completed' || session.status === 'completed') return { label: '已完成', color: '#34d399', bg: 'rgba(52,211,153,.10)' }
+  if (session.agent_status === 'waiting') return { label: '待命中', color: '#38bdf8', bg: 'rgba(56,189,248,.10)' }
+  if (session.agent_status === 'completed' || session.status === 'completed') return { label: '已完成', color: 'var(--text-muted)', bg: 'var(--bg-card)' }
   return { label: '空闲', color: 'var(--text-muted)', bg: 'var(--bg-card)' }
 }
 

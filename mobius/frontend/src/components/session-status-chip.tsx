@@ -28,7 +28,7 @@ function SessionStatusChipInner({
   else if (failed) { label = '失败'; tone = 'red' }
   else if (pending) { label = '启动中'; tone = 'amber'; pulse = true }
   else if (working) { label = '执行中'; tone = 'green'; pulse = true }
-  else if (waiting) { label = '待命'; tone = 'sky' }
+  else if (waiting) { label = '待命中'; tone = 'sky' }
   else if (done) { label = '已结束'; tone = 'emerald' }
 
   const toneMap: Record<Tone, { text: string; hoverBg: string; hoverBorder: string; dot: string }> = {
