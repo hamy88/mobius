@@ -170,10 +170,13 @@ function ensureProjectTrusted(cwd: string) {
 }
 
 // Paste landing probe + fallback
-const PASTE_PROBE_TIMEOUT_MS = 8000
 const PASTE_PROBE_INTERVAL_MS = 200
-const PASTE_SLEEP_BASE_MS = 800
 const PASTE_SLEEP_MAX_MS = 5000
+// A paste past the TUI's collapse threshold is replaced on screen by a placeholder, so the prompt
+// text never reaches the pane and the tail probe can never match. Claude Code renders
+// "[Pasted text #2 +22 lines]"; codex renders "[Pasted Content N chars]" above its 1000-char
+// threshold. Either form proves the paste landed, so the wait below accepts a placeholder hit.
+const PASTE_PLACEHOLDER_RE = /\[Pasted (?:Content \d+ chars|text\b[^\]]*)\]/
 // Submit-Enter retry: the TUI's input-mode switch after bracketed paste (-p) occasionally swallows
 // the first Enter. Re-send N times idempotently (paste is atomic so extra Enters never split the
 // message; once submitted the box is empty and Enter is a no-op).
@@ -659,31 +662,22 @@ function clearRunning(root: string | null | undefined, sessionId: string) {
 }
 
 /*
- * Trailing run of printable ASCII (5~15 chars) at the end of the prompt,
- * used as the capture-pane probe that proves a paste landed.
- * CJK and box-drawing characters do not render glyph-for-glyph in a tmux
- * pane, so only an ASCII tail can be matched back reliably. Trailing
- * whitespace is skipped first; a tail shorter than 5 chars, or one cut
- * short by a non-ASCII character, returns null, which sends the caller to
- * the length-scaled sleep instead.
+ * Last 10 chars of the prompt once all whitespace is stripped, or null when
+ * nothing is left.
+ *
+ * Taking the tail of the *whitespace-stripped* text rather than the literal
+ * tail is what makes the probe survive the TUI's own line wrapping: the pane
+ * is stripped the same way before comparing, so a marker split across two
+ * screen rows still matches. It also means a CJK tail works, which the
+ * earlier printable-ASCII-only version could not handle at all.
  */
-function findAsciiTailMarker(text: string) {
-  const ASCII = /[\x20-\x7E]/
-  let i = text.length - 1
-  // 先跳过末尾空白，否则探针会带上看不见的字符
-  // Skip trailing whitespace first, or the probe carries invisible chars
-  while (i >= 0 && /\s/.test(text[i])) i--
-  let tail = ''
-  // 从后往前收可打印ASCII，遇非ASCII即停
-  // Collect printable ASCII backwards, stop at non-ASCII (cap 15)
-  while (i >= 0 && tail.length < 15) {
-    if (!ASCII.test(text[i])) break
-    tail = text[i] + tail
-    i--
-  }
-  // 太短的探针在面板里到处能撞上，宁可不探改用等待
-  // A probe this short matches all over the pane, sleep instead
-  return tail.length >= 5 ? tail : null
+function findPasteMarker(text: string) {
+  // 去掉所有空白再取尾部，面板侧也会同样处理
+  // Strip all whitespace first, the pane side is stripped the same way
+  const compact = String(text ?? '').replace(/\s+/g, '')
+  // 全空白的提示词没有可比对的探针，返回null
+  // An all-whitespace prompt leaves nothing to match, return null
+  return compact ? compact.slice(-10) : null
 }
 
 /*
@@ -696,13 +690,28 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/*
+ * Pick how the very first context prompt is delivered into a freshly spawned Claude Code TUI:
+ * a greeting first, straight in, or after a settle delay. A TUI that is still starting up can
+ * drop input that arrives before it is ready to accept it, so the two warm-up variants buy it
+ * time — and something harmless to render — before the real context lands. Which variant is
+ * actually needed was never pinned down, so sessions are split evenly across all three and the
+ * log line records the one that ran.
+ */
 function pickInitialContextPlan() {
   const roll = Math.random()
+  // 两个阈值把随机数均分成三档，不是随手取的分数
+  // The two thresholds split the roll into equal thirds, not arbitrary fractions
   if (roll < 1 / 3) return 'greeting_then_context'
   if (roll < 2 / 3) return 'direct_context'
   return 'delay_then_context'
 }
 
+/*
+ * Pick one of the fixed short greetings used by the greeting_then_context plan. The greeting is
+ * only a warm-up nudge that gets the TUI to render and accept input before the real context
+ * lands, so a tiny pool is enough — the text itself carries no meaning.
+ */
 function pickInitialContextGreeting() {
   const index = Math.floor(Math.random() * INITIAL_CONTEXT_GREETING_CHOICES.length)
   return INITIAL_CONTEXT_GREETING_CHOICES[index]
@@ -734,70 +743,109 @@ function pickInitialContextGreeting() {
 // while busy) = consumed, no longer pending. dequeue/remove carry no content and cannot serve as a
 // "delivered" ACK, so they never decide it.
 
-// Normalize request text: collapse runs of whitespace and trim, removing the newline/indent
-// differences the TUI introduces when writing to disk.
+/*
+ * Normalize request text into a comparison-stable form: collapse every whitespace run to a single
+ * space and trim the ends. Claude Code rewrites a prompt when it persists it to the jsonl
+ * transcript (re-wrapping lines, adding indentation), so the text read back never matches the
+ * bytes we sent — comparing the normalized forms is what makes "same request" decidable at all.
+ */
 function normalizeRequestText(value: unknown) {
+  // 非字符串一律当空，防止畸形条目抛出
+  // Anything that is not a string becomes empty, so malformed entries cannot throw
   if (typeof value !== 'string') return ''
   return value.replace(/\s+/g, ' ').trim()
 }
 
-// Request-text signature from a "consuming" entry; '' for anything else.
-//   - type:user                 → message.content (string or array of text blocks)
-//   - attachment:queued_command → attachment.content / text / command
+/*
+ * Pull the request text out of a jsonl entry that proves a queued request was consumed, so it can
+ * be matched against the queue. Only two entry shapes carry the text: type:user (the request was
+ * typed while the agent sat idle) and attachment.type:queued_command (it was injected mid-turn
+ * while the agent was busy). Everything else returns '' and is read as "no evidence".
+ */
 function consumedRequestSignature(entry: any) {
+  // 非法输入没有内容可提取
+  // A non-object entry has no content to extract
   if (!entry || typeof entry !== 'object') return ''
   if (entry.type === 'user') {
     const c = entry.message?.content
     if (typeof c === 'string') return normalizeRequestText(c)
     if (Array.isArray(c)) {
+      // 内容块数组里只有 text 块含请求文本，其余块类型忽略
+      // Only text blocks carry the request; other block types are ignored
       const text = c
         .filter((b) => b && typeof b === 'object' && b.type === 'text')
         .map((b) => b.text || '')
         .join('\n')
       return normalizeRequestText(text)
     }
+    // 是 user 条目但没有可用 content，同样不算证据
+    // A user entry with no usable content proves nothing either
     return ''
   }
   if (entry.type === 'attachment' && entry.attachment?.type === 'queued_command') {
     const a = entry.attachment
+    // 三种字段名任一存在即可，兼容不同的写入形状
+    // Any one of the three field names may appear; tolerate all write shapes
     return normalizeRequestText(a.content || a.text || a.command || '')
   }
   return ''
 }
 
-// Same-request test: equal full signatures, or one fully contains the other (tolerating an agent's
-// wrapper). Deliberately "full-text contains" rather than a prefix fingerprint — many mobius prompts
-// share the same opening prefix, so prefixes would match different tasks to each other.
+/*
+ * Decide whether a queued request and a consumed entry are the same request: identical full
+ * signatures, or one signature fully containing the other (an agent may wrap the prompt it
+ * echoes back). Matching on full text instead of a prefix fingerprint is deliberate — many mobius
+ * prompts open with the same boilerplate, so prefix matching would collapse distinct tasks into
+ * one another and drop live requests.
+ */
 function isSameQueuedRequest(sigA: string, sigB: string) {
+  // 空签名表示"无证据"，不参与相等判断
+  // An empty signature means "no evidence" and never counts as a match
   if (!sigA || !sigB) return false
   if (sigA === sigB) return true
+  // 包含关系在短签名上极易误判，容器一侧必须够长
+  // Containment is unreliable on short signatures; the container side must be long enough
   if (sigA.length >= 40 && sigB.includes(sigA)) return true
   if (sigB.length >= 40 && sigA.includes(sigB)) return true
   return false
 }
 
-// Resolve the aimux binary to spawn as a stdio MCP server (desktop/TUI sessions that opted into
-// add_remote_aimux_mcp). Mirrors tmux-codex.js + aimux-remote.ts AIMUX_BIN_CANDIDATES, kept inline
-// to avoid crossing the .js/.ts boundary.
+/*
+ * Resolve the aimux binary that gets spawned as a stdio MCP server for desktop/TUI sessions which
+ * opted into add_remote_aimux_mcp: an explicit AIMUX_BIN wins, then the user-local install, then
+ * the repo's own .venv-aimux, and finally the bare name so PATH gets a chance. Mirrors the sibling
+ * tmux-codex.ts and backend/services/aimux-remote.ts AIMUX_BIN_CANDIDATES list, kept inline rather
+ * than imported to avoid crossing the .js/.ts boundary from this CommonJS backend. The probe only
+ * checks existence, so a stale non-executable file at a preferred location still shadows a working
+ * binary further down the list.
+ */
 function resolveAimuxBin() {
   const candidates = [
     process.env.AIMUX_BIN,
     path.join(os.homedir(), '.local', 'bin', 'aimux'),
     path.join(__dirname, '..', '..', '.venv-aimux', 'bin', 'aimux'),
   ]
+  // 取第一个存在的候选，都没有则退回裸名字
+  // Take the first existing candidate, else fall back to the bare name
   for (const c of candidates) { if (c && fs.existsSync(c)) return c }
   return 'aimux'
 }
 
-// Resolve the guling live-trading MCP (HTTP / streamable-http) server config from env, so the
-// Xiaomo assistant session can read funds/positions (mcp__guling__position / balance) directly,
-// without going through Hermes. The bearer token is a credential and MUST live in .env
-// (MOBIUS_GULING_MCP_URL / MOBIUS_GULING_MCP_TOKEN) — never in source. Returns a
-// { type:'http', url, headers } entry ready to drop into the per-session --mcp-config mcpServers,
-// or null when unset (→ injection is a no-op).
+/*
+ * Build the guling live-trading MCP (HTTP / streamable-http) server entry from env, so the Xiaomo
+ * assistant session can read funds/positions (mcp__guling__position / balance) directly without
+ * going through Hermes. The bearer token is a credential and must live in .env
+ * (MOBIUS_GULING_MCP_URL / MOBIUS_GULING_MCP_TOKEN), never in source. The returned
+ * { type:'http', url, headers } object drops straight into the per-session --mcp-config
+ * mcpServers; null makes the caller's injection a no-op.
+ */
 function resolveGulingMcp() {
+  // 先补空串再 trim，纯空白的环境变量也算未配置
+  // Default to empty before trimming, so a whitespace-only value counts as unset
   const url = (process.env.MOBIUS_GULING_MCP_URL || '').trim()
   const token = (process.env.MOBIUS_GULING_MCP_TOKEN || '').trim()
+  // URL 和 token 缺一不可，不做半配置调用
+  // Both halves are required — no anonymous or half-configured call
   if (!url || !token) return null
   return { type: 'http', url, headers: { Authorization: `Bearer ${token}` } }
 }
@@ -848,16 +896,27 @@ interface ClaudeDispatchOpts {
 
 class TmuxClaudeCodeBackend extends AgentBackend {
   declare runtime: Map<string, ClaudeRuntimeEntry>
+  /*
+   * Build the backend and adopt whatever the previous process left behind. The runtime map is
+   * declared here rather than in the base class because only this backend knows the entry shape, and
+   * the restore has to run before anything can ask about a session.
+   */
   constructor() {
     super({ name: 'tmux-claude-code', runtimeFile: RUNTIME_FILE, archiveFile: ARCHIVE_FILE })
-    // runtime: sessionId → { agentSessionId, cwd, flagRoot, model, settingsPath, displayName, jsonlPath, startedAt, watch }
+    // sessionId → 窗口与jsonl状态
+    // runtime: sessionId → that session's window and jsonl state
     this.runtime = new Map()
     this._restoreFromPersisted()
   }
 
-  // On backend startup, pull the sessionId → agentSessionId/jsonlPath mapping back from
-  // hub-runtime.json. The process (claude TUI inside tmux) may of course still be alive — we never
-  // restart it, only start a jsonl watcher to tail it.
+  /*
+   * Reload the sessionId → agentSessionId / jsonlPath map saved by the previous process. The tmux
+   * windows outlive a backend restart, so a reload adopts them instead of spawning duplicates, and
+   * only a jsonl watcher is (re)started to tail them.
+   *
+   * A row whose jsonl is already gone is dropped rather than resurrected: without the transcript the
+   * session could never produce history, so it has to look brand new.
+   */
   _restoreFromPersisted() {
     let total = 0
     for (const [sid, p] of Object.entries(this.persisted) as Array<[string, any]>) {
@@ -884,12 +943,18 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     log(`[tmux-claude-code] runtime 加载 ${this.runtime.size}/${total} 条`)
   }
 
-  // One jsonl-watcher per session (unique to this backend); new lines go to _emitRaw for all
-  // subscribers. Never restarted when already live. startOffset=current size: pushes only the delta,
-  // the history store covers the initial content.
+  /*
+   * Attach the jsonl watcher that feeds this session's live output; new lines go to _emitRaw for all
+   * subscribers. One watcher per session and never restarted while one is live.
+   *
+   * It starts at the current end of file on purpose: only the delta is pushed, because the history
+   * store already holds the initial content and replaying the whole transcript would duplicate it.
+   */
   _ensureWatcher(sessionId: string) {
     const entry = this.runtime.get(sessionId)
     if (!entry?.jsonlPath || entry.watch) return
+    // 取不到文件大小时从0开始，宁可重放也不要漏行
+    // If the size cannot be read, start at 0 and replay rather than miss lines
     let startOffset = 0
     try { startOffset = fs.existsSync(entry.jsonlPath) ? fs.statSync(entry.jsonlPath).size : 0 } catch {}
     entry.watch = watchJsonlFile({
@@ -901,51 +966,107 @@ class TmuxClaudeCodeBackend extends AgentBackend {
   }
 
   // ── Public methods (wrapped by the base-class lock) ─────
+  /*
+   * Create path. The user card is written first, outside the lock, so it exists the moment dispatch
+   * arrives; the real work then serialises behind the per-session lock, which is what stops two
+   * dispatches for one session from spawning two windows.
+   */
   createNewSession(opts: ClaudeDispatchOpts) {
     this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._createImpl(opts))
   }
+  /*
+   * Pause-and-resume: interrupt the running turn, then hand the new prompt to the queue path. The
+   * expedited sibling of noPauseCurrentAndQueueQueryAtSession, which queues without interrupting.
+   */
   pauseCurrentAndResumeFromSession(opts: ClaudeDispatchOpts) {
     this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._pauseImpl(opts))
   }
+  /*
+   * Queue path: append a prompt to a running session without interrupting it, so the agent picks it
+   * up when the current turn ends. Spawns the window when none is alive, which is why chat can send
+   * both the first and every follow-up message through here.
+   */
   noPauseCurrentAndQueueQueryAtSession(opts: ClaudeDispatchOpts) {
     this._writeMobiusPromptEarly(opts)
     return this._withLock(opts?.sessionId, () => this._queueImpl(opts))
   }
+  /*
+   * Interrupt the running turn so the agent stops and consumes the next queued instruction. A missing
+   * window is a no-op rather than an error: the caller is asking to stop something, and nothing
+   * running already satisfies that.
+   */
   pauseCurrentToDequeueQuery(sessionId: string) {
     return this._withLock(sessionId, async () => {
       if (!sessionId) throw new Error('需要 sessionId')
       if (!windowExists(sessionId)) return
-      // A single C-c interrupts the current turn (one is enough in practice) so the agent stops and
-      // picks up the next queued instruction. Appends no prompt and sends no M-Enter — unlike the
-      // expedited pauseCurrentAndResumeFromSession path, this only interrupts.
+      // 单次C-c即可打断当前回合，这里只打断不追加提示词
+      // One C-c breaks the turn; this only interrupts, appending nothing
       tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
       await new Promise((r) => setTimeout(r, 250))
     })
   }
 
-  // Early opener: write the user card and open the round as soon as dispatch arrives (before the lock
-  // and the spawn), otherwise the first sync during spawn wins the race and the preamble lands in "round 0".
+  /*
+   * Open the round as early as possible: the user card is written the moment dispatch is entered, not
+   * after the spawn. Waiting would let the first sync beat us and file the startup preamble into
+   * "round 0" instead of the round this prompt actually belongs to.
+   */
   _writeMobiusPromptEarly(opts: ClaudeDispatchOpts) {
     if (!opts?.sessionId || !opts?.mobiusPromptRecord) return
+    // 写卡片失败只吞掉，不能因此拖垮这次派发
+    // A failed card write is swallowed; it must not break the dispatch
     try { this.harnessWriteMobiusCoreEntry(opts.sessionId, opts.mobiusPromptRecord, opts.cwd) } catch {}
   }
+  /*
+   * Tear the session down: kill the window, stop the watcher, drop the runtime and persisted rows and
+   * clear the flag dir. The archive row deliberately survives, so history still resolves afterwards.
+   */
   terminateSession(sessionId: string) {
     return this._withLock(sessionId, async () => {
       const r = await this._terminateImpl(sessionId)
-      // Termination fallback: flush pending_round_openers now — a crashed agent may never produce a dequeue.
+      // 终止兜底：agent崩溃时可能永远不dequeue
+      // Termination fallback: a crashed agent may never dequeue
       try { flushPendingOpeners(sessionId) } catch {}
       return r
     })
   }
 
   // ── Status queries (no lock; safe to run concurrently with writes) ──
+  /*
+   * Whether the window is still listed in the hub. This is the status path, so it reads the 3s cache;
+   * control flow (create / terminate / pause) must call windowExists for a live answer instead, since
+   * acting on a stale "exists" could kill a window that was just created.
+   */
   isAlive(sessionId: string) {
-    // Status queries use the cache (3s TTL); control flow (create/terminate) must use the live windowExists.
+    // 状态查询走3s缓存，控制流必须实时查
+    // Status queries read the 3s cache; control flow must query live
     return listWindowsRowsCached().some((cols: string[]) => cols[0] === sessionId)
   }
 
+  /*
+   * Whether the session is mid-turn. The transcript is the arbiter, not the pane: the tail of the
+   * jsonl is scanned backwards for the nearest record that says anything about the turn.
+   *
+   * The scan is a whitelist, deliberately not "skip the types we know are noise": only
+   *   - assistant — no stop_reason or 'tool_use' still running; end_turn / max_tokens /
+   *     stop_sequence done
+   *   - user — a human turn arrived and has not been answered yet
+   *   - system — only init / hook_started / hook_response, i.e. a turn is starting
+   * decide the state, and every other type (attachment, last-prompt, custom-title, permission-mode,
+   * file-history-snapshot, queue-operation, plus whatever metadata the TUI or gateway adds later) is
+   * ignored, so a new metadata type can no longer break the check.
+   *
+   * One trap inside the user case: /compact is bookkeeping written as synthetic user records, so its
+   * completion receipt must be read as an end_turn (see isCompactCompletionUserEvent) or an idle TUI
+   * stays "working" forever.
+   *
+   * A tail with no decisive record means the jsonl looks finished — but the TUI may still be waiting
+   * for background agents, a state the jsonl cannot express (a Task is fire-and-forget, so its round
+   * ends on end_turn). That is why the pane is consulted as a last resort; without it such a session
+   * reads idle and can be reaped by the idle cleaner while it is still running.
+   */
   isWorking(sessionId: string) {
     if (!this.isAlive(sessionId)) return false
     const entry = this.runtime.get(sessionId)
@@ -955,6 +1076,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
       if (!fs.existsSync(entry.jsonlPath)) return false
       const stat = fs.statSync(entry.jsonlPath)
       if (stat.size === 0) return false
+      // 只读尾部256KB，首行被截断就靠解析跳过
+      // Only the tail 256KB; a cut first line is skipped by the parse
       const len = Math.min(stat.size, CLAUDE_WORKING_TAIL_BYTES)
       const buf = Buffer.alloc(len)
       const fd = fs.openSync(entry.jsonlPath, 'r')
@@ -962,70 +1085,86 @@ class TmuxClaudeCodeBackend extends AgentBackend {
       lines = buf.toString('utf8').split('\n').filter(Boolean)
     } catch { return false }
 
-    // Reverse scan, whitelist logic — only user / assistant / system+selected subtypes decide the
-    // state; every other type (attachment / last-prompt / custom-title / agent-name / permission-mode /
-    // file-history-snapshot / queue-operation, plus any metadata the TUI or gateway adds later) is
-    // skipped, so new metadata types can no longer break the check.
+    // 自下往上扫，最近的一条白名单记录才代表当前状态
+    // Scan bottom-up, the nearest whitelisted record is the current state
     for (let i = lines.length - 1; i >= 0; i--) {
       let e
       try { e = JSON.parse(lines[i]) } catch { continue }
       if (e.type === 'assistant') {
-        // missing stop_reason / 'tool_use' → still running; end_turn / max_tokens / stop_sequence → done
+        // 缺stop_reason或tool_use即未结束
+        // Missing stop_reason or tool_use means still running
         const sr = e.message?.stop_reason
         return !sr || sr === 'tool_use'
       }
       if (e.type === 'user') {
-        // `/compact` finishes with a synthetic local-command stdout record. Treat it like an
-        // end_turn, or an idle TUI stays in `working` — the compact bookkeeping is itself encoded
-        // as user events and has no assistant stop_reason.
+        // compact完成回执要当作结束
+        // The compact completion receipt counts as an end
         if (isCompactCompletionUserEvent(e)) return false
         return true
       }
       if (e.type === 'system') {
         const sub = e.subtype
+        // 只认这三个子类型，其余一律跳过
+        // Only these three subtypes count, every other is skipped
         if (sub === 'init' || sub === 'hook_started' || sub === 'hook_response') return true
-        // turn_duration / stop_hook_summary / away_summary / any future subtype → skip
       }
-      // every other type is skipped
     }
-    // JSONL looks finished (nearest whitelisted record is an end_turn assistant), but the TUI may be
-    // waiting for background agents — a state JSONL cannot express, so fall back to the pane's
-    // "Waiting for N background agents to finish". A hit still counts as working (no false idle/reap).
+    // jsonl看似结束，但可能仍在等后台子agent
+    // The jsonl looks finished, but background agents may still run
+    // 故回退看面板的等待提示，命中仍算工作中
+    // So fall back to the pane's waiting line, a hit still counts
     return CLAUDE_BG_AGENTS_WAITING_RE.test(capturePaneTail(sessionId))
   }
 
-  // Dequeue detection: in Claude Code "human input actually reached the agent" = the entry carries
-  // origin.kind=='human'. Both on-disk shapes count — a top-level origin (hand-typed type:user) or an
-  // origin inside attachment (queued_command injection). /compact's completion receipt
-  // (<local-command-stdout>Compacted) is also a dequeue signal: its opener (kind=compact) opens the
-  // round only then. Everything else (system/assistant/tool...) is not.
+  /*
+   * Whether an entry proves the human input actually reached the agent, i.e. the pending round can be
+   * opened. The test is a whitelist of dequeue signals; anything else (assistant output, tool
+   * activity, ordinary metadata) is not one.
+   *
+   * In Claude Code the marker is origin.kind=='human', in either on-disk shape: a top-level origin (a
+   * hand-typed type:user) or an origin inside attachment (the queued_command injected mid-turn while
+   * the agent was busy). A /compact receipt counts too — its opener is kind=compact, so the round
+   * opens only once that receipt is written.
+   *
+   * Last resort: claude sometimes drops origin for a slash-prefixed input that fell through slash
+   * command parsing, so while such an input is pending the next valid entry is accepted. That is
+   * meant to be permissive: a missed dequeue would leave a round open forever.
+   */
   containDequeueEvent(entry: any, pendingInputs: string[] = []): boolean {
     if (!entry || typeof entry !== 'object') return false
+    // 显式 dequeue 条目本身就是消费信号
+    // An explicit dequeue entry is itself a consumption signal
     if (entry.operation === 'dequeue') return true
     if (entry.origin?.kind === 'human') return true
     if (entry.attachment?.origin?.kind === 'human') return true
     if (isCompactCompletionUserEvent(entry)) return true
-    // Claude can omit origin when a slash-prefixed path falls through slash command parsing. While
-    // any such input is pending, accept the next valid JSON entry as the dequeue signal
-    // (intentionally permissive).
+    // 斜杠输入可能丢掉origin，此时放宽认定
+    // A slash input may lose its origin, so stay permissive
     if (pendingInputs.some((input) => typeof input === 'string' && input.trimStart().startsWith('/'))) return true
     return false
   }
 
-  // Pending requests: prompts "enqueued but not yet consumed" in Claude Code's in-memory queue.
-  //
-  // Performance (big files stay fast): read only the trailing CLAUDE_WORKING_TAIL_BYTES bytes (a 100MB
-  // jsonl still reads 256KB — independent of total size) and parse only the nearest
-  // MAX_PENDING_SCAN_ENTRIES entries, never the whole tail. Pending requests always sit at the tail,
-  // so the scan runs **backwards**:
-  //   - a "consuming" entry (user/queued_command) records its signature;
-  //   - an enqueue with no match among the consumptions already scanned (those come later in the
-  //     file) is still queued.
-  // Truncation-safe by construction: a consumption always follows its enqueue (earlier in reverse), so
-  // an in-window consumption was already seen and a consumed request is never misread as pending.
-  // mobius decoration entries live in .mobius.jsonl rather than this native file, so content matching
-  // sees no send-mirror pollution.
-  // Returns [{ content, enqueuedAt }], ordered by enqueue time; empty = nothing queued.
+  /*
+   * Prompts enqueued in Claude Code's in-memory queue that have not been consumed yet, as
+   * [{ content, enqueuedAt }] in enqueue order; [] means nothing is queued.
+   *
+   * The judgement is a pairing: an enqueue is pending unless an entry that carries the same text
+   * later in the file proves consumption — type:user (typed while the agent sat idle) or
+   * attachment.type:queued_command (injected mid-turn). dequeue / remove entries carry no text, so
+   * they cannot serve as a delivered-ACK and never decide it. Text is compared whitespace-normalized,
+   * because claude rewrites a prompt when it persists it and the bytes we sent never come back
+   * verbatim.
+   *
+   * Performance: read only the trailing CLAUDE_WORKING_TAIL_BYTES and parse only the nearest
+   * MAX_PENDING_SCAN_ENTRIES entries, so a 100MB jsonl costs the same as a small one. The scan runs
+   * backwards because pending requests sit at the tail and a consumption always follows its enqueue:
+   * an in-window consumption is therefore already recorded before its enqueue is examined, and a
+   * consumed request can never be misread as pending. Truncation can at worst hide a deeply buried
+   * pending one, which is accepted as best-effort.
+   *
+   * Matching is safe from send-mirror pollution: the mobius decoration entries live in
+   * .mobius.jsonl, not in this native transcript.
+   */
   getPendingRequests(sessionId: string) {
     const jsonlPath = this._resolveJsonlPath(sessionId)
     if (!jsonlPath) return []
@@ -1049,6 +1188,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
       try { e = JSON.parse(recent[i]) } catch { continue }
       if (!e || typeof e !== 'object') continue
 
+      // 先收消费证据，倒序里它排在对应enqueue之前
+      // Collect consumption first: it precedes its enqueue in reverse
       const consumedSig = consumedRequestSignature(e)
       if (consumedSig) { consumedSigs.push(consumedSig); continue }
 
@@ -1061,22 +1202,34 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         }
       }
     }
-    pending.reverse() // reverse collection → back to enqueue order (oldest pending first)
+    // 倒序收集，翻回入队顺序（最早排队的在前）
+    // Collected in reverse, flip back to enqueue order (oldest pending first)
+    pending.reverse()
     return pending
   }
 
-  // Whether the task is done: the session drops running.flag at start and the agent removes it on
-  // completion, success or failure. No flag → done (accomplished=true). Unknown session → false
-  // (cannot tell). Anchored on flagRoot (the repo root), falling back to cwd for old entries.
+  /*
+   * Whether the task is done, read off the running flag: dispatch drops it and the agent removes it
+   * on completion, success or failure, so "no flag" means accomplished. An unknown session returns
+   * false because there is no root to look under.
+   *
+   * The lookup is anchored on flagRoot (the repo root), falling back to cwd for old entries — the
+   * repo root rather than cwd is what keeps the flag alive when the agent rebuilds its worktree.
+   */
   isJobGoalAccomplished(sessionId: string) {
     const entry = this.runtime.get(sessionId)
     const root = entry?.flagRoot || entry?.cwd
+    // 根目录未知就无从判断，按未完成回报更保守
+    // With no root there is nothing to check, so report "not accomplished"
     if (!root) return false
     return !fs.existsSync(runningFlagPathOf(root, sessionId))
   }
 
-  // Whether the task failed: failed.flag present → true. Unknown session (no root) → false (cannot
-  // tell). Same anchor as isJobGoalAccomplished (flagRoot, the repo root; cwd for old entries).
+  /*
+   * Whether the task failed: failed.flag is present. The agent writes it when it gives up (via
+   * declare_job_failed), which is a different state from "not done yet". Same root anchor as
+   * isJobGoalAccomplished, and an unknown session again returns false.
+   */
   isFailed(sessionId: string) {
     const entry = this.runtime.get(sessionId)
     const root = entry?.flagRoot || entry?.cwd
@@ -1084,6 +1237,11 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     return fs.existsSync(failedFlagPathOf(root, sessionId))
   }
 
+  /*
+   * One row per hub window: ids, pid/index, last activity (tmux reports seconds, the row is ms) and
+   * pane state. Served from the 3s cache because the syncer polls it every few seconds; a window with
+   * no runtime row simply reports a null agentSessionId.
+   */
   listSessions() {
     return listWindowsRowsCached().map((cols: string[]) => {
       const [name, pid, idx, activity, paneDead, paneCurrentCommand] = cols
@@ -1106,18 +1264,29 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     })
   }
 
-  // Live status line for the session page's LIVE card: capture the pane's last 15 lines and pick the
-  // claude TUI status line. Not alive / not working → "". A 5s TTL cache (empty results included) caps
-  // capture-pane at ≤1/5s. Nice-to-have only: failures return "" silently, never throwing into /status.
+  /*
+   * Live status line for the session page's LIVE card: the claude TUI's own status line picked out of
+   * the pane tail, "" when the session is not alive, not working or nothing matched.
+   *
+   * It reuses capturePaneTail's 5s cache, so the capture-pane spawn is shared with isWorking's
+   * background-agent fallback rather than being paid for twice — /status polls every 2s.
+   *
+   * This is also the place the dangerous-operation box is noticed (an agent stuck on it makes the
+   * session look hung, which is exactly what the card would report) and handed to the fire-and-forget
+   * heal, so the poll is never blocked by it.
+   *
+   * Nice-to-have only: any failure returns "" and is never thrown into /status.
+   */
   realTimeInfo(sessionId: string): string {
-    // Reuses capturePaneTail's 5s cache — one capture-pane spawn shared with isWorking's fallback.
-    // isWorking already captured in grey areas like "waiting for background agents", so this hits it.
+    // 截屏走5s缓存，与isWorking兜底共用
+    // The capture uses the 5s cache shared with isWorking's fallback
     try {
       if (this.isAlive(sessionId) && this.isWorking(sessionId)) {
         const paneText = capturePaneTail(sessionId)
-        // Dangerous-operation permission box: claude pops it even under "bypass permissions on", and an
-        // agent waiting on it stalls the TUI → the session looks hung. tool_use pending makes isWorking
-        // true, which covers this state; the heal (Esc + wait 5s + resume) is fire-and-forget.
+        // 危险确认框bypass下仍会弹，卡住就像挂了
+        // The danger box appears even under bypass and looks hung
+        // 此时tool_use未结，isWorking为真
+        // A pending tool_use keeps isWorking true here, covering it
         const danger = detectDangerPermission(paneText)
         if (danger.pending && danger.warning) this._maybeHealDangerPermission(sessionId, danger.warning)
         const info = findClaudeRealTimeInfo(paneText)
@@ -1127,14 +1296,24 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     return ''
   }
 
-  // Danger-box heal throttle: one heal at a time per session, and the same warning never re-triggers
-  // inside the cooldown. realTimeInfo calls it on a detectDangerPermission hit; fire-and-forget, it
-  // returns at once and never blocks the /status poll.
+  /*
+   * Throttle for the danger-box heal: one heal at a time per session, and the same warning text never
+   * re-triggers inside DANGER_HEAL_COOLDOWN_MS. Both gates are needed — a dirty Esc plus the 5s pane
+   * cache would otherwise let realTimeInfo fire the heal over and over and turn the agent into a
+   * broken record.
+   *
+   * Called by realTimeInfo on a detectDangerPermission hit. Fire-and-forget: it returns immediately
+   * and the promise chain only exists to clear the healing flag again.
+   */
   _maybeHealDangerPermission(sessionId: string, warning: string) {
     const st = _dangerHealState.get(sessionId) || { healing: false, lastWarning: '', lastTs: 0 }
     const now = Date.now()
-    if (st.healing) return  // already healing, do not repeat
-    if (warning === st.lastWarning && now - st.lastTs < DANGER_HEAL_COOLDOWN_MS) return  // same box handled recently
+    // 已经在自愈中，不重复触发
+    // Already healing, do not trigger a second time
+    if (st.healing) return
+    // 同一条警告在冷却期内也忽略，避免刷屏
+    // The same warning stays ignored during the cooldown
+    if (warning === st.lastWarning && now - st.lastTs < DANGER_HEAL_COOLDOWN_MS) return
     _dangerHealState.set(sessionId, { healing: true, lastWarning: warning, lastTs: now })
     this._healDangerPermission(sessionId, warning)
       .catch((e) => log(`[tmux-claude-code] danger heal 失败 session=${sessionId}: ${e?.message || e}`))
@@ -1144,17 +1323,23 @@ class TmuxClaudeCodeBackend extends AgentBackend {
       })
   }
 
-  // Danger-box heal, main flow (detached async, never blocks realTimeInfo / /status):
-  //   1) Esc cancels the box (claude returns to the pending/input state without running the dangerous
-  //      command; the dialog itself says "Esc to cancel")
-  //   2) wait 5s for the TUI to settle, so the dialog is fully gone
-  //   3) pauseCurrentAndResumeFromSession sends "$warning, please skip or try commands that are less
-  //      aggressive." (internally C-c×3 to interrupt the turn, then queues the new prompt; even if the
-  //      agent is still in its old turn after the Esc it gets reset)
+  /*
+   * The heal itself, detached async so it never blocks realTimeInfo or the /status poll:
+   *   1) Esc cancels the box — claude goes back to the input state without running the dangerous
+   *      command, which is what the dialog's own "Esc to cancel" offers
+   *   2) wait 5s for the TUI to settle, so the dialog is really gone before the next prompt lands
+   *   3) pauseCurrentAndResumeFromSession sends "$warning, please skip or try commands that are less
+   *      aggressive." (it interrupts with C-c×3, then queues the new prompt; an agent still inside its
+   *      old turn after the Esc is reset that way)
+   *
+   * The window is re-checked before step 3: it may have died during the 5s wait.
+   */
   async _healDangerPermission(sessionId: string, warning: string) {
     if (!windowExists(sessionId)) return
     tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Escape'])
-    _paneTailCache.delete(sessionId)  // invalidate the cache so later checks see the screen after the cancel
+    // 清掉面板缓存，后续检查才会看到取消后的画面
+    // Drop the pane cache so later checks see the screen after the cancel
+    _paneTailCache.delete(sessionId)
     log(`[tmux-claude-code] danger permission 检测到, 已 Esc 取消 (session=${sessionId}): ${warning}`)
     await new Promise((r) => setTimeout(r, 5000))
     if (!windowExists(sessionId)) return
@@ -1166,11 +1351,13 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     log(`[tmux-claude-code] danger permission 已 resume 提示 agent 跳过/换温和命令 (session=${sessionId})`)
   }
 
-  // Three-level lookup for sessionId → jsonl file path:
-  //   - runtime (Map, in-process)    — sessions currently alive
-  //   - persisted (hub-runtime.json) — live, cleared on terminate
-  //   - archive (hub-archive.json)   — every session ever, kept past terminate; how history is
-  //                                    found after an admin closes the window
+  /*
+   * Three-level lookup for sessionId → jsonl file path:
+   *   - runtime   the in-process Map, sessions currently alive
+   *   - persisted hub-runtime.json, live rows, cleared on terminate
+   *   - archive   hub-archive.json, every session ever started and kept past terminate, which is how
+   *               history still resolves after an admin closes the window or a cleaner reaps it
+   */
   _resolveJsonlPath(sessionId: string): string | null {
     return this.runtime.get(sessionId)?.jsonlPath
         || this._lookupPersistedJsonlPath(sessionId)
@@ -1178,29 +1365,51 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         || null
   }
 
-  // History snapshot from the agent-history-store DB (native jsonl deltas are backfilled before the read).
+  /*
+   * History snapshot out of the agent-history-store DB; native jsonl deltas are backfilled before the
+   * read, and the jsonl path is resolved for sessions whose window is already gone.
+   */
   getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
+    // 待处理输入一并交出去，未消费回合不算完成
+    // Hand the pending inputs over so an open round is not "done"
     const pendingInputs = this.getPendingRequests(sessionId).map((item: any) => typeof item === 'string' ? item : item?.content).filter((item): item is string => typeof item === 'string')
     return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this), pendingInputs) as HistorySnapshot
   }
 
+  /*
+   * Per-step timings derived from the jsonl, cached beside it (see the time-consume-waterfall
+   * service).
+   */
   get_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
     return timeConsumeWaterfallFromBackend(this, sessionId, opts)
   }
 
+  /*
+   * Drop that cached waterfall, so the next read recomputes it from scratch.
+   */
   clear_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
     return clearTimeConsumeWaterfallForBackend(this, sessionId, opts)
   }
 
-  // Subscribe to the raw stream: the base EventEmitter fed by this backend's watcher.
-  // Backfill is agent-history-store's job now; there is no fromSentinel resume semantics any more.
+  /*
+   * Subscribe to the raw stream: the base EventEmitter fed by this backend's watcher.
+   * Backfill is the history store's job now, so there is no fromSentinel resume semantics any
+   * more; this override only forwards to the base.
+   */
   getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, opts: QueryOpts = {}) {
+    // 直接转发给基类，行为与基类完全一致
+    // Forward straight to the base, the behavior is identical
     return super.getAgentRawThoughtStream(sessionId, listener, opts)
   }
 
-  // The send path writes the user_input/compact card = opens a new round (into agent-history-store, no
-  // file). No bound runtime jsonl path is required: the call site moved to the dispatch entry, so a new
-  // session opens its round during spawn with the path left null for the first sync to claim.
+  /*
+   * The send path writes the user_input / compact card, which is what opens a new round; it goes into
+   * the agent-history-store, not into a file.
+   *
+   * A bound runtime jsonl path is explicitly not required: the call site moved up to the dispatch
+   * entry, so a brand-new session has to be able to open its round during spawn, with the path left
+   * null for the first sync to claim.
+   */
   harnessWriteMobiusCoreEntry(sessionId: string, mobiusPromptRecord: Record<string, unknown> | null | undefined, cwdHint?: string) {
     if (!mobiusPromptRecord) return false
     const entry = this.runtime.get(sessionId)
@@ -1216,12 +1425,26 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         pendingInputs: this.getPendingRequests(sessionId).map((item: any) => typeof item === 'string' ? item : item?.content).filter((item): item is string => typeof item === 'string'),
       })
     } catch (e) {
+      // 写库失败只告警，返回false让调用方自己决定
+      // A failed write only warns; false lets the caller decide what to do
       console.warn(`[tmux-claude-code] mobius core entry failed (${sessionId}): ${(e as Error)?.message || e}`)
       return false
     }
   }
 
   // ── Internals ──────────────────────────────────────────
+  /*
+   * Create path: spawn a window when none is live, otherwise adopt the one that is, then deliver the
+   * first prompt and drop the running flag.
+   *
+   * Reuse is the defining tmux-mode trait: windows outlive a backend restart, so a live window is
+   * adopted instead of duplicated, matching the old hub.startSession idempotence. That is deliberately
+   * unlike the stream-json backend, which always creates fresh.
+   *
+   * Adopting needs a runtime row, and a window that predates the restart has none. The caller's
+   * agentSessionId is the only thing that can rebuild it (it names the jsonl to tail), so without one
+   * the else-branch below can do nothing.
+   */
   async _createImpl(opts: ClaudeDispatchOpts) {
     const { sessionId, cwd, flagRoot, displayName, initialPrompt, agentSessionId, isInitialContextPrompt = false, aimuxRemoteName, enableGulingMcp = false } = opts
     const { model, useProxy, proxyMode, settingsPath, forceNoProxy, captureStream } = unpackLaunch(opts)
@@ -1229,13 +1452,13 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     if (!initialPrompt) throw new Error('createNewSession 需要 initialPrompt')
     if (!fs.existsSync(cwd)) throw new Error(`cwd 不存在: ${cwd}`)
 
-    // tmux-mode trait: windows survive a backend restart. An existing live window is reused (matching
-    // the original hub.startSession idempotence), deliberately unlike the stream-json "always create
-    // fresh" semantics.
+    // 窗口还活着就复用，重启后不重复拉起
+    // A live window is reused, so a restart never spawns a duplicate
     if (!windowExists(sessionId)) {
       await this._spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, displayName, agentSessionId, settingsPath, captureStream, forceNoProxy, aimuxRemoteName, enableGulingMcp })
     } else {
-      // window exists but the runtime entry may not (first reload after a restart) — build one
+      // 重启后窗口还在但runtime可能为空，补建一条
+      // The window is live but may have no runtime row; rebuild one
       if (!this.runtime.has(sessionId) && agentSessionId) {
         const jp = jsonlPathOf(cwd, agentSessionId)
         const finalSettingsPath = settingsPath || null
@@ -1256,6 +1479,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
 
     const entry = this.runtime.get(sessionId)
     await this._sendMaybeInitialContextPrompt(sessionId, initialPrompt, isInitialContextPrompt)
+    // 每条消息都重刷运行标记，agent完成后自己删
+    // Every message refreshes the running flag; the agent removes it
     markRunning(flagRoot || entry?.flagRoot || entry?.cwd || cwd, sessionId)
     return {
       sessionId,
@@ -1265,8 +1490,18 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     }
   }
 
-  // Permissive variant — spawns from opts when nothing is alive (chat makes no first/follow-up
-  // distinction, so everything comes through here).
+  /*
+   * Queue path: append a prompt to a live session, or respawn the window first when it is gone. Chat
+   * draws no first/follow-up distinction, so every message after create arrives here, and this is also
+   * what _pauseImpl calls once it has interrupted the running turn.
+   *
+   * The respawn has to reconstruct what the original spawn built, hence the "opts first, last
+   * persisted row second" chain for every field: a follow-up message carries almost nothing itself,
+   * and without that fallback the window would come back on the wrong cwd, model or proxy tier.
+   *
+   * suppressRunningFlag is for a caller that owns the flag lifecycle itself and does not want this
+   * path to touch it.
+   */
   async _queueImpl(opts: ClaudeDispatchOpts) {
     const { sessionId, prompt, cwd, flagRoot, displayName, agentSessionId, isInitialContextPrompt = false, mobiusPromptRecord = null, suppressRunningFlag = false, aimuxRemoteName, enableGulingMcp = false } = opts
     let { model, useProxy, proxyMode: proxyModeArg, settingsPath, forceNoProxy, captureStream } = unpackLaunch(opts)
@@ -1274,7 +1509,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     if (!prompt) throw new Error('需要 prompt')
 
     if (!windowExists(sessionId)) {
-      // No live window → we must be able to spawn. cwd prefers opts, else the runtime persisted row.
+      // 无活窗口必须重开；字段优先opts，其次持久化行
+      // No live window means respawn; opts wins, the persisted row is the fallback
       const persisted = this.runtime.get(sessionId)
       const finalCwd = cwd || persisted?.cwd
       const finalAgentSid = agentSessionId || persisted?.agentSessionId
@@ -1307,35 +1543,52 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     if (!suppressRunningFlag) markRunning(flagRoot || entry?.flagRoot || entry?.cwd || cwd, sessionId)
   }
 
+  /*
+   * Pause path for a live window: interrupt the running turn, then either stop for good (no prompt,
+   * clear the running flag) or hand the new prompt to the queue path.
+   *
+   * Two interrupt flavours, both measured on the real TUI: urgent sends a single C-c (enough to break
+   * a turn), /stop sends three (a lone C-c is regularly swallowed). Neither may wait with
+   * spawnSync('sleep'): that blocks the event loop and freezes the whole backend, so the pauses use
+   * await setTimeout.
+   *
+   * The /stop hard-stop fallback is safe to escalate because a killed window is respawned by
+   * _queueImpl on the next message, so the session itself continues.
+   *
+   * An absent window is not an error: the caller asked to stop something that is already not running.
+   */
   async _pauseImpl({ sessionId, prompt, cwd, flagRoot, urgent = false, mobiusPromptRecord = null }: ClaudeDispatchOpts) {
     if (!sessionId) throw new Error('需要 sessionId')
     const persisted = this.runtime.get(sessionId)
 
     if (windowExists(sessionId)) {
       if (urgent) {
-        // Urgent: a single C-c interrupts the turn (one is enough in practice). Space it with
-        // await setTimeout, never spawnSync('sleep') — that blocks the event loop and freezes node.
+        // 加急只发一次C-c即可打断，实测一次就够
+        // Urgent sends one C-c; one press is enough in practice
+        // 不要用spawnSync睡眠，会阻塞事件循环
+        // Use await setTimeout; spawnSync('sleep') blocks the event loop
         tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
         await new Promise(r => setTimeout(r, 250))
-        // After the interrupt old input may be back in the box; Alt+Enter first to separate it, or it
-        // sticks to the new prompt
+        // 旧输入可能回到输入框，先Alt+Enter分隔
+        // Old input can return to the box; Alt+Enter keeps it separate
         tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'M-Enter'])
         await new Promise(r => setTimeout(r, 80))
       } else {
-        // /stop: 3 C-c's interrupt the turn without killing the window; in practice the TUI swallows one.
+        // /stop连发3次C-c，TUI会吞掉其中一次
+        // /stop fires 3 C-c; the TUI swallows one of them
         for (let i = 0; i < 3; i++) {
           tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'C-c'])
           if (i < 2) await new Promise(r => setTimeout(r, 50))
         }
-        // give the claude TUI a moment to digest the interrupt
+        // 等TUI消化这次打断
+        // Give the TUI a moment to digest the interrupt
         await new Promise(r => setTimeout(r, 300))
-        // Fallback: C-c×3 is occasionally swallowed or stuck on a dialog and the turn never stops.
-        // Only in the empty-prompt soft stop (/stop) case do we escalate to a tmux kill-window hard
-        // stop, guaranteeing /stop always stops the background agent (a dead window is respawned by
-        // _queueImpl on the next message, so the session still continues); the urgent+new-prompt path
-        // keeps the window for input and never hard-kills. Double confirmation (capture busy → wait
-        // 700ms more → still busy) avoids killing a window that soft-stopped normally, which a briefly
-        // lingering status line would otherwise cause.
+        // 停不掉就kill-window硬停，保证生效
+        // Escalate to kill-window so /stop always stops the agent
+        // 只有空提示词的软停走这里，带新提示词不杀窗口
+        // Only the empty-prompt soft stop escalates; a new prompt keeps the window
+        // 二次确认加700ms等待，避免误杀已软停的窗口
+        // Double confirmation with a 700ms wait avoids killing a soft-stopped window
         if (!prompt) {
           _paneTailCache.delete(sessionId)
           if (claudePaneStillBusy(sessionId)) {
@@ -1352,10 +1605,13 @@ class TmuxClaudeCodeBackend extends AgentBackend {
 
     if (!prompt) {
       clearRunning(flagRoot || persisted?.flagRoot || persisted?.cwd || cwd, sessionId)
-      return  // empty prompt = interrupt only, send nothing
+      // 空提示词=只打断不发送，同时清掉运行标记
+      // An empty prompt means interrupt only; clear the running flag
+      return
     }
 
-    // go through the queue path (includes the respawn-if-dead logic)
+    // 走队列路径，死窗口会在里面重开
+    // Hand off to the queue path, which respawns a dead window
     await this._queueImpl({
       sessionId,
       prompt,
@@ -1365,21 +1621,32 @@ class TmuxClaudeCodeBackend extends AgentBackend {
       useProxy: persisted?.useProxy,
       displayName: persisted?.displayName ?? undefined,
       agentSessionId: persisted?.agentSessionId ?? undefined,
+      // 恢复的提示词不算首次上下文，避免重放开场白
+      // A resumed prompt is not initial context, so no greeting replay
       isInitialContextPrompt: false,
       mobiusPromptRecord,
     })
   }
 
-  // Returns { sessionId, killed, wasWorking } so the caller (the delete route) can raise a notice:
-  // killed=true means a live background claude code really was killed; wasWorking=true means it was
-  // still in a turn (a running task got forcibly interrupted).
+  /*
+   * Tear the session down for good: stop the watcher, drop the per-session withproxy file, remove the
+   * runtime and persisted rows, kill the window, clear the flag dir.
+   *
+   * The archive row survives on purpose, so history still resolves after the window is gone.
+   *
+   * Returns { sessionId, killed, wasWorking } so the caller (the delete route) can raise a notice:
+   * killed=true means a live background claude code really was killed; wasWorking=true means it was
+   * still in a turn (a running task got forcibly interrupted).
+   */
   async _terminateImpl(sessionId: string) {
     const wasAlive = windowExists(sessionId)
-    // isWorking re-checks isAlive internally; sample while the window is still there.
+    // 内部会再查存活，必须在杀窗口前采样
+    // isWorking re-checks aliveness, so sample before the kill
     const wasWorking = wasAlive && this.isWorking(sessionId)
     const entry = this.runtime.get(sessionId)
     if (entry?.watch?.stop) { try { entry.watch.stop() } catch {} }
-    // Clean up the per-session withproxy (digital-rain token file).
+    // 删掉数字雨用的withproxy临时文件
+    // Delete the digital-rain per-session withproxy file
     if (entry?.withProxyPath) { try { fs.unlinkSync(entry.withProxyPath) } catch {} }
     this.runtime.delete(sessionId)
     this._forgetPersisted(sessionId)
@@ -1387,7 +1654,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
       tmux(['kill-window', '-t', `${HUB}:${sessionId}`])
       log(`[tmux-claude-code] terminate: killed window=${sessionId} (wasWorking=${wasWorking})`)
     }
-    // Also drop the running flag dir (no litter if the agent never removed it)
+    // 顺手删掉标记目录，避免agent没删而留垃圾
+    // Drop the flag dir too, in case the agent never removed it
     const flagRoot = entry?.flagRoot || entry?.cwd
     if (flagRoot) {
       safeRemoveFlagDir(flagRoot, sessionId, 'tmux-claude-code')
@@ -1396,178 +1664,223 @@ class TmuxClaudeCodeBackend extends AgentBackend {
   }
 
   // ── Low-level tmux operations ──────────────────────────
-  // Start a new Claude Code tmux window and register its runtime state in memory and on disk.
+  /*
+   * Start a new tmux window that runs the interactive claude TUI and register the session's runtime
+   * state in memory and on disk.
+   *
+   * The launch command is a bash -lc chain of fragments joined with &&, so a failing step stops the
+   * exec. The optional env-proxy sourcing comes first, then the always-on bits (clear the VS Code IPC
+   * env so the CLI cannot attach to a host IDE, IS_SANDBOX, CLAUDE_CODE_EAGER_FLUSH so the transcript
+   * flushes at turn checkpoints), then the exec itself. The proxy tier picks the exec shape: direct /
+   * env exec claude bare, proxychains / env_proxychains wrap it in proxychains. --settings is passed
+   * in both branches on purpose — the proxied one once omitted it, silently dropping a session's
+   * settings file (channel/key/permissions/withproxy.json) back to the global default.
+   *
+   * Resume is opportunistic: an agentSessionId whose jsonl is not visible under this cwd is warned
+   * about and degraded to a fresh session, because an old SDK-chain transcript may live elsewhere.
+   * Otherwise --resume reuses that id, while a new session binds a fresh uuid via --session-id.
+   *
+   * new-window returns before the TUI has drawn, so the spawn then polls the pane until the ready
+   * sentinel (the footer "bypass permissions on") shows. While waiting it auto-confirms every dialog
+   * that would otherwise block startup forever: the folder-trust box, the first-run onboarding pages,
+   * the custom-API-key question and the bypass-permissions warning. Each keeps its own sentinel set
+   * and rate-limited key press, because send-keys is occasionally swallowed and the same dialog may
+   * need a second press. A TUI that never becomes ready has its window killed rather than left
+   * behind, and the timeout is thrown with the cwd.
+   */
   async _spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode: proxyModeArg, displayName, agentSessionId, settingsPath, captureStream = false, forceNoProxy = false, aimuxRemoteName, enableGulingMcp = false }: ClaudeDispatchOpts) {
-    // dispatch-level fields may be null: normalized into non-null working values here (the persisted
-    // fallback happens in the caller).
+    // 入参可为null，此处归一为非空，兜底在调用方
+    // Nullable args become non-null here; the persisted fallback is the caller's
     if (!sessionId || !cwd) throw new Error('_spawnWindow 需要 sessionId + cwd')
     const finalDisplayName = displayName || null
     const finalAgentSid = agentSessionId || null
     const finalFlagRoot = flagRoot || cwd
-    // Make sure the tmux hub session hosting agent windows exists.
+    // 确保承载所有agent窗口的hub会话存在
+    // Make sure the hub session hosting every agent window exists
     ensureHub()
-    // The running flag defaults to cwd; a caller-supplied flagRoot (a stable path such as the repo
-    // root) wins.
+    // 运行标记默认落在cwd，调用方给的flagRoot(仓库根)优先
+    // The flag defaults to cwd; a caller-given flagRoot (repo root) wins
     const effFlagRoot = finalFlagRoot
-    // A fresh start uses the caller's session values; with no historical runtime it defaults to no proxy.
-    // settingsPath is resolved to an absolute path so later bash commands are not cwd-sensitive.
+    // settingsPath转成绝对路径，后面的bash命令不受cwd影响
+    // Resolve settingsPath absolute so later bash commands stay cwd-independent
     let finalSettingsPath = settingsPath ? path.resolve(settingsPath) : null
-    // captureStream (digital rain): generate a per-session withproxy carrying sessionId/agent at spawn.
+    // 数字雨模式在启动时就生成带sessionId/agent的withproxy文件
+    // Digital-rain mode writes the per-session withproxy file right at spawn
     let withProxyPath: string | null = null
     if (captureStream && finalSettingsPath) {
       try {
         withProxyPath = ensureSessionWithProxy(finalSettingsPath, { sessionId, agent: finalDisplayName })
         finalSettingsPath = withProxyPath
       } catch (e: any) {
+        // 生成失败只告警，回落原settings，别拦下整个启动
+        // A failed withproxy only warns and falls back, it must not block the spawn
         console.warn(`[tmux-claude-code] per-session withproxy 生成失败, 回落原 settings (${sessionId}): ${e?.message || e}`)
         withProxyPath = null
       }
     }
-    // When a settings file is given, confirm it really exists before starting.
+    // settings文件缺失直接报错，避免悄悄用默认配置启动
+    // A missing settings file is fatal, never silently start on the default config
     if (finalSettingsPath && !fs.existsSync(finalSettingsPath)) {
-      // Fail outright on a missing settings file, so Claude never starts silently on the default config.
       throw new Error(`Claude Code settings 文件不存在: ${finalSettingsPath}`)
     }
-    // Settings and proxy are independent: the proxy branch passes --settings too.
+    // 代理档位与settings互相独立，代理分支一样要传--settings
+    // Proxy tier and settings are independent; the proxy branch passes settings too
     const proxyMode = resolveClaudeProxyMode(!!useProxy, !!forceNoProxy, false, proxyModeArg ?? null)
     const finalForceNoProxy = proxyMode.forceNoProxy
     const finalUseProxy = proxyMode.useProxy
     const finalProxyMode = proxyMode.proxyMode
-    // With a proxy, check the deps for that mode (env only the env file, proxychains only conf+bin).
+    // 走代理先查该档依赖，缺依赖直接失败不静默直连
+    // A proxied spawn checks its tier's deps and fails, never goes direct
     if (finalUseProxy) assertProxyAvailable(finalProxyMode)
 
-    // Resume guard: an old session's jsonl may live outside our path (it came from the old SDK chain).
-    // A non-null agentSessionId means the caller wants to resume an old Claude session.
+    // 有agentSessionId说明调用方要恢复旧会话
+    // A non-null agentSessionId means the caller wants to resume an old session
     let useResume = !!finalAgentSid
-    // Before resuming, confirm the target jsonl is visible under the current cwd.
+    // 旧SDK链路的jsonl可能不在本cwd下，恢复前先核实
+    // An old SDK-chain jsonl may sit outside this cwd, so verify before resuming
     if (useResume && finalAgentSid && !fs.existsSync(jsonlPathOf(cwd, finalAgentSid))) {
-      // Warn on a missing jsonl and degrade to a new session.
+      // jsonl不在就告警降级为新会话，恢复不可信
+      // A missing jsonl warns and degrades to a new session, resume is untrustworthy
       console.warn(`[tmux-claude-code] resume target jsonl 不存在 (${agentSessionId}), fallback 为新 session`)
-      // Turn the resume path off; a fresh Claude session id is generated below.
+      // 关掉恢复分支，下面会生成新的claude会话id
+      // Turn resume off; a fresh claude session id is generated below
       useResume = false
     }
-    // resume reuses the old agentSessionId; a new session gets a fresh UUID.
+    // 恢复沿用旧id，新会话生成新uuid
+    // Resume reuses the old id, a new session gets a fresh uuid
     const claudeSessionId = useResume ? finalAgentSid! : crypto.randomUUID()
 
-    // Tools to disallow: AskUserQuestion/ExitPlanMode/EnterPlanMode permanently (so the agent never
-    // stops to wait for a human or gets stuck in plan mode). With the guling live-trading MCP
-    // injected, also disallow its real order-placing tools (buy/sell/cancel/switch_account) and keep
-    // only the read-only queries (position/balance/orders/settlement/watchlist), so the AI cannot
-    // trigger a real trade.
+    // 常禁这三个工具，agent才不会停下来等人或卡在plan模式
+    // Always ban these three so the agent never waits on a human or plan mode
     const disallowedTools = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode']
 
-    // stdio/http MCP servers to inject (a session-level --mcp-config <json-file> with a top-level
-    // mcpServers, additive — never --strict-mcp-config — and servers passed via --mcp-config count as
-    // explicitly trusted, so no .mcp.json trust dialog appears). One file per session.
+    // 注入的MCP按会话各写一个配置文件，不加--strict-mcp-config
+    // MCP servers are injected via one config file per session, not strict mode
+    // 这样传入的server算已信任，不会再弹.mcp.json信任框
+    // Servers passed this way count as trusted, so no .mcp.json dialog appears
     const mcpServers: Record<string, any> = {}
-    // TUI sessions (add_remote_aimux_mcp): the aimux stdio MCP, letting claude drive a remote
-    // workstation through the remote_* tools (remote_exec_command/write_stdin/apply_patch/view_image/ping).
+    // 给TUI会话注入aimux远程MCP，让claude驱动远端机器
+    // TUI sessions get the aimux remote MCP server injected
     if (aimuxRemoteName) {
       mcpServers.aimux = { command: resolveAimuxBin(), args: ['mcp', 'serve', '--remote', aimuxRemoteName] }
     }
-    // Xiaomo assistant sessions (enableGulingMcp): the guling live-trading MCP (HTTP), letting claude
-    // read funds/positions directly. The token comes from env; unset means resolveGulingMcp() returns
-    // null → skip.
+    // 小莫会话注入guling实盘MCP，直接读资金和持仓
+    // Xiaomo sessions get the guling trading MCP to read funds and positions
+    // token只从env取，没配就返回null跳过注入
+    // The token comes from env only; unset means no injection
     if (enableGulingMcp) {
       const guling = resolveGulingMcp()
       if (guling) {
         mcpServers.guling = guling
+        // 只禁实盘下单工具，读类查询保留，AI无法真下单
+        // Only the order-placing tools are banned, so the AI cannot trade for real
         disallowedTools.push('mcp__guling__buy', 'mcp__guling__sell', 'mcp__guling__cancel', 'mcp__guling__switch_account')
       }
     }
 
-    // Assemble the argument list handed to the claude CLI.
+    // 拼接交给claude CLI的参数表
+    // Assemble the argument list handed to the claude CLI
     const claudeArgs = [
-      // Skip permission prompts so the background agent can act on its own.
+      // 跳过权限询问，后台agent才能自主干活
+      // Skip permission prompts so the background agent can act on its own
       `--dangerously-skip-permissions`,
       `--disallowedTools ${disallowedTools.join(',')}`,
-      // --resume for a resume, --session-id to bind a fresh session to a fixed id.
+      // 恢复用--resume，新会话用--session-id绑一个固定id
+      // --resume for a resume, --session-id to bind a fresh session
       useResume ? `--resume ${claudeSessionId}` : `--session-id ${claudeSessionId}`,
     ]
-    // Append --model (shell-escaped) when the caller pinned a model.
+    // 调用方指定了model才追加--model，值做shell转义
+    // Append a shell-quoted --model only when the caller pinned one
     if (model) claudeArgs.push(`--model ${shellQuote(model)}`)
-    // With any MCP server to inject, write the per-session config file and pass it to claude.
+    // 有MCP要注入就写会话级配置文件，再用--mcp-config传进去
+    // With MCP servers to inject, write the per-session config and pass it in
     if (Object.keys(mcpServers).length > 0) {
       const mcpConfigPath = path.join(os.tmpdir(), `mobius-mcp-${sessionId}-${crypto.randomUUID().slice(0, 8)}.json`)
       fs.writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }))
       claudeArgs.push(`--mcp-config ${shellQuote(mcpConfigPath)}`)
     }
-    // Prefer the caller's settings file; otherwise the default Mobius Claude settings.
+    // 优先调用方给的settings文件，否则用Mobius默认settings
+    // Prefer the caller's settings file, else the Mobius default settings
     const settingsArg = finalSettingsPath
       ? `--settings ${shellQuote(finalSettingsPath)}`
       : `--settings "$HOME/.claude/mobiusdefault.settings.json"`
 
-    // bash -lc chain: proxychains only per session config, but the IDE IPC env is always cleared.
-    // These are the fragments of the bash -lc command; null entries are filtered out below.
+    // bash -lc链的片段，null项在下面被过滤掉
+    // Fragments of the bash -lc chain; null entries are filtered out below
     const cmd = [
-      // env mode: load the env-var proxy (new name first, legacy .bash as fallback).
+      // env档位才加载环境变量代理，新文件名优先旧.bash兜底
+      // Only the env tiers source the env proxy; new name first, legacy .bash second
       (finalProxyMode === 'env' || finalProxyMode === 'env_proxychains')
         ? `set -a && (source "$HOME/proxy_envs.conf" 2>/dev/null || source "$HOME/proxy_envs.bash") && set +a`
         : null,
-      // Clear VS Code IPC env so the CLI cannot attach to the host IDE by mistake.
+      // 清掉VS Code的IPC环境变量，避免CLI误连宿主机IDE
+      // Clear the VS Code IPC env so the CLI cannot attach to a host IDE
       `unset VSCODE_IPC_HOOK_CLI VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_MAIN`,
-      // Mark the process as running in a controlled sandbox.
+      // 标记进程跑在受控沙箱里
+      // Mark the process as running in a controlled sandbox
       `export IS_SANDBOX=1`,
-      // Flush the transcript at turn checkpoints (it used to batch asynchronously every 100ms).
+      // 每轮检查点就刷转录，原来是异步攒批约100ms
+      // Flush the transcript at turn checkpoints instead of async batching
       `export CLAUDE_CODE_EAGER_FLUSH=1`,
-      // Mode split: direct/env exec bare; proxychains/env_proxychains wrap in chains. settingsArg
-      // must be there in both branches — the proxy branch used to omit --settings, silently dropping
-      // a proxied session's settings file (channel/key/permissions/withproxy.json) back to the global
-      // default.
+      // 直连档直接exec，代理档套一层proxychains
+      // direct/env exec bare, the proxychains tiers wrap the exec
+      // 两分支都必带settingsArg，代理档曾漏传会静默回落全局配置
+      // Both branches must pass settingsArg; the proxied one once dropped it
       (finalProxyMode === 'proxychains' || finalProxyMode === 'env_proxychains')
         ? `exec proxychains -q -f "$HOME/proxychains_config_for_llm_models.conf" claude ${settingsArg} ${claudeArgs.join(' ')}`
         : `exec claude ${settingsArg} ${claudeArgs.join(' ')}`,
-      // Drop empty fragments and join with && so a failed step stops the chain.
+      // 丢掉空片段后用&&串联，任一步失败即中断整条链
+      // Drop empty fragments and join with &&, so a failed step stops the chain
     ].filter(Boolean).join(' && ')
 
-    // Main path: pre-set the trust so the TUI never even shows "trust this folder" (screenshot
-    // fallback when it fails). Writing the trusted state up front cuts the startup prompts.
+    // 预先写好目录信任，TUI就不会弹"trust this folder"
+    // Pre-set the trust so the trust-folder dialog never shows up
+    // 这一步失败由就绪轮询里的截屏自动确认兜底
+    // A failure here falls back to the screenshot auto-confirm in the ready poll
     ensureProjectTrusted(cwd)
 
-    // Create the background window in the hub session, running bash -lc cmd inside cwd.
+    // 在hub会话里建后台窗口，在cwd下跑bash -lc cmd
+    // Create the background window in the hub, running bash -lc cmd in cwd
     const r = tmux(['new-window', '-d', '-t', HUB, '-n', sessionId, '-c', cwd, 'bash', '-lc', cmd])
-    // Carry stderr out on failure, to pin down command-level problems.
+    // 失败时带出stderr，便于定位命令级问题
+    // Surface stderr on failure so command-level problems are diagnosable
     if (r.status !== 0) throw new Error(`tmux new-window 失败: ${r.stderr}`)
-    // Log window, cwd, Claude session, proxy and settings.
     log(`[tmux-claude-code] started: window=${sessionId} cwd=${cwd} claude_session=${claudeSessionId} proxy_mode=${finalProxyMode}${finalSettingsPath ? ` settings=${finalSettingsPath}` : ''}`)
 
-    // Wait for TUI ready (the footer "bypass permissions on" appears)
-    // Deadline for the TUI-ready wait.
+    // 等TUI就绪：页脚出现"bypass permissions on"才算可用
+    // Wait for TUI ready: the footer "bypass permissions on" must appear
     const deadline = Date.now() + READY_TIMEOUT_MS
-    // Set true once the ready sentinel is seen.
     let ready = false
-    // Last auto trust confirm, for rate limiting.
+    // 四个时间戳分别给四类自动确认限流，避免刷屏
+    // Four timestamps rate-limit the four auto-confirms so the TUI is not flooded
     let lastTrustPress = 0
-    // Last auto onboarding confirm, for rate limiting.
     let lastOnboardingPress = 0
-    // Last auto API-key confirm, for rate limiting.
     let lastApiKeyPress = 0
-    // Last auto bypass-warning confirm, for rate limiting.
     let lastBypassPress = 0
     const target = `${HUB}:${sessionId}`
-    // Poll the tmux pane until the deadline.
+    // 轮询面板到截止时间，每轮先查就绪再处理弹窗
+    // Poll the pane until the deadline: readiness first, then the dialogs
     while (Date.now() < deadline) {
-      // A failed capture counts as an empty screen; the next round retries.
+      // 截屏失败按空屏处理，下一轮重试
+      // A failed capture counts as an empty screen, the next round retries
       const { text: screen } = take_tmux_window_text(target, 100)
-      // The ready sentinel ends the wait.
+      // 出现就绪锚点即结束等待
+      // The ready sentinel ends the wait
       if (screen.includes(READY_SENTINEL)) { ready = true; break }
-      // Trust dialog: "❯ 1. Yes, I trust this folder" is already highlighted, so Enter confirms it.
-      // The rate-limited re-send covers the TUI occasionally swallowing send-keys Enter, until the
-      // dialog goes away. A trust prompt on screen enters the auto-confirm logic.
+      // 信任框默认已选中"1. Yes"，直接回车即可确认
+      // The trust box already highlights "1. Yes", so Enter confirms it
       if (TRUST_PROMPT_SENTINELS.some(s => screen.includes(s))) {
-        // now, to test the next-keypress interval.
         const now = Date.now()
-        // Never flood the TUI with Enter.
+        // 限流重发，TUI偶尔吞掉send-keys，直到弹窗消失
+        // Rate-limited re-send covers a swallowed send-keys until the box goes
         if (now - lastTrustPress > TRUST_PRESS_INTERVAL_MS) {
-          // Confirm the trusted directory.
           tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
-          // Record the Enter time.
           lastTrustPress = now
-          // Note the auto-confirmed trust dialog.
           log(`[tmux-claude-code] window=${sessionId} 检测到目录信任对话框, 已自动确认信任 (cwd=${cwd})`)
         }
       }
-      // First-run onboarding dialog (text style, welcome screen): auto-confirm with Enter.
+      // 首次启动的引导页(选文本样式/欢迎屏)也按回车确认
+      // First-run onboarding pages are confirmed with Enter too
       if (ONBOARDING_PROMPT_SENTINELS.some(s => screen.includes(s))) {
         const now = Date.now()
         if (now - lastOnboardingPress > ONBOARDING_PRESS_INTERVAL_MS) {
@@ -1576,7 +1889,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
           log(`[tmux-claude-code] window=${sessionId} 检测到首次启动引导对话框, 已自动确认`)
         }
       }
-      // "Detected a custom API key" dialog: press "1" to use the env key.
+      // 自定义API Key弹窗按1选环境变量的key
+      // The custom-API-key dialog: press 1 to use the env key
       if (API_KEY_PROMPT_SENTINELS.some(s => screen.includes(s))) {
         const now = Date.now()
         if (now - lastApiKeyPress > API_KEY_PRESS_INTERVAL_MS) {
@@ -1586,7 +1900,8 @@ class TmuxClaudeCodeBackend extends AgentBackend {
           log(`[tmux-claude-code] window=${sessionId} 检测到 API Key 对话框, 已自动选择使用环境变量 Key`)
         }
       }
-      // "Bypass Permissions mode" warning: "2" + Enter accepts (option 1 = No/exit, option 2 = Yes/accept).
+      // bypass警告默认1是退出，要按2再回车才接受
+      // The bypass warning defaults to 1 = exit, so 2 + Enter accepts
       if (BYPASS_WARN_SENTINELS.some(s => screen.includes(s))) {
         const now = Date.now()
         if (now - lastBypassPress > BYPASS_WARN_INTERVAL_MS) {
@@ -1596,58 +1911,63 @@ class TmuxClaudeCodeBackend extends AgentBackend {
           log(`[tmux-claude-code] window=${sessionId} 检测到 Bypass Permissions 警告, 已自动确认接受`)
         }
       }
-      // Wait one poll interval, then look at the screen again.
+      // 歇一个轮询间隔再看屏
+      // Wait one poll interval, then look at the screen again
       await new Promise(r => setTimeout(r, READY_POLL_MS))
     }
-    // Not ready in time: clean up the window just created and throw.
+    // 超时没就绪就杀掉刚建的窗口再抛出，不留废窗口
+    // Not ready in time: kill the window just created and throw
     if (!ready) {
-      // Never leave an unusable background window behind.
       tmux(['kill-window', '-t', `${HUB}:${sessionId}`])
-      // Hand the timeout and cwd to the caller.
       throw new Error(`claude TUI 未在 ${READY_TIMEOUT_MS}ms 内 ready (cwd=${cwd}).`)
     }
-    // The TUI is usable.
+    // TUI已可用
+    // The TUI is usable
     log(`[tmux-claude-code] window=${sessionId} TUI ready`)
 
-    // jsonl path for this Claude session.
+    // jsonl路径由cwd和claude会话id推导，不做探测
+    // The jsonl path is derived from cwd and the claude session id
     const jp = jsonlPathOf(cwd, claudeSessionId)
-    // Write the window's runtime state into the in-memory map.
+    // 在内存里登记这个窗口的运行时状态
+    // Register this window's runtime state in memory
     this.runtime.set(sessionId, {
-      // claude's internal session id.
       agentSessionId: claudeSessionId,
-      // cwd, flag root, model and proxy settings.
       cwd, flagRoot: effFlagRoot, model: model || null, useProxy: finalUseProxy, proxyMode: finalProxyMode,
-      // settings, per-session withproxy, force-no-proxy and display name.
       settingsPath: finalSettingsPath, withProxyPath, captureStream: !!captureStream, forceNoProxy: finalForceNoProxy, displayName: displayName || null,
-      // jsonl path, start time and the watcher placeholder.
       jsonlPath: jp, startedAt: Date.now(), watch: null,
     })
-    // Persist the same core state so a service restart can restore it.
+    // 同样的核心状态落盘，服务重启后能原样恢复
+    // Persist the same core state so a service restart can restore it
     this._persistEntry(sessionId, {
-      // Persist claude's session id, cwd and flag root.
       agentSessionId: claudeSessionId, cwd, flagRoot: effFlagRoot,
-      // Persist model, proxy, settings and display name.
       model: model || null, useProxy: finalUseProxy,
       settingsPath: finalSettingsPath, withProxyPath, captureStream: !!captureStream, forceNoProxy: finalForceNoProxy, displayName: displayName || null,
-      // Persist jsonl path and start time.
       jsonlPath: jp, startedAt: Date.now(),
     })
-    // Start the jsonl watcher so agent output keeps flowing in.
+    // 起jsonl监听，agent输出才能持续推给订阅方
+    // Start the jsonl watcher so agent output keeps flowing to subscribers
     this._ensureWatcher(sessionId)
 
-    // Window start drops the running flag; every prompt submission refreshes it and the agent removes
-    // it on completion per the session-context hint. flagRoot is anchored at the repo root (≠ cwd
-    // inside a worktree), so rebuilding the worktree cannot delete the flag. Foreign logic reads the
-    // flag to know the session is running.
+    // 建窗即打标记，每次提交刷新，agent完成后自删
+    // Spawn drops the flag, every prompt refreshes it, the agent removes it
+    // 标记锚在仓库根而非worktree里的cwd，重建不会误删
+    // Rooted at the repo root, not the worktree cwd, so a rebuild cannot delete it
     markRunning(effFlagRoot, sessionId)
   }
 
-  // tmux load-buffer + paste-buffer -p + marker landing probe + spaced re-send Enter×3.
-  // -p (bracketed paste) is mandatory: otherwise a \n inside the text is read as Return, a multi-line
-  // message submits early at the first newline and the rest plus the trailing explicit Enter become a
-  // second message (the root cause of multi-line splits). -p was removed historically because the
-  // explicit Enter after it was occasionally swallowed → fixed by the confirm-style re-send.
+  /*
+   * Deliver a freshly spawned session's very first prompt. Only the initial context goes through the
+   * warm-up split; every other call is a plain pass-through to _sendPromptToWindow.
+   *
+   * The split exists because a TUI that is still starting up can drop input that arrives before it
+   * is ready to accept it, so two of the three plans buy it time — or give it something harmless to
+   * render — before the real context lands: greeting first, context straight in, or context after the
+   * settle delay. Which variant is actually needed was never pinned down, so sessions take one at
+   * random and the chosen plan is logged.
+   */
   async _sendMaybeInitialContextPrompt(sessionId: string, text: string, isInitialContextPrompt?: boolean) {
+    // 不是首次上下文就直接发，不走预热分支
+    // A non-initial prompt is sent straight, no warm-up branch
     if (!isInitialContextPrompt) {
       await this._sendPromptToWindow(sessionId, text)
       return
@@ -1657,7 +1977,11 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     if (plan === 'greeting_then_context') {
       const greeting = pickInitialContextGreeting()
       log(`[tmux-claude-code] initial context plan=${plan} greeting=${JSON.stringify(greeting)} delay_ms=${INITIAL_CONTEXT_DELAY_MS}`)
+      // 先甩一句问候让TUI渲染起来并接受输入
+      // Throw a greeting first so the TUI renders and accepts input
       await this._sendPromptToWindow(sessionId, greeting)
+      // 等TUI稳定后再发真正的上下文
+      // Give the TUI time to settle before the real context lands
       await sleep(INITIAL_CONTEXT_DELAY_MS)
       await this._sendPromptToWindow(sessionId, text)
       return
@@ -1665,59 +1989,132 @@ class TmuxClaudeCodeBackend extends AgentBackend {
 
     if (plan === 'delay_then_context') {
       log(`[tmux-claude-code] initial context plan=${plan} delay_ms=${INITIAL_CONTEXT_DELAY_MS}`)
+      // 先干等一段让TUI起来，再发上下文
+      // Wait out the startup before sending the context
       await sleep(INITIAL_CONTEXT_DELAY_MS)
       await this._sendPromptToWindow(sessionId, text)
       return
     }
 
+    // 剩下的direct_context档不做预热，直接发
+    // The remaining direct_context plan sends straight, no warm-up
     log(`[tmux-claude-code] initial context plan=${plan}`)
     await this._sendPromptToWindow(sessionId, text)
   }
 
+  /*
+   * Deliver a prompt into an already-running claude TUI window: stage the text in a tmux buffer,
+   * paste it as one bracketed block, wait until the pane proves it landed, then press Enter.
+   * Shared by the initial-context dispatch and the normal queue path; both call it only after
+   * ensuring the window exists.
+   *
+   * The prompt never goes through argv (load-buffer reads stdin), so a long prompt cannot hit
+   * ARG_MAX and its text never shows up in ps.
+   *
+   * Bracketed paste (-p) is mandatory: without it a \n inside the text is read as Return, so a
+   * multi-line message submits early at the first newline and the rest plus the explicit Enter
+   * become a second message (the root cause of multi-line splits). -p was removed historically
+   * because the Enter after it was occasionally swallowed — the confirm-style re-send below is the
+   * fix, which is why both stay.
+   *
+   * Note the two meanings of -p: bracketed paste for paste-buffer, print-to-stdout for capture-pane.
+   *
+   * The landing check accepts either the tail probe (findPasteMarker) or a collapsed-paste
+   * placeholder: a big paste is rendered as "[Pasted text N lines]" instead of its own text, so
+   * the probe could never match and the wait would always burn its full budget.
+   */
   async _sendPromptToWindow(sessionId: string, text: string) {
+    // 检查tmux窗口是否存在，不存在抛出错误
+    // Check tmux window exist, if not, throw error
     if (!windowExists(sessionId)) {
       throw new Error(`window ${sessionId} 不存在`)
     }
 
-    const marker = findAsciiTailMarker(text)
+    // 取提示词去掉空白后的最后10个字符作为探针，取不到为null
+    // Take the last 10 whitespace-stripped chars of the prompt as probe, null if none
+    const marker = findPasteMarker(text)
+    // 记录窗口、长度和探针，探针可能含中文，加引号便于辨认
+    // Log window, length and probe; quotes make a CJK probe easier to read
     log(`[tmux-claude-code] sendPrompt window=${sessionId} len=${text.length} marker=${marker ? JSON.stringify(marker) : '(none)'}`)
 
+    // tmux buffer全局共享，用进程号加毫秒命名避免并发互撞
+    // tmux buffers are server-global, name by pid and ms to avoid clashes
     const bufName = `imac_${process.pid}_${Date.now()}`
+    // 末尾的-表示从stdin读，提示词不进命令行，避免超长和泄漏
+    // Trailing - reads stdin, keeps the prompt out of argv and ps
     const r1 = tmux(['load-buffer', '-b', bufName, '-'], { input: text })
+    // 装载buffer失败直接抛出
+    // Throw when loading the buffer fails
     if (r1.status !== 0) throw new Error(`tmux load-buffer 失败: ${r1.stderr}`)
 
+    // -p括号粘贴，-d粘贴成功后删buffer，-t指定目标窗口
+    // -p bracketed paste, -d drops the buffer on success, -t targets the window
     const r2 = tmux(['paste-buffer', '-p', '-d', '-b', bufName, '-t', `${HUB}:${sessionId}`])
     if (r2.status !== 0) {
+      // -d只在成功时生效，失败要手动清掉buffer
+      // -d only fires on success, so clean the buffer by hand here
       tmux(['delete-buffer', '-b', bufName])
       throw new Error(`tmux paste-buffer 失败: ${r2.stderr}`)
     }
 
-    if (marker) {
-      // probe for the marker (= the paste really landed in the TUI input box)
-      const deadline = Date.now() + PASTE_PROBE_TIMEOUT_MS
-      let saw = false
-      while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, PASTE_PROBE_INTERVAL_MS))
-        const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-80'])
-        if (pane.status === 0 && pane.stdout.includes(marker)) { saw = true; break }
-      }
-      if (!saw) console.warn(`[tmux-claude-code] paste marker 未出现 (${PASTE_PROBE_TIMEOUT_MS}ms 内), Enter 仍发送`)
-    } else {
-      // no ASCII marker → fall back to sleep, scaled linearly with text length
-      const sleepMs = Math.min(PASTE_SLEEP_MAX_MS, Math.max(PASTE_SLEEP_BASE_MS, Math.floor(text.length * 0.5)))
-      await new Promise(r => setTimeout(r, sleepMs))
-    }
+    // 记录等待起点，命中日志里要算耗时
+    // Record the wait start, the hit log reports elapsed time
+    const pasteWaitStartedAt = Date.now()
 
-    // Submit: bracketed paste (-p) is atomic so extra trailing Enters never split the message, while
-    // the TUI's input-mode switch occasionally swallows the first one — hence the same idempotent idea
-    // as "C-c×3 / trust-dialog re-press": re-send N times with a gap. Once submitted the box is empty
-    // and a spare Enter is a no-op in the claude TUI.
+    // 轮询面板直到探针或折叠占位符出现，说明文字已渲染或已被折叠接收
+    // Poll the pane until the probe or the collapsed-paste placeholder shows
+    const deadline = pasteWaitStartedAt + PASTE_SLEEP_MAX_MS
+    let saw = false
+    let attempt = 0
+    while (Date.now() < deadline) {
+      // 每200ms截屏一次
+      // Capture the pane every 200ms
+      await new Promise(r => setTimeout(r, PASTE_PROBE_INTERVAL_MS))
+      attempt += 1
+      // 只截最后80行，够覆盖输入框且开销小
+      // Only the last 80 lines, enough for the input box and cheap
+      const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-80'])
+      // 截屏失败也要记一笔，排查时能区分没粘上还是没截到
+      // Log a failed capture too, so a miss can be told apart from a blank screen
+      if (pane.status !== 0) {
+        log(`[tmux-claude-code] paste poll window=${sessionId} attempt=${attempt} capture=failed`)
+        continue
+      }
+      // 比对前去掉面板里的空格和换行，避免TUI折行导致匹配不上
+      // Strip the pane's whitespace before comparing, so TUI wrapping cannot break the match
+      const compactPane = pane.stdout.replace(/\s+/g, '')
+      const hitMarker = !!marker && compactPane.includes(marker)
+      const hitPlaceholder = PASTE_PLACEHOLDER_RE.test(pane.stdout)
+      // 每次轮询都记录结果，命中与否都要能看到
+      // Log every poll, hit or miss, so the whole match stays visible when debugging
+      log(`[tmux-claude-code] paste poll window=${sessionId} attempt=${attempt} marker=${hitMarker} placeholder=${hitPlaceholder} elapsed=${Date.now() - pasteWaitStartedAt}ms`)
+      if (hitMarker || hitPlaceholder) {
+        saw = true
+        break
+      }
+    }
+    // 超时也照样发回车，不能把这一轮卡死
+    // Send Enter anyway on timeout, do not strand the turn
+    if (!saw) console.warn(`[tmux-claude-code] paste marker/placeholder did not appear within ${PASTE_SLEEP_MAX_MS}ms (attempts=${attempt}), Enter 仍发送`)
+
+    // 提交回车：括号粘贴是原子的，多发几次不会拆开消息
+    // Submit Enter: bracketed paste is atomic, extra sends never split it
+    // 而TUI切换输入模式时会吞掉第一次，故重发N次幂等
+    // The TUI's input-mode switch swallows the first one, so re-send N times
     for (let i = 0; i < SUBMIT_ENTER_ATTEMPTS; i++) {
+      // 发送回车提交提示词
+      // Send Enter to submit the prompt
       const r = tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+      // 回车都发不出去说明窗口有问题，直接抛出
+      // A window that cannot take Enter will not recover, throw
       if (r.status !== 0) throw new Error(`tmux send-keys Enter 失败: ${r.stderr}`)
+      // 最后一次不用再等
+      // No wait after the last attempt
       if (i < SUBMIT_ENTER_ATTEMPTS - 1) await new Promise(r => setTimeout(r, SUBMIT_ENTER_INTERVAL_MS))
     }
 
+    // 记录一次提示词投递，内部吞异常不影响投递
+    // Record one prompt delivery, it swallows its own failures
     recordPromptPaste({ backendName: this.name, sessionId, contentLength: text.length })
   }
 }
