@@ -1137,6 +1137,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     if (entry.operation === 'dequeue') return true
     if (entry.origin?.kind === 'human') return true
     if (entry.attachment?.origin?.kind === 'human') return true
+    if (entry.message?.content === '<command-name>/compact</command-name>') return true
     if (isCompactCompletionUserEvent(entry)) return true
     // 斜杠输入可能丢掉origin，此时放宽认定
     // A slash input may lose its origin, so stay permissive
