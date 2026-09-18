@@ -44,7 +44,7 @@ import {
   type ProjectHierarchyHit,
   type ProjectHierarchySearchResponse,
 } from '../services/project-hierarchy-search'
-import { readListCache, writeListCache } from '../services/list-swr-cache'
+import { readListCache, writeListCache, readMapCache, writeMapCache } from '../services/list-swr-cache'
 
 type ProjectFilterKey = 'owned' | 'starred' | 'extension'
 const PROJECT_FILTERS: Array<{ key: ProjectFilterKey; label: string; title: string }> = [
@@ -55,6 +55,9 @@ const PROJECT_FILTERS: Array<{ key: ProjectFilterKey; label: string; title: stri
 
 // /u/:user 主区项目卡片每页显示数量; 超过即分页, 避免一次性渲染过多卡片.
 const PROJECT_PAGE_SIZE = 16
+
+// 卡片研究/任务概览的本地缓存 scope (见 services/list-swr-cache.ts).
+const OVERVIEW_CACHE_SCOPE = 'project-overview'
 
 // =====================================================================
 // 项目汇总页 /u/:user
@@ -225,6 +228,8 @@ export default function UserPage() {
   const [issuesLoadingByProject, setIssuesLoadingByProject] = useState<Record<string, boolean>>({})
   const [researchesLoadingByProject, setResearchesLoadingByProject] = useState<Record<string, boolean>>({})
   const overviewPreviewRequests = useRef<Set<string>>(new Set())
+  // 本次挂载内已成功取过概览的项目: 缓存命中不再挡住重新校验, 但也避免反复回访同一页时重复请求.
+  const overviewFetchedProjects = useRef<Set<string>>(new Set())
   const [editingProject, setEditingProject] = useState<any>(null)
   const [hidingProject, setHidingProject] = useState<any>(null)
   // 拓展项目的隐藏/彻底删除入口；普通项目的屏蔽放在项目操作菜单里。
@@ -512,9 +517,31 @@ export default function UserPage() {
     }
   }
 
+  // 首挂载: 先用本地缓存的卡片概览秒显 (整页刷新 / newTab 打开时内存里什么都没有),
+  // 后台请求照常发, 结果回来后覆盖。缓存不做 TTL —— 它只负责"先有内容可看",
+  // 卡片上的活跃列表/会话数等实时状态永远以网络结果为准。
+  const overviewCacheHydrated = useRef(false)
+  useEffect(() => {
+    const uid = String(user?.id || '').trim()
+    if (!uid || overviewCacheHydrated.current) return
+    overviewCacheHydrated.current = true
+    const cached = readMapCache<Record<string, any>>(OVERVIEW_CACHE_SCOPE, uid)
+    if (!cached) return
+    const cachedIssues: Record<string, any[]> = {}
+    const cachedResearches: Record<string, any[]> = {}
+    Object.entries(cached.map).forEach(([id, item]: [string, any]) => {
+      cachedIssues[id] = item?.issues || []
+      cachedResearches[id] = item?.researches || []
+    })
+    // 用 prev 兜底: 万一网络结果已先到, 不拿缓存覆盖更新的数据。
+    setOverviewByProject(prev => ({ ...cached.map, ...prev }))
+    setIssuesByProject(prev => ({ ...cachedIssues, ...prev }))
+    setResearchesByProject(prev => ({ ...cachedResearches, ...prev }))
+  }, [user?.id])
+
   useEffect(() => {
     const pending = projectPagination.pagedItems
-      .filter((p: any) => p?.id && !overviewByProject[p.id] && !overviewPreviewRequests.current.has(p.id))
+      .filter((p: any) => p?.id && !overviewFetchedProjects.current.has(p.id) && !overviewPreviewRequests.current.has(p.id))
     if (pending.length === 0) return
 
     pending.forEach((p: any) => {
@@ -544,6 +571,11 @@ export default function UserPage() {
         })
         return next
       })
+      // 落本地缓存: 下次刷新/新 tab 先秒显这批概览, 再被上面的网络结果覆盖。
+      pending.forEach((p: any) => { overviewFetchedProjects.current.add(p.id) })
+      const fetchedOverview: Record<string, any> = {}
+      pending.forEach((p: any) => { if (data[p.id]) fetchedOverview[p.id] = data[p.id] })
+      writeMapCache(OVERVIEW_CACHE_SCOPE, user?.id, fetchedOverview)
     }).catch(() => {}).finally(() => {
       pending.forEach((p: any) => {
         overviewPreviewRequests.current.delete(p.id)
@@ -553,7 +585,7 @@ export default function UserPage() {
         }
       })
     })
-  }, [projectPagination.pagedItems, overviewByProject])
+  }, [projectPagination.pagedItems])
 
   // 按 created_by 分组（sidebar）
   const grouped = useMemo(() => {
