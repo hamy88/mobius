@@ -225,9 +225,24 @@ const RESUME_POLL_MS = 2000
 const PASTE_PLACEHOLDER_RE = /\[Pasted (?:Content \d+ chars|text\b[^\]]*)\]/
 const SUBMIT_ENTER_ATTEMPTS = 3
 const SUBMIT_ENTER_INTERVAL_MS = 500
+// A prompt pasted while the TUI is still booting stays in the composer unsent: the pane keeps the
+// collapsed-paste placeholder, no turn starts, so no codex thread is recorded and the bind that
+// follows times out. Wait this long (enough for the boot to finish) before the retry Enter.
+const SUBMIT_RECHECK_DELAY_MS = 8000
 const THREAD_BIND_TIMEOUT_MS = 30000
 const THREAD_BIND_POLL_MS = 300
 const THREAD_BIND_UPDATED_SKEW_MS = 1000
+
+// True while the collapsed-paste placeholder of an unsent prompt is still on the pane's input line.
+// -J joins wrapped lines so a narrow terminal cannot split the placeholder; -S -40 covers the input
+// box and the status lines above it. A failed capture reads as "not stuck", so nothing extra fires.
+function codexComposerHoldsPastedText(sessionId: string) {
+  try {
+    const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-J', '-S', '-40'])
+    if (pane.status !== 0 || !pane.stdout) return false
+    return PASTE_PLACEHOLDER_RE.test(pane.stdout)
+  } catch { /* best-effort: a failure means not stuck */ return false }
+}
 
 // Whether the hub tmux session that hosts every agent window exists.
 function hubExists() {
@@ -1926,48 +1941,64 @@ class TmuxCodexBackend extends AgentBackend {
    * until RESUME_WAIT_MAX_MS. Once it disappears, send one final Enter to land the submit that
    * was dropped. On timeout send no extra Enter at all, because a prompt that may already have
    * been submitted must not be submitted twice.
+   *
+   * Past that, one more guard runs on every send: a prompt whose paste collapsed into the
+   * "[Pasted Content N chars]" placeholder can sit in the composer unsent — no turn starts, so
+   * codex never records a thread and the bind that follows times out. When the placeholder is
+   * still on screen after the submit Enters, wait SUBMIT_RECHECK_DELAY_MS and press Enter once
+   * more (an Enter on an already-submitted, empty composer is a no-op).
    */
   async _patchSlowSessionLoading(sessionId: string) {
-    // 先截一次屏，屏幕上没有Resume提示就直接返回，正常发送不会走这里
-    // Capture once first, return when the notice is absent, a normal send never gets here
+    // 先截一次屏，屏幕上没有Resume提示就跳过恢复等待
+    // Capture once first, skip the resume wait when the notice is absent
     const resumeCheck = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-20'])
-    if (resumeCheck.status !== 0 || !resumeCheck.stdout.includes(RESUME_SENTINEL)) return
-
-    const resumeStartedAt = Date.now()
-    log(`[tmux-codex] resuming session detected window=${sessionId}, waiting up to ${RESUME_WAIT_MAX_MS}ms`)
-    const resumeDeadline = resumeStartedAt + RESUME_WAIT_MAX_MS
-    let resumeFinished = false
-    let resumeAttempt = 0
-    while (Date.now() < resumeDeadline) {
-      // 每2秒看一次屏幕
-      // Check the pane every 2 seconds
-      await new Promise((r) => setTimeout(r, RESUME_POLL_MS))
-      resumeAttempt += 1
-      const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-20'])
-      // 截屏失败也要记一笔，排查时能区分没恢复完还是没截到屏
-      // Log a failed capture too, so a stuck resume can be told apart from a blank screen
-      if (pane.status !== 0) {
-        log(`[tmux-codex] resume poll window=${sessionId} attempt=${resumeAttempt} capture=failed`)
-        continue
+    if (resumeCheck.status === 0 && resumeCheck.stdout.includes(RESUME_SENTINEL)) {
+      const resumeStartedAt = Date.now()
+      log(`[tmux-codex] resuming session detected window=${sessionId}, waiting up to ${RESUME_WAIT_MAX_MS}ms`)
+      const resumeDeadline = resumeStartedAt + RESUME_WAIT_MAX_MS
+      let resumeFinished = false
+      let resumeAttempt = 0
+      while (Date.now() < resumeDeadline) {
+        // 每2秒看一次屏幕
+        // Check the pane every 2 seconds
+        await new Promise((r) => setTimeout(r, RESUME_POLL_MS))
+        resumeAttempt += 1
+        const pane = tmux(['capture-pane', '-pt', `${HUB}:${sessionId}`, '-p', '-S', '-20'])
+        // 截屏失败也要记一笔，排查时能区分没恢复完还是没截到屏
+        // Log a failed capture too, so a stuck resume can be told apart from a blank screen
+        if (pane.status !== 0) {
+          log(`[tmux-codex] resume poll window=${sessionId} attempt=${resumeAttempt} capture=failed`)
+          continue
+        }
+        // 提示消失说明恢复完成，跳出等待
+        // The notice is gone, the resume finished, stop waiting
+        if (!pane.stdout.includes(RESUME_SENTINEL)) { resumeFinished = true; break }
+        // 还在恢复中，先记一笔再补一次回车
+        // Still resuming: log the round first, then nudge with another Enter
+        log(`[tmux-codex] still resuming window=${sessionId} attempt=${resumeAttempt} elapsed=${Date.now() - resumeStartedAt}ms`)
+        tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
       }
-      // 提示消失说明恢复完成，跳出等待
-      // The notice is gone, the resume finished, stop waiting
-      if (!pane.stdout.includes(RESUME_SENTINEL)) { resumeFinished = true; break }
-      // 还在恢复中，先记一笔再补一次回车
-      // Still resuming: log the round first, then nudge with another Enter
-      log(`[tmux-codex] still resuming window=${sessionId} attempt=${resumeAttempt} elapsed=${Date.now() - resumeStartedAt}ms`)
-      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+      // 恢复完成后补最后一次回车，把之前被吞掉的提交补上
+      // One final Enter once the notice is gone, landing the submit that was dropped
+      if (resumeFinished) {
+        tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+        log(`[tmux-codex] resuming session finished window=${sessionId}, attempts=${resumeAttempt} final Enter sent`)
+      // 超时就不再补回车，避免把提示词提交两次
+      // On timeout send no extra Enter, so the prompt is never submitted twice
+      } else {
+        log(`[tmux-codex] still resuming window=${sessionId} gave up after ${RESUME_WAIT_MAX_MS}ms attempts=${resumeAttempt}`)
+      }
     }
-    // 恢复完成后补最后一次回车，把之前被吞掉的提交补上
-    // One final Enter once the notice is gone, landing the submit that was dropped
-    if (resumeFinished) {
-      tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
-      log(`[tmux-codex] resuming session finished window=${sessionId}, attempts=${resumeAttempt} final Enter sent`)
-    // 超时就不再补回车，避免把提示词提交两次
-    // On timeout send no extra Enter, so the prompt is never submitted twice
-    } else {
-      log(`[tmux-codex] still resuming window=${sessionId} gave up after ${RESUME_WAIT_MAX_MS}ms attempts=${resumeAttempt}`)
-    }
+
+    // 提交校验：占位符还在屏幕上，说明这一轮没被提交
+    // Submit check: the placeholder still on screen means this turn was never submitted
+    if (!codexComposerHoldsPastedText(sessionId)) return
+    log(`[tmux-codex] submit check window=${sessionId} paste placeholder still on screen, re-Enter in ${SUBMIT_RECHECK_DELAY_MS}ms`)
+    await new Promise((r) => setTimeout(r, SUBMIT_RECHECK_DELAY_MS))
+    // 延迟结束后补按一次回车，把卡在输入框里的提示词提交出去
+    // One more Enter after the delay, landing the prompt stuck in the composer
+    tmux(['send-keys', '-t', `${HUB}:${sessionId}`, 'Enter'])
+    log(`[tmux-codex] submit check window=${sessionId} re-Enter sent`)
   }
 }
 
