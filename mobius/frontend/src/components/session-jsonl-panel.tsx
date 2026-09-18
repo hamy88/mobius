@@ -199,9 +199,17 @@ function SessionJsonlPanelInner({
       const normalizedText = text.replace(/\r\n?|\n/g, ' ')
       if (!normalizedText) return
 
-      // Keep the newest content when the model outruns the typewriter. This
-      // bounds memory and prevents a stale backlog from appearing minutes later.
-      liveTokenBufferRef.current = (liveTokenBufferRef.current + normalizedText).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
+      // Keep deltas contiguous. If the producer outruns the typewriter, fast-forward
+      // the complete visible tail instead of deleting the queue head repeatedly and
+      // joining two non-adjacent fragments (which looks like reordered text).
+      const combined = liveTokenBufferRef.current + normalizedText
+      if (combined.length > LIVE_TOKEN_MAX_BUFFER_CHARS) {
+        liveTokenDisplayRef.current = (liveTokenDisplayRef.current + combined).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
+        liveTokenBufferRef.current = ''
+        setLiveTokenText(liveTokenDisplayRef.current)
+      } else {
+        liveTokenBufferRef.current = combined
+      }
       if (liveTokenClearTimerRef.current !== null) window.clearTimeout(liveTokenClearTimerRef.current)
       liveTokenClearTimerRef.current = window.setTimeout(() => {
         liveTokenBufferRef.current = ''
