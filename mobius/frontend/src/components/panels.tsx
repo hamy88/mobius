@@ -24,6 +24,7 @@ import {
   FolderInput,
   FolderOpen,
   Globe,
+  GripVertical,
   ImagePlus,
   KeyRound,
   LayoutDashboard,
@@ -1485,6 +1486,8 @@ function ModelPromptLimitsCard() {
   const [savingCompactTokenKey, setSavingCompactTokenKey] = useState<string | null>(null)
   const [savingAutoTitle, setSavingAutoTitle] = useState(false)
   const [savingOrderKey, setSavingOrderKey] = useState<string | null>(null)
+  const [draggingModelKey, setDraggingModelKey] = useState<string | null>(null)
+  const [dragOverModelKey, setDragOverModelKey] = useState<string | null>(null)
   const [error, setError] = useState('')
 
   const fieldKey = (modelKey: string, field: keyof ModelPromptLimitConfig) => `${modelKey}::${field}`
@@ -1752,17 +1755,9 @@ function ModelPromptLimitsCard() {
     }
   }
 
-  const moveModel = async (row: ModelPromptLimitRow, direction: -1 | 1) => {
-    if (!payload) return
-    const index = payload.models.findIndex(item => item.key === row.key)
-    const nextIndex = index + direction
-    if (index < 0 || nextIndex < 0 || nextIndex >= payload.models.length) return
-    const reordered = payload.models.slice()
-    const [picked] = reordered.splice(index, 1)
-    reordered.splice(nextIndex, 0, picked)
-    const previous = payload
-    setPayload({ ...payload, models: reordered })
-    setSavingOrderKey(row.key)
+  const persistModelOrder = async (reordered: ModelPromptLimitRow[], previous: ModelPromptLimitsPayload, savingKey: string) => {
+    setPayload({ ...previous, models: reordered })
+    setSavingOrderKey(savingKey)
     try {
       const next = await api('/api/admin/settings/model-display-order', {
         method: 'PUT',
@@ -1777,6 +1772,29 @@ function ModelPromptLimitsCard() {
     } finally {
       setSavingOrderKey(null)
     }
+  }
+
+  const moveModel = async (row: ModelPromptLimitRow, direction: -1 | 1) => {
+    if (!payload) return
+    const index = payload.models.findIndex(item => item.key === row.key)
+    const nextIndex = index + direction
+    if (index < 0 || nextIndex < 0 || nextIndex >= payload.models.length) return
+    const reordered = payload.models.slice()
+    const [picked] = reordered.splice(index, 1)
+    reordered.splice(nextIndex, 0, picked)
+    await persistModelOrder(reordered, payload, row.key)
+  }
+
+  const reorderModelByDrop = async (sourceKey: string, targetKey: string) => {
+    if (!payload || sourceKey === targetKey || savingOrderKey) return
+    const sourceIndex = payload.models.findIndex(item => item.key === sourceKey)
+    const targetIndex = payload.models.findIndex(item => item.key === targetKey)
+    if (sourceIndex < 0 || targetIndex < 0) return
+    const reordered = payload.models.slice()
+    const [picked] = reordered.splice(sourceIndex, 1)
+    const insertIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+    reordered.splice(insertIndex, 0, picked)
+    await persistModelOrder(reordered, payload, sourceKey)
   }
 
   return (
@@ -1854,7 +1872,7 @@ function ModelPromptLimitsCard() {
           </span>
         </ToggleSwitch>
       </div>
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mb-4 divide-y divide-[var(--border-color)]">
         {(payload?.models || []).map((row, index) => {
           const saving = savingKey === row.key
           const savingProxy = savingProxyKey === row.key
@@ -1872,13 +1890,52 @@ function ModelPromptLimitsCard() {
           const isDsh = row.backend === 'deepseek-harness'
           return (
             <div key={row.key}
-              className="rounded-lg border px-3 py-2.5"
+              draggable={!savingOrderKey}
+              onDragStart={event => {
+                if ((event.target as HTMLElement).closest('input,select,button')) {
+                  event.preventDefault()
+                  return
+                }
+                event.dataTransfer.effectAllowed = 'move'
+                event.dataTransfer.setData('text/plain', row.key)
+                setDraggingModelKey(row.key)
+              }}
+              onDragOver={event => {
+                if (!draggingModelKey || draggingModelKey === row.key || savingOrderKey) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDragOverModelKey(row.key)
+              }}
+              onDragLeave={event => {
+                if (event.currentTarget === event.target) setDragOverModelKey(null)
+              }}
+              onDrop={async event => {
+                event.preventDefault()
+                const sourceKey = event.dataTransfer.getData('text/plain') || draggingModelKey
+                setDragOverModelKey(null)
+                setDraggingModelKey(null)
+                if (sourceKey) await reorderModelByDrop(sourceKey, row.key)
+              }}
+              onDragEnd={() => {
+                setDraggingModelKey(null)
+                setDragOverModelKey(null)
+              }}
+              className={`group px-1 py-3 transition-colors first:pt-1 last:pb-1 ${
+                dragOverModelKey === row.key ? 'bg-blue-500/10' : ''
+              } ${draggingModelKey === row.key ? 'opacity-60' : ''}`}
               style={{
-                background: configured ? 'rgba(59,130,246,0.08)' : 'var(--input-bg)',
-                borderColor: configured ? 'rgba(59,130,246,0.30)' : 'var(--input-border)',
+                borderLeft: dragOverModelKey === row.key ? '3px solid rgba(59,130,246,0.65)' : '3px solid transparent',
               }}>
-              <div className="mb-2 flex items-start justify-between gap-2">
-                <div className="min-w-0">
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-2">
+                  <span
+                    className="mt-0.5 inline-flex h-7 w-5 shrink-0 cursor-grab items-center justify-center text-[var(--text-muted)] opacity-60 transition-opacity group-hover:opacity-100 active:cursor-grabbing"
+                    title="拖动调整模型顺序"
+                    aria-label="拖动调整模型顺序"
+                  >
+                    <GripVertical className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
                   <div className="truncate text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
                     {row.title || row.label}
                   </div>
@@ -1887,6 +1944,7 @@ function ModelPromptLimitsCard() {
                   </div>
                   <div className="mt-1 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }} title={row.config_path || ''}>
                     {row.config_path || '未找到配置文件路径'}
+                  </div>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -1908,11 +1966,11 @@ function ModelPromptLimitsCard() {
                   </span>
                 </div>
               </div>
-              <div className="mb-2 grid grid-cols-2 gap-2">
+              <div className="mb-2 grid grid-cols-2 gap-2 md:grid-cols-5">
                 {limitFields.map(field => {
                   const isTmux = field.key === 'tmuxWindows'
                   return (
-                    <label key={field.key} className={isTmux ? 'col-span-2' : ''}>
+                    <label key={field.key} className={isTmux ? 'col-span-2 md:col-span-1' : ''}>
                       <div className="mb-1 flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
                         <span>{field.label}</span>
                         <span>{field.hint}</span>
@@ -2037,7 +2095,7 @@ function ModelPromptLimitsCard() {
           )
         })}
         {!loading && payload && payload.models.length === 0 && (
-          <div className="rounded-lg border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
             暂无可配置模型
           </div>
         )}
