@@ -7,6 +7,16 @@ import { scrollDebug } from './scroll-debug'
 
 const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
 
+// LIVE token output is deliberately paced instead of rendering every network chunk.
+const LIVE_TOKEN_MAX_CHARS_PER_SECOND = 42
+const LIVE_TOKEN_MAX_BUFFER_CHARS = 320
+const LIVE_TOKEN_TICK_MS = 50
+
+function latestLiveLine(value: string): string {
+  const lines = value.split(/\r?\n/)
+  return [...lines].reverse().find((line) => line.length > 0) || ''
+}
+
 // ── 最新可解析时间戳 (LIVE 卡锚点 / 诊断用). 从尾部向前找, 跳过无时间戳的元数据条目. ──
 // 从 chat.tsx 迁入 (Chat 不再订阅快照, 摊平条目的派生消费集中到本面板).
 function parseDebugTimestamp(value: unknown): number | null {
@@ -168,6 +178,7 @@ function SessionJsonlPanelInner({
   const liveCardMounted = variant === 'standard' && exclusiveContent == null && liveCardVisible && !!lastTimestamp
   const [liveTokenText, setLiveTokenText] = useState('')
   const liveTokenBufferRef = useRef('')
+  const liveTokenDisplayRef = useRef('')
   const liveTokenClearTimerRef = useRef<number | null>(null)
 
   // The LIVE card consumes only tokens produced after this subscription starts.
@@ -176,6 +187,7 @@ function SessionJsonlPanelInner({
   useEffect(() => {
     if (!liveCardMounted || backendWorking !== true || !sessionIdentity) {
       liveTokenBufferRef.current = ''
+      liveTokenDisplayRef.current = ''
       setLiveTokenText('')
       if (liveTokenClearTimerRef.current !== null) {
         window.clearTimeout(liveTokenClearTimerRef.current)
@@ -191,14 +203,13 @@ function SessionJsonlPanelInner({
       const text = typeof payload.text === 'string' ? payload.text : ''
       if (!text) return
 
-      liveTokenBufferRef.current += text
-      const lines = liveTokenBufferRef.current.split(/\r?\n/)
-      // Keep the most recent non-empty line: the card has room for one line only.
-      const latestLine = [...lines].reverse().find((line) => line.length > 0) || ''
-      setLiveTokenText(latestLine)
+      // Keep the newest content when the model outruns the typewriter. This
+      // bounds memory and prevents a stale backlog from appearing minutes later.
+      liveTokenBufferRef.current = (liveTokenBufferRef.current + text).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
       if (liveTokenClearTimerRef.current !== null) window.clearTimeout(liveTokenClearTimerRef.current)
       liveTokenClearTimerRef.current = window.setTimeout(() => {
         liveTokenBufferRef.current = ''
+        liveTokenDisplayRef.current = ''
         liveTokenClearTimerRef.current = null
         setLiveTokenText('')
       }, 5000)
@@ -208,12 +219,23 @@ function SessionJsonlPanelInner({
     }
     source.addEventListener('token', handleToken as EventListener)
     source.addEventListener('snapshot', handleSnapshot as EventListener)
+    const charsPerTick = Math.max(1, Math.round(LIVE_TOKEN_MAX_CHARS_PER_SECOND * LIVE_TOKEN_TICK_MS / 1000))
+    const typewriterTimer = window.setInterval(() => {
+      const pending = liveTokenBufferRef.current
+      if (!pending) return
+      const next = pending.slice(0, charsPerTick)
+      liveTokenBufferRef.current = pending.slice(next.length)
+      liveTokenDisplayRef.current = (liveTokenDisplayRef.current + next).slice(-LIVE_TOKEN_MAX_BUFFER_CHARS)
+      setLiveTokenText(latestLiveLine(liveTokenDisplayRef.current))
+    }, LIVE_TOKEN_TICK_MS)
 
     return () => {
       source.removeEventListener('token', handleToken as EventListener)
       source.removeEventListener('snapshot', handleSnapshot as EventListener)
       source.close()
+      window.clearInterval(typewriterTimer)
       liveTokenBufferRef.current = ''
+      liveTokenDisplayRef.current = ''
       setLiveTokenText('')
       if (liveTokenClearTimerRef.current !== null) {
         window.clearTimeout(liveTokenClearTimerRef.current)
