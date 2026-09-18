@@ -49,6 +49,9 @@ import {
 } from '../services/assistant-voice'
 
 const GUIDED_DEMO_TOUR_EVENT = 'imac:guided-demo-tour:start'
+// LIVE 卡乐观窗口时长: 提交问题后强制显示 5s, 点击终止后强制隐藏 10s.
+const LIVE_OPTIMISTIC_SHOW_MS = 5000
+const LIVE_OPTIMISTIC_HIDE_MS = 10000
 const CHAT_INPUT_SPLIT_STORAGE_KEY = 'mobius:ui:split:chat-input'
 // 回车自动加急开关持久化 key: '1'=开启, 其他=关闭.
 const AUTO_URGENT_ENTER_STORAGE_KEY = 'mobius:ui:auto-urgent-enter'
@@ -73,6 +76,8 @@ type LiveDebugSnapshot = {
   variant: 'standard' | 'easy'
   backendAlive: boolean | null
   backendWorking: boolean | null
+  // 乐观窗口 (提交后强开 / 终止后强关), null = 无窗口, 按轮询结果.
+  liveOverride: 'on' | 'off' | null
   parentGate: {
     standardVariant: boolean
     alive: boolean
@@ -2325,7 +2330,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const standardVariant = variant === 'standard'
     const alive = backendAlive === true
     const working = backendWorking === true
-    const shouldMount = standardVariant && alive && working
+    // 与渲染用的门槛同源: 乐观窗口 (提交后 5s 强开 / 终止后 10s 强关) 覆盖轮询结果.
+    const backendGate = alive && working
+    const shouldMount = standardVariant && (liveOverride === 'on' ? true : liveOverride === 'off' ? false : backendGate)
     const tail = jsonlEntriesNow.slice(-5).map(debugTailEntry)
     const lastEntry = tail[tail.length - 1] || null
     // 与 ChatArea 传给 SessionJsonlPanel/JsonlLiveTailCard 的值保持一致：
@@ -2341,8 +2348,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const reasons: string[] = []
 
     if (!standardVariant) reasons.push(`variant=${variant}（当前不是 standard 渲染分支）`)
-    if (!alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
-    if (!working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
+    if (liveOverride === 'off') reasons.push('终止乐观窗内（强制不挂载 LIVE）')
+    if (liveOverride === 'on') reasons.push('提交乐观窗内（强制挂载 LIVE）')
+    if (liveOverride === null && !alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
+    if (liveOverride === null && !working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
     if (jsonlEntriesNow.length === 0) reasons.push('jsonlEntries 为空')
     if (jsonlEntriesNow.length > 0 && !lastTimestampProp) reasons.push('所有 JSONL entry 都没有可解析时间戳')
     if (jsonlEntriesNow.length > 0 && latestTimestamp.index !== null && latestTimestamp.index !== jsonlEntriesNow.length - 1 && lastEntryAnyTimestamp === null) {
@@ -2358,6 +2367,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       variant,
       backendAlive,
       backendWorking,
+      liveOverride,
       parentGate: { standardVariant, alive, working, shouldMount },
       jsonlCount: jsonlEntriesNow.length,
       tail,
@@ -2429,6 +2439,33 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // 终止乐观更新抑制窗: 点"终止"后 ~3s 内忽略轮询回写, 让 isAlive/isWorking/agent_status
   // 立即落定为"空闲". 否则软停 (C-c × 3) 期间下一个 2s 轮询仍读到 alive=true, 会把状态弹回"执行中".
   const stopSuppressedUntilRef = useRef<number>(0)
+  // LIVE 卡乐观窗口 (纯显示层, 不回写后端状态). 两个方向:
+  //   'on'  提交问题后 5s 内强制挂 LIVE 卡 — 进程创建 / 首轮唤醒期间轮询还没报 working,
+  //         卡片缺席会被误读成"消息没发出去".
+  //   'off' 点击终止后 10s 内强制不挂 LIVE 卡 — 软停期间后端仍报 working, 3s 状态抑制窗
+  //         一过卡片就弹回, 与"已终止"的直觉冲突.
+  const [liveOverride, setLiveOverride] = useState<'on' | 'off' | null>(null)
+  const liveOverrideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const holdLiveOverride = useCallback((mode: 'on' | 'off' | null, ms = 0) => {
+    if (liveOverrideTimerRef.current) {
+      clearTimeout(liveOverrideTimerRef.current)
+      liveOverrideTimerRef.current = null
+    }
+    setLiveOverride(mode)
+    if (mode && ms > 0) {
+      liveOverrideTimerRef.current = setTimeout(() => {
+        liveOverrideTimerRef.current = null
+        setLiveOverride(null)
+      }, ms)
+    }
+  }, [])
+  // 卸载时清掉未到期的乐观窗计时器, 避免在已卸载组件上 setState.
+  useEffect(() => () => {
+    if (liveOverrideTimerRef.current) {
+      clearTimeout(liveOverrideTimerRef.current)
+      liveOverrideTimerRef.current = null
+    }
+  }, [])
   // 发送阶段提示: 自发送瞬间起计时, 按耗时显示黄字阶段 (正在发送 / 正在唤醒中 / 唤醒超时).
   // pendingSendAt 与 messageSubmitting 全部解除 (发送按钮恢复) 时置回 null, 还原原提示.
   const [sendingHint, setSendingHint] = useState<string | null>(null)
@@ -2599,7 +2636,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     setMessageSubmitting(false)
     setLastSendError('')
     setProjectKnowledgeSending(false)
-  }, [sessionId])
+    // 乐观 LIVE 窗同理: 旧会话的窗口不该带到新会话.
+    holdLiveOverride(null)
+  }, [sessionId, holdLiveOverride])
 
   useEffect(() => {
     setStopFeedbackActive(false)
@@ -3097,6 +3136,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     mentions?: any[]
   }) => {
     if (!sessionId) throw new Error('当前没有可发送消息的会话')
+    // 所有发送路径 (发送/加急/语音/权限按钮/快捷指令) 都经这里, 乐观 LIVE 卡也在此统一起窗.
+    holdLiveOverride('on', LIVE_OPTIMISTIC_SHOW_MS)
     const payload: Record<string, any> = { content, request_id: requestId }
     if (typeof inputText === 'string') payload.input_text = inputText
     if (urgent) payload.urgent = true
@@ -3114,12 +3155,14 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       setTyping(false)
       setStreamContent('')
       setPendingSendAt(null)
+      // 没发出去就别再乐观显示 LIVE 卡.
+      holdLiveOverride(null)
       setLastSendError(text)
       addMessage({ role: 'system', content: `❌ ${text}` })
       setTimeout(() => loadHistoryRef.current(), 500)
       throw e
     }
-  }, [sessionId, setTyping, setStreamContent, addMessage, hideBackendFailure])
+  }, [sessionId, setTyping, setStreamContent, addMessage, hideBackendFailure, holdLiveOverride])
 
   const clearVoiceTimers = useCallback(() => {
     if (voiceStopTimerRef.current !== null) {
@@ -3919,6 +3962,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     stopSuppressedUntilRef.current = Date.now() + 3000
     setBackendAlive(false)
     setBackendWorking(false)
+    // LIVE 卡单独按 10s 抑制: 3s 状态抑制窗短于软停耗时, 单靠它卡片会在后端仍报 working 时弹回.
+    holdLiveOverride('off', LIVE_OPTIMISTIC_HIDE_MS)
     const store = useStore.getState()
     const sel = store.currentSession
     if (sel?.session_id === sessionId && sel.agent_status !== 'idle') {
@@ -3947,7 +3992,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         setLastSendError(e?.message || '终止失败')
         setStopFeedbackActive(false)
       })
-  }, [sessionId, setTyping, setStreamContent, currentIssueId])
+  }, [sessionId, setTyping, setStreamContent, currentIssueId, holdLiveOverride])
 
   if (!currentSession && !currentTask) return (
     <div className="flex-1 flex items-center justify-center" style={{ background: 'var(--bg-secondary)' }}>
@@ -4378,6 +4423,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           showJsonlMeta={showJsonlMeta}
           backendAlive={backendAlive}
           backendWorking={backendWorking}
+          liveCardMode={liveOverride ?? 'auto'}
           backendPid={backendPid}
           realTimeInfo={backendRealTimeInfo}
           hasNewMessages={hasNewMessages}

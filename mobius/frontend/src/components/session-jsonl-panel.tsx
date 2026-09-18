@@ -49,6 +49,9 @@ type SessionJsonlPanelProps = {
   showJsonlMeta: boolean
   backendAlive: boolean | null
   backendWorking: boolean | null
+  // LIVE 卡乐观窗口 (见 chat.tsx LIVE_OPTIMISTIC_*_MS): 'on' = 提交后强制显示, 'off' = 终止后强制隐藏,
+  // 'auto' = 面板按 alive && working 自己判.
+  liveCardMode?: 'auto' | 'on' | 'off'
   backendPid: number | null
   realTimeInfo?: string
   hasNewMessages: boolean
@@ -85,6 +88,7 @@ function SessionJsonlPanelInner({
   showJsonlMeta,
   backendAlive,
   backendWorking,
+  liveCardMode = 'auto',
   backendPid,
   realTimeInfo,
   hasNewMessages,
@@ -154,6 +158,9 @@ function SessionJsonlPanelInner({
         : derivedStatus === 'running' ? '智能体工作中，等待输出…' : '')
     : ''
   const lastTimestamp = useMemo(() => findLatestEntryTimestamp(visibleJsonl).value, [visibleJsonl])
+  const liveCardVisible = liveCardMode === 'on' ? true
+    : liveCardMode === 'off' ? false
+    : !!(backendAlive === true && backendWorking === true)
   // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
   const lastScrollTopRef = useRef<number | null>(null)
 
@@ -262,11 +269,12 @@ function SessionJsonlPanelInner({
                   onPauseToDequeue={onPauseToDequeue}
                 />
               )}
-              {variant === 'standard' && backendAlive && backendWorking && (
+              {variant === 'standard' && liveCardVisible && (
                 <JsonlLiveTailCard
                   lastTimestamp={lastTimestamp}
                   pid={backendPid}
                   realTimeInfo={realTimeInfo}
+                  optimistic={liveCardMode === 'on'}
                 />
               )}
               <div ref={endRef} />
