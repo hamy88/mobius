@@ -770,15 +770,13 @@ export default function UserPage() {
                   const researchCounts = overview?.research_counts || null
                   const activeIssueCount = issueCounts ? issueCounts.active : issues.filter((i: any) => i.status !== 'completed').length
                   const completedIssueCount = issueCounts ? issueCounts.completed : issues.filter((i: any) => i.status === 'completed').length
-                  // 列表穿插显示活跃的 research 与 issue: 各取未完成项, 按各自最近活跃顺序交替合并, 取前 5.
+                  // 列表展示活跃的 research 与 issue: 两类未完成项合并后统一按最近活跃倒序, 取前 5, 不做穿插.
                   const activeResearches = researches.filter((r: any) => r.status !== 'completed')
                   const activeIssues = issues.filter((i: any) => i.status !== 'completed')
-                  const overviewItems: Array<{ item: any; kind: 'research' | 'issue' }> = []
-                  const interleaveMax = Math.max(activeResearches.length, activeIssues.length)
-                  for (let idx = 0; idx < interleaveMax; idx++) {
-                    if (idx < activeResearches.length) overviewItems.push({ item: activeResearches[idx], kind: 'research' })
-                    if (idx < activeIssues.length) overviewItems.push({ item: activeIssues[idx], kind: 'issue' })
-                  }
+                  const overviewItems: Array<{ item: any; kind: 'research' | 'issue' }> = [
+                    ...activeResearches.map((item: any) => ({ item, kind: 'research' as const })),
+                    ...activeIssues.map((item: any) => ({ item, kind: 'issue' as const })),
+                  ].sort((a, b) => new Date(b.item.last_active || 0).getTime() - new Date(a.item.last_active || 0).getTime())
                   const overviewTotal = (researchCounts?.active ?? activeResearches.length) + (issueCounts?.active ?? activeIssues.length)
                   const overviewLabel = p.research_enabled ? '研究 / 任务' : '任务'
                   const overviewEmpty = p.research_enabled ? '暂无活跃研究/任务' : '暂无活跃任务'
