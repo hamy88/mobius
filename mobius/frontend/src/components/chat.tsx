@@ -33,6 +33,7 @@ import { PlanningEditor } from './planning-editor'
 import { KnowledgeEditorModal } from './knowledge-editor-modal'
 import { RemoteComputeMemoryModal } from './memories'
 import { AdvancedInteractionBtn } from './advanced-interaction-btn'
+import { EasySessionChatInput } from './easy-session-chat-input'
 import { AdvancedSessionActions } from './advanced-session-actions'
 import { UnifiedButtonGroup } from './unified-button-group'
 import { draftClear, draftLoad, draftSave } from '../services/input-drafts'
@@ -4444,8 +4445,60 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               title="拖拽调整宽度 · 双击恢复默认"
             />
           )}
-          {/* 输入区 */}
-          <div className="mobius-chat-input-editor min-w-0 flex-shrink-0 p-3">
+          {layout === 'easy' && (
+            <div className="easy-session-chat-input-shell min-w-0 flex-shrink-0 p-3">
+              <EasySessionChatInput
+                input={input}
+                inputRef={inputRef}
+                inputHeight={inputHeight}
+                inputPlaceholder={inputPlaceholder}
+                inputFocused={inputFocused}
+                theme={theme}
+                voiceState={voiceState}
+                voiceTip={voiceTip}
+                voiceBusy={voiceBusy}
+                messageSubmitting={messageSubmitting}
+                anyUploading={anyUploading}
+                hasPendingSend={!!pendingSendAt}
+                modelAvailable={modelAvailable}
+                onChange={handleChatInputChange}
+                onPaste={handlePaste}
+                onFocus={() => setInputFocused(true)}
+                onBlur={(event) => {
+                  const nextTarget = event.relatedTarget as Node | null
+                  if (nextTarget && event.currentTarget.contains(nextTarget)) return
+                  setInputFocused(false)
+                }}
+                onToggleVoice={toggleVoiceRecording}
+                onSend={send}
+                onKeyDown={e => {
+                  if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                    handleInputArrowUp(e)
+                    return
+                  }
+                  if (e.key !== 'Enter') return
+                  const nativeEvent = e.nativeEvent as KeyboardEvent
+                  if (composingRef.current || (e as any).isComposing || nativeEvent.isComposing || nativeEvent.keyCode === 229) return
+                  if (e.shiftKey) return
+                  if (e.altKey) {
+                    e.preventDefault()
+                    const el = inputRef.current
+                    if (el) {
+                      const start = el.selectionStart
+                      const end = el.selectionEnd
+                      setInput(input.slice(0, start) + '\n' + input.slice(end))
+                      requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = start + 1 })
+                    }
+                    return
+                  }
+                  e.preventDefault()
+                  send(autoUrgentOnEnter)
+                }}
+              />
+            </div>
+          )}
+          {/* 标准模式输入区；简易模式使用上方独立组件 */}
+          <div className={`mobius-chat-input-editor min-w-0 flex-shrink-0 p-3${layout === 'easy' ? ' hidden' : ''}`}>
             <div>
           {replyTo && (
             <div className="flex items-center gap-2 mb-2 px-4 py-2 bg-blue-500/5 border border-blue-500/15 rounded-xl">
