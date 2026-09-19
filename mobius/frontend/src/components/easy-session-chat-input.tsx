@@ -1,14 +1,37 @@
-import type { ChangeEvent, ClipboardEvent, CSSProperties, FocusEvent, KeyboardEvent, RefObject } from 'react'
-import { Mic, RefreshCw, SendHorizontal, Square, Zap } from 'lucide-react'
+import { useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type FocusEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
+import { Mic, RefreshCw, SendHorizontal, Sparkles, Square, Zap } from 'lucide-react'
 import { AdvancedInteractionBtn } from './advanced-interaction-btn'
 import type { VoiceInputState } from '../services/assistant-voice'
 
-type EasySessionChatInputProps = {
+/**
+ * create_session_mode: 欢迎页还没有会话，输入框只负责收集任务描述，提交后进入完整的新建会话配置。
+ * follow_session_mode: 会话内的持续对话，带语音输入与加急发送等完整交互。
+ */
+export type EasySessionChatInputMode = 'create_session_mode' | 'follow_session_mode'
+
+type EasySessionChatInputCommonProps = {
   input: string
-  inputRef: RefObject<HTMLTextAreaElement>
   inputPlaceholder: string
-  inputFocused: boolean
   theme: string
+  onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void
+  /** create_session_mode 下只有普通发送，参数被忽略 */
+  onSend: (urgent?: boolean) => void
+  onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void
+  /** 底部工具栏左侧的插槽: 欢迎页放 EasySessionConfigBar, 会话内放 EasySessionToolBar */
+  toolbar?: ReactNode
+}
+
+type CreateSessionModeProps = EasySessionChatInputCommonProps & {
+  mode: 'create_session_mode' // follow_session_mode
+  /** 欢迎页在选齐项目和任务前不能提交 */
+  submitDisabled?: boolean
+  submitTooltip?: string
+}
+
+type FollowSessionModeProps = EasySessionChatInputCommonProps & {
+  mode: 'follow_session_mode' // create_session_mode
+  inputRef: RefObject<HTMLTextAreaElement>
+  inputFocused: boolean
   voiceState: VoiceInputState
   voiceTip: string
   voiceBusy: boolean
@@ -17,46 +40,51 @@ type EasySessionChatInputProps = {
   hasReadyAttachments: boolean
   hasPendingSend: boolean
   modelAvailable: boolean
-  onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void
-  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void
-  onPaste: (event: React.ClipboardEvent<HTMLDivElement>) => void
+  /** 终止当前智能体正在执行的操作 (与标准模式标题栏的"终止"按钮同一动作) */
+  onStop: () => void
+  /** 终止指令已发出后的反馈态: 按钮转红并脉冲, 1.8s 后自动回落 */
+  stopFeedbackActive?: boolean
+  onPaste: (event: ClipboardEvent<HTMLDivElement>) => void
   onFocus: () => void
   onBlur: (event: FocusEvent<HTMLDivElement>) => void
   onToggleVoice: () => void
-  onSend: (urgent?: boolean) => void
 }
 
-/** Isolated composer for easy mode; the standard composer does not share its layout. */
-export function EasySessionChatInput({
-  input,
-  inputRef,
-  inputPlaceholder,
-  inputFocused,
-  theme,
-  voiceState,
-  voiceTip,
-  voiceBusy,
-  messageSubmitting,
-  anyUploading,
-  hasReadyAttachments,
-  hasPendingSend,
-  modelAvailable,
-  onChange,
-  onKeyDown,
-  onPaste,
-  onFocus,
-  onBlur,
-  onToggleVoice,
-  onSend,
-}: EasySessionChatInputProps) {
-  const disabled = (!input.trim() && !hasReadyAttachments) || anyUploading || hasPendingSend || messageSubmitting || voiceBusy || !modelAvailable
+export type EasySessionChatInputProps = CreateSessionModeProps | FollowSessionModeProps
+
+/** 欢迎页与会话内共用同一个输入框，只有 mode 决定哪些交互可用。 */
+export function EasySessionChatInput(props: EasySessionChatInputProps) {
+  const { input, inputPlaceholder, theme, onChange, onKeyDown, onSend } = props
+  // 欢迎页没有会话上下文，focus 状态留在组件内部，调用方只需要传 mode。
+  const [standaloneFocused, setStandaloneFocused] = useState(false)
+  const follow = props.mode === 'follow_session_mode' ? props : null
+  const inputFocused = follow ? follow.inputFocused : standaloneFocused
+
+  const submitBlocked = props.mode === 'create_session_mode' && !!props.submitDisabled
+  const disabled = follow
+    ? (!input.trim() && !follow.hasReadyAttachments) || follow.anyUploading || follow.hasPendingSend || follow.messageSubmitting || follow.voiceBusy || !follow.modelAvailable
+    : !input.trim() || submitBlocked
   const sendBg = disabled ? (theme !== 'light' ? '#374151' : '#e5e7eb') : (theme !== 'light' ? '#ffffff' : '#111827')
   const sendFg = disabled ? (theme !== 'light' ? '#6b7280' : '#9ca3af') : (theme !== 'light' ? '#111827' : '#ffffff')
   const border = theme !== 'light' ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)'
+  const sendTip = follow
+    ? follow.voiceBusy ? follow.voiceTip : follow.hasPendingSend || follow.messageSubmitting ? '正在提交上一条消息...' : '发送 (Enter)'
+    : (props.mode === 'create_session_mode' && props.submitTooltip) || '开始新会话'
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (onKeyDown) {
+      onKeyDown(event)
+      return
+    }
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+    event.preventDefault()
+    onSend()
+  }
 
   return (
     <div
       data-tour="session-chat-input"
+      data-mode={props.mode}
       className="easy-session-chat-input relative min-w-0 w-full overflow-hidden rounded-[22px] transition-all focus-within:ring-2 focus-within:ring-blue-500/15"
       style={{
         height: 96,
@@ -70,13 +98,17 @@ export function EasySessionChatInput({
         backdropFilter: 'blur(22px)',
         WebkitBackdropFilter: 'blur(22px)',
       } as CSSProperties}
-      onPaste={onPaste}
-      onFocusCapture={onFocus}
-      onBlurCapture={onBlur}
+      onPaste={follow?.onPaste}
+      onFocusCapture={follow ? follow.onFocus : () => setStandaloneFocused(true)}
+      onBlurCapture={follow ? follow.onBlur : (event) => {
+        const nextTarget = event.relatedTarget as Node | null
+        if (nextTarget && event.currentTarget.contains(nextTarget)) return
+        setStandaloneFocused(false)
+      }}
     >
       <div className="px-3 pt-3 pb-2.5">
-        {!input && (
-          <div className="pointer-events-none absolute inset-x-3 top-3 z-10 grid min-w-0 grid-cols-2 gap-x-3 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
+        {follow && !input && (
+          <div className="pointer-events-none absolute inset-x-3 top-3 z-10 grid min-w-0 grid-cols-2 gap-x-3 text-[11px] leading-[1.35] ml-[1%] mr-[50%]" style={{ color: 'var(--placeholder-color)' }}>
             <span className="col-span-2 min-w-0 truncate">发送指令：</span>
             <span className="min-w-0 truncate">· Shift+Enter 换行</span>
             <span className="min-w-0 truncate">· Ctrl/⌘+V 粘贴文件/截图</span>
@@ -85,54 +117,83 @@ export function EasySessionChatInput({
           </div>
         )}
         <textarea
-          ref={inputRef}
+          ref={follow ? follow.inputRef : undefined}
           value={input}
           onChange={onChange}
-          onKeyDown={onKeyDown}
-          placeholder={input ? inputPlaceholder : undefined}
+          onKeyDown={handleKeyDown}
+          placeholder={follow && !input ? undefined : inputPlaceholder}
           className="h-[42px] min-h-[42px] max-h-[42px] w-full resize-none overflow-y-auto border-0 bg-transparent px-0 pt-0 pb-1 text-[15px] leading-[1.6] focus:outline-none"
           style={{ color: 'var(--text-primary)' }}
         />
       </div>
       <div className="absolute bottom-0 left-0 right-0 flex h-9 min-w-0 items-center justify-end gap-2 overflow-hidden px-3 pb-1">
-        <AdvancedInteractionBtn
-          onClick={onToggleVoice}
-          disabled={messageSubmitting || voiceState === 'transcribing'}
-          aria-pressed={voiceState === 'recording'}
-          label={voiceTip}
-          tooltip={voiceTip}
-          accent="cyan"
-          motion="breathe"
-          buttonClassName="h-7 w-7 flex-shrink-0 rounded-full"
-          iconClassName="h-[17px] w-[17px]"
-          style={{ color: voiceState === 'recording' ? '#f87171' : '#d1d5db', border: '1px solid rgba(255,255,255,0.12)' }}
-          icon={voiceState === 'recording' ? <Square className="h-[17px] w-[17px]" fill="currentColor" /> : voiceState === 'transcribing' ? <RefreshCw className="h-[17px] w-[17px] animate-spin" /> : <Mic className="h-[17px] w-[17px]" />}
-        />
-        <AdvancedInteractionBtn
-          onClick={() => onSend(true)}
-          disabled={disabled}
-          data-tour="session-chat-send-urgent"
-          label="加急发送"
-          tooltip="发送（加急）— 打断当前输出并立即发送"
-          accent="amber"
-          motion="breathe"
-          buttonClassName="h-7 w-7 flex-shrink-0 rounded-full"
-          iconClassName="h-[17px] w-[17px]"
-          style={{ color: '#d1d5db', border: '1px solid rgba(255,255,255,0.12)' }}
-          icon={<Zap className="h-[17px] w-[17px]" />}
-        />
+        {props.toolbar ? (
+          <div className={`mr-auto flex min-w-0 items-center gap-1.5 overflow-hidden ${follow ? 'easy-session-tool-bar' : 'easy-session-config-bar'}`}>{props.toolbar}</div>
+        ) : !follow ? (
+          <span className="mr-auto flex min-w-0 items-center gap-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <Sparkles className="h-3.5 w-3.5 flex-shrink-0" />
+            <span className="truncate">提交后可配置项目、任务、模型和上下文</span>
+          </span>
+        ) : null}
+        {follow && (
+          <AdvancedInteractionBtn
+            onClick={follow.onToggleVoice}
+            disabled={follow.messageSubmitting || follow.voiceState === 'transcribing'}
+            aria-pressed={follow.voiceState === 'recording'}
+            label={follow.voiceTip}
+            tooltip={follow.voiceTip}
+            accent="cyan"
+            motion="breathe"
+            buttonClassName="h-7 w-7 flex-shrink-0 rounded-full"
+            iconClassName="h-[17px] w-[17px]"
+            style={{ color: follow.voiceState === 'recording' ? '#f87171' : '#d1d5db', border: '1px solid rgba(255,255,255,0.12)' }}
+            icon={follow.voiceState === 'recording' ? <Square className="h-[17px] w-[17px]" fill="currentColor" /> : follow.voiceState === 'transcribing' ? <RefreshCw className="h-[17px] w-[17px] animate-spin" /> : <Mic className="h-[17px] w-[17px]" />}
+          />
+        )}
+        {/* Stop: 终止当前智能体正在执行的操作 — 与标准模式标题栏的"终止"同源 (handleStopSession)。
+            复用 .session-stop-button 系列样式, 保持两处终止按钮的配色与反馈动画一致。 */}
+        {follow && (
+          <AdvancedInteractionBtn
+            onClick={follow.onStop}
+            data-tour="session-chat-stop"
+            label="终止"
+            tooltip={follow.stopFeedbackActive ? '终止指令已发送' : '终止当前智能体正在执行的操作'}
+            accent="red"
+            motion="breathe"
+            className={`session-stop-button ${follow.stopFeedbackActive ? 'session-stop-button--active' : ''}`}
+            buttonClassName="h-7 w-7 flex-shrink-0 rounded-full"
+            iconClassName="h-[17px] w-[17px]"
+            style={follow.stopFeedbackActive ? undefined : { border: '1px solid rgba(255,255,255,0.12)' }}
+            icon={<Square className={`h-[10px] w-[10px] ${follow.stopFeedbackActive ? 'session-stop-button__square' : ''}`} fill="currentColor" />}
+          />
+        )}
+        {follow && (
+          <AdvancedInteractionBtn
+            onClick={() => follow.onSend(true)}
+            disabled={disabled}
+            data-tour="session-chat-send-urgent"
+            label="加急发送"
+            tooltip="发送（加急）— 打断当前输出并立即发送"
+            accent="amber"
+            motion="breathe"
+            buttonClassName="h-7 w-7 flex-shrink-0 rounded-full"
+            iconClassName="h-[17px] w-[17px]"
+            style={{ color: '#d1d5db', border: '1px solid rgba(255,255,255,0.12)' }}
+            icon={<Zap className="h-[17px] w-[17px]" />}
+          />
+        )}
         <AdvancedInteractionBtn
           onClick={() => onSend()}
           disabled={disabled}
           data-tour="session-chat-send"
           label="发送"
-          tooltip={voiceBusy ? voiceTip : hasPendingSend || messageSubmitting ? '正在提交上一条消息...' : '发送 (Enter)'}
+          tooltip={sendTip}
           accent="emerald"
           motion="breathe"
           buttonClassName="h-7 w-7 flex-shrink-0 rounded-full"
           iconClassName="h-[18px] w-[18px]"
           style={{ background: sendBg, color: sendFg, cursor: disabled ? 'not-allowed' : 'pointer' }}
-          icon={anyUploading || voiceState === 'transcribing' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-[18px] w-[18px]" strokeWidth={2.4} />}
+          icon={follow && (follow.anyUploading || follow.voiceState === 'transcribing') ? <RefreshCw className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-[18px] w-[18px]" strokeWidth={2.4} />}
         />
       </div>
     </div>

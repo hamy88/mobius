@@ -19,11 +19,9 @@ import {
   MonitorSmartphone,
   Network,
   PanelLeft,
-  Paperclip,
   Plus,
   Puzzle,
   Search as SearchIcon,
-  SendHorizontal,
   Settings,
   Sparkles,
   X,
@@ -40,6 +38,13 @@ import {
   type ProjectHierarchySearchResponse,
 } from '../services/project-hierarchy-search'
 import { ChatArea } from '../components/chat'
+import { EasySessionChatInput } from '../components/easy-session-chat-input'
+import {
+  EasySessionConfigBar,
+  EMPTY_EASY_SESSION_SELECTION,
+  type EasySessionSelection,
+} from '../components/easy-session-config-bar'
+import { formatDefaultSessionName } from '../components/modals'
 import { GlobalCreateRoot, type CreateKind } from '../components/global-create'
 import { MemoriesManager } from '../components/memories'
 import { ResizablePanel } from '../components/resizable-panel'
@@ -82,71 +87,32 @@ type SessionListMode = 'grouped' | 'flat'
 const RECENT_SESSION_LIMIT = 50
 const CREATE_SUCCESS_TOAST_MS = 4000
 const EASY_LIST_MODE_KEY = 'mobius:easy-mode:session-list-mode'
+// 与 Electron 欢迎页“导入一些零散文件，随便聊聊”共用同一兜底容器：
+// 用户没有显式选择项目/任务时，复用 let-us-chat / a random chat，缺失则按需创建。
+const EASY_DEFAULT_PROJECT_NAME = 'let-us-chat'
+const EASY_DEFAULT_ISSUE_TITLE = 'a random chat'
+const EASY_NEW_PROJECT_ISSUE_TITLE = 'demo issue'
+const EASY_DEFAULT_DESCRIPTION = 'no description'
 
-type SessionCreationChatBotProps = {
-  value: string
-  onChange: (value: string) => void
-  onSubmit: () => void
-}
+async function ensureEasyIssue(projectId: string, title: string): Promise<{ id: string; title: string }> {
+  const response = await api(`/api/projects/${projectId}/issues?status=active`)
+  const issues: any[] = Array.isArray(response) ? response : (response?.issues || [])
+  const existing = issues.find(issue => String(issue?.title || '') === title)
+  if (existing?.id) return { id: String(existing.id), title: String(existing.title || title) }
 
-/**
- * 简易模式欢迎页的会话创建输入框。
- * 视觉上沿用 ChatArea 的 session-chat-input：输入区、工具栏和圆形发送按钮
- * 保持同一组边框、间距和交互反馈，但提交后进入完整的新建会话配置。
- */
-function SessionCreationChatBot({ value, onChange, onSubmit }: SessionCreationChatBotProps) {
-  const submitOnEnter = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-    event.preventDefault()
-    onSubmit()
-  }
-
-  return (
-    <div className="easy-welcome-composer" data-testid="session-creation-chatbot">
-      <textarea
-        value={value}
-        onChange={event => onChange(event.target.value)}
-        onKeyDown={submitOnEnter}
-        placeholder="描述你想让莫比乌斯完成的任务…"
-        aria-label="描述要执行的任务"
-        rows={3}
-      />
-      <div className="easy-welcome-composer__toolbar">
-        <button
-          type="button"
-          className="easy-welcome-tool"
-          onClick={onSubmit}
-          title="打开完整会话设置"
-          aria-label="打开完整会话设置"
-        >
-          <Paperclip className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          className="easy-welcome-pill"
-          onClick={onSubmit}
-          title="选择项目和任务"
-        >
-          选择项目和任务
-          <ChevronDown className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          className="easy-welcome-send"
-          onClick={onSubmit}
-          disabled={!value.trim()}
-          title="开始新会话"
-          aria-label="开始新会话"
-        >
-          <SendHorizontal className="h-[17px] w-[17px]" strokeWidth={2.3} />
-        </button>
-      </div>
-      <div className="easy-welcome-project">
-        <Sparkles className="h-3.5 w-3.5" />
-        <span>提交后可配置项目、任务、模型和上下文</span>
-      </div>
-    </div>
-  )
+  const created = await api(`/api/projects/${projectId}/issues`, {
+    method: 'POST',
+    body: JSON.stringify({
+      title,
+      description: EASY_DEFAULT_DESCRIPTION,
+      use_worktree: false,
+      worktree_branch: '',
+      visibility: 'private',
+      is_planning: false,
+    }),
+  })
+  if (!created?.id) throw new Error('默认任务创建失败')
+  return { id: String(created.id), title: String(created.title || title) }
 }
 
 function readListMode(): SessionListMode {
@@ -183,10 +149,11 @@ function sessionMatchesView(session: RecentSession, view: WorkView) {
 function timeGreeting(displayName?: string) {
   const name = displayName || '朋友'
   const hour = new Date().getHours()
-  if (hour < 5) return `还没休息，${name}`
+  if (hour < 5) return `夜深了，${name}`
   if (hour < 11) return `早上好，${name}`
   if (hour < 14) return `中午好，${name}`
   if (hour < 18) return `下午好，${name}`
+  if (hour < 24) return `晚上好，${name}`
   return `晚上好，${name}`
 }
 
@@ -203,6 +170,7 @@ export default function EasyModePage() {
     setCurrentSession,
     setCurrentTask,
     setAssistantBubbleEnabled,
+    theme,
     user,
   } = useStore()
   const [sessions, setSessions] = useState<RecentSession[]>([])
@@ -223,6 +191,10 @@ export default function EasyModePage() {
   // /easy_mode?session=<id> 会被欢迎页永久挡在前面, 会话怎么都打不开。
   const [showWelcome, setShowWelcome] = useState(() => !search.get('session'))
   const [welcomePrompt, setWelcomePrompt] = useState('')
+  // 欢迎页输入框下方的项目/任务/模型/语言/记忆和技能选择, 提交时一次性带给创建接口
+  const [welcomeSelection, setWelcomeSelection] = useState<EasySessionSelection>(EMPTY_EASY_SESSION_SELECTION)
+  const [welcomeCreating, setWelcomeCreating] = useState(false)
+  const [createErrorToast, setCreateErrorToast] = useState<{ message: string } | null>(null)
   const [createIssueOverride, setCreateIssueOverride] = useState('')
   const [createSuccessToast, setCreateSuccessToast] = useState<{ name: string } | null>(null)
   const [projectSuccessToast, setProjectSuccessToast] = useState<{ name: string } | null>(null)
@@ -248,6 +220,11 @@ export default function EasyModePage() {
     || requestedPanel === 'context'
     ? requestedPanel
     : 'sessions'
+  // 侧栏主导航是单选: 面板 (?panel=) 优先, 没有面板时才轮到「新任务」欢迎页。
+  // 面板渲染顺序与这里一致, 所以高亮项恒等于右侧实际内容。
+  const activePrimaryNav: EasyPanel | 'welcome' = activePanel !== 'sessions'
+    ? activePanel
+    : showWelcome ? 'welcome' : 'sessions'
 
   const projectOptions = useMemo<ProjectOption[]>(() => {
     const activity = new Map<string, { count: number; runningCount: number; lastActive: number }>()
@@ -374,7 +351,10 @@ export default function EasyModePage() {
     setError('')
     Promise.all([
       api(`/api/tasks/recent?limit=${RECENT_SESSION_LIMIT}`, { signal: controller.signal }),
-      api('/api/projects?all=true', { signal: controller.signal }),
+      // 全局纵观的批量快照已包含完整项目列表；避免首屏再并发一份相同查询。
+      activePanel === 'overview'
+        ? Promise.resolve(null)
+        : api('/api/projects?all=true', { signal: controller.signal }),
     ]).then(([recent, availableProjects]: any[]) => {
       setSessions(normalizeRecent(recent))
       if (Array.isArray(availableProjects)) setProjects(availableProjects)
@@ -415,6 +395,12 @@ export default function EasyModePage() {
     const timer = window.setTimeout(() => setProjectSuccessToast(null), CREATE_SUCCESS_TOAST_MS)
     return () => window.clearTimeout(timer)
   }, [projectSuccessToast])
+
+  useEffect(() => {
+    if (!createErrorToast) return
+    const timer = window.setTimeout(() => setCreateErrorToast(null), CREATE_SUCCESS_TOAST_MS)
+    return () => window.clearTimeout(timer)
+  }, [createErrorToast])
 
   const loadRemotes = useCallback((signal?: AbortSignal) => {
     setRemotesLoading(true)
@@ -589,9 +575,123 @@ export default function EasyModePage() {
     setSearch(next)
   }
 
-  const submitWelcomePrompt = () => {
-    if (!welcomePrompt.trim()) return
-    openCreateSession()
+  // 欢迎页提交: 输入框内容 + 下方选择直接创建并启动会话, 不再二次跳配置弹窗.
+  // 请求体与「新建快捷会话」完全同源 (POST /api/issues/:id/sessions + 首条消息启动).
+  const submitWelcomePrompt = async () => {
+    const prompt = welcomePrompt.trim()
+    if (!prompt || welcomeCreating) return
+    const {
+      createProject,
+      projectId,
+      issueId,
+      issueTitle,
+      model,
+      language,
+      excludedSkills,
+      excludedMemories,
+      projectPath,
+      projectName,
+    } = welcomeSelection
+    if (createProject && !projectPath.trim()) {
+      setCreateErrorToast({ message: '请填写项目路径' })
+      return
+    }
+    if (createProject && !projectName.trim()) {
+      setCreateErrorToast({ message: '请填写项目名' })
+      return
+    }
+    setWelcomeCreating(true)
+    try {
+      let targetProject: any = null
+      let targetIssue: { id: string; title: string } | null = null
+
+      if (createProject) {
+        targetProject = await api('/api/projects', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: projectName.trim(),
+            description: prompt,
+            bindPath: projectPath.trim(),
+            bindPathManual: true,
+            defaultUseWorktree: false,
+            researchEnabled: false,
+            visibility: 'private',
+            can_post_issue: false,
+            can_run_session: false,
+          }),
+        })
+        if (!targetProject?.id) throw new Error('项目创建失败')
+        setProjects([...projects.filter((project: any) => project.id !== targetProject.id), targetProject])
+        targetIssue = await ensureEasyIssue(String(targetProject.id), EASY_NEW_PROJECT_ISSUE_TITLE)
+      } else if (projectId) {
+        targetProject = projects.find((project: any) => String(project.id) === projectId) || { id: projectId }
+        targetIssue = issueId
+          ? { id: issueId, title: issueTitle || EASY_DEFAULT_ISSUE_TITLE }
+          : await ensureEasyIssue(projectId, EASY_DEFAULT_ISSUE_TITLE)
+      } else {
+        targetProject = projects.find((project: any) => (
+          String(project?.created_by || '') === String(user?.id || '')
+          && String(project?.name || '').toLowerCase() === EASY_DEFAULT_PROJECT_NAME
+        ))
+        if (!targetProject) {
+          const workDir = String(user?.work_dir || '').trim().replace(/\/+$/, '')
+          if (!workDir) throw new Error('当前用户尚未配置工作目录，无法创建默认项目')
+          targetProject = await api('/api/projects', {
+            method: 'POST',
+            body: JSON.stringify({
+              name: EASY_DEFAULT_PROJECT_NAME,
+              description: '用于未指定项目时创建简易会话',
+              bindPath: `${workDir}/${EASY_DEFAULT_PROJECT_NAME}`,
+              bindPathManual: false,
+              defaultUseWorktree: false,
+              researchEnabled: false,
+              visibility: 'private',
+              can_post_issue: false,
+              can_run_session: false,
+            }),
+          })
+          if (!targetProject?.id) throw new Error('默认项目创建失败')
+          setProjects([...projects.filter((project: any) => project.id !== targetProject.id), targetProject])
+        }
+        targetIssue = await ensureEasyIssue(String(targetProject.id), EASY_DEFAULT_ISSUE_TITLE)
+      }
+
+      if (!targetProject?.id || !targetIssue?.id) throw new Error('无法确定会话所属的项目与任务')
+      const name = formatDefaultSessionName(targetIssue.title)
+      const keepsSelectedContext = targetIssue.id === issueId
+      const session = await api(`/api/issues/${targetIssue.id}/sessions`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          description: prompt,
+          model,
+          language,
+          excluded_skill_ids: keepsSelectedContext ? excludedSkills : [],
+          excluded_memory_ids: keepsSelectedContext ? excludedMemories : [],
+          name_touched: false,
+        }),
+      })
+      if (session?.error) throw new Error(session.error)
+      if (session?.session_id) {
+        const requestId = `easy-welcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        api(`/api/sessions/${session.session_id}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({ content: [name, prompt].filter(Boolean).join('\n\n'), request_id: requestId }),
+        }).catch(() => {})
+      }
+      handleSessionCreated({
+        ...session,
+        project_id: session?.project_id || String(targetProject.id),
+        project_name: session?.project_name || targetProject.name,
+        issue_id: session?.issue_id || targetIssue.id,
+        issue_title: session?.issue_title || targetIssue.title,
+      })
+      setWelcomePrompt('')
+    } catch (err: any) {
+      setCreateErrorToast({ message: err?.message || '会话创建失败，请稍后重试' })
+    } finally {
+      setWelcomeCreating(false)
+    }
   }
 
   const selectPanel = (panel: EasyPanel) => {
@@ -695,19 +795,19 @@ export default function EasyModePage() {
           className="easy-sidebar flex flex-col"
         >
           <div className="easy-sidebar-primary">
-            <button type="button" className={`easy-sidebar-nav ${showWelcome ? 'is-active' : ''}`} onClick={openWelcome} title="新建任务">
+            <button type="button" className={`easy-sidebar-nav ${activePrimaryNav === 'welcome' ? 'is-active' : ''}`} aria-current={activePrimaryNav === 'welcome' ? 'page' : undefined} onClick={openWelcome} title="新建任务">
               <Plus className="h-4 w-4" />
               <span>新任务</span>
             </button>
-            <button type="button" className={`easy-sidebar-nav ${activePanel === 'overview' ? 'is-active' : ''}`} onClick={() => selectPanel('overview')}>
+            <button type="button" className={`easy-sidebar-nav ${activePrimaryNav === 'overview' ? 'is-active' : ''}`} aria-current={activePrimaryNav === 'overview' ? 'page' : undefined} onClick={() => selectPanel('overview')}>
               <Network className="h-4 w-4" />
               <span>全局纵观</span>
             </button>
-            <button type="button" className={`easy-sidebar-nav ${activePanel === 'extensions' ? 'is-active' : ''}`} onClick={() => selectPanel('extensions')}>
+            <button type="button" className={`easy-sidebar-nav ${activePrimaryNav === 'extensions' ? 'is-active' : ''}`} aria-current={activePrimaryNav === 'extensions' ? 'page' : undefined} onClick={() => selectPanel('extensions')}>
               <Boxes className="h-4 w-4" />
               <span>项目与拓展</span>
             </button>
-            <button type="button" className={`easy-sidebar-nav ${activePanel === 'devices' ? 'is-active' : ''}`} onClick={() => selectPanel('devices')}>
+            <button type="button" className={`easy-sidebar-nav ${activePrimaryNav === 'devices' ? 'is-active' : ''}`} aria-current={activePrimaryNav === 'devices' ? 'page' : undefined} onClick={() => selectPanel('devices')}>
               <MonitorSmartphone className="h-4 w-4" />
               <span>跨设备</span>
             </button>
@@ -857,16 +957,37 @@ export default function EasyModePage() {
             <div className="easy-welcome-card">
               <MobiusLogo size={46} className="easy-welcome-logo" />
               <h1>{timeGreeting(user?.display_name)}<br />您需要莫比乌斯执行什么任务？</h1>
-              <SessionCreationChatBot
-                value={welcomePrompt}
-                onChange={setWelcomePrompt}
-                onSubmit={submitWelcomePrompt}
+              <EasySessionChatInput
+                mode="create_session_mode"
+                input={welcomePrompt}
+                inputPlaceholder="描述你想让莫比乌斯完成的任务…"
+                theme={theme}
+                onChange={event => setWelcomePrompt(event.target.value)}
+                onSend={submitWelcomePrompt}
+                submitDisabled={welcomeCreating || (welcomeSelection.createProject && (!welcomeSelection.projectPath.trim() || !welcomeSelection.projectName.trim()))}
+                submitTooltip={welcomeSelection.createProject && !welcomeSelection.projectPath.trim()
+                  ? '请填写项目路径'
+                  : welcomeSelection.createProject && !welcomeSelection.projectName.trim()
+                    ? '请填写项目名'
+                    : '开始新会话'}
+                toolbar={
+                  <EasySessionConfigBar
+                    selection={welcomeSelection}
+                    onChange={setWelcomeSelection}
+                    projects={projects}
+                    recentSessions={sessions}
+                    dark={theme !== 'light'}
+                  />
+                }
               />
               <div className="easy-welcome-suggestions"><span>钉钉办公</span><span>文档创作</span><span>数据分析</span><span>多人工作台</span><span>创意设计</span><span>深度调研</span></div>
             </div>
           </main>
         ) : loading ? (
-          <Loading text="正在加载工作导航..." />
+          // 与会话页/其它面板同一张卡片: 裸 Loading 铺满整块会丢掉左边线与左上圆角.
+          <main className="easy-content easy-content--empty" data-testid="easy-loading-panel">
+            <Loading text="正在加载工作导航..." />
+          </main>
         ) : currentSession && contextMatchesProject ? (
           <ChatArea
             layout="easy"
@@ -924,6 +1045,15 @@ export default function EasyModePage() {
           title="项目已创建并切换"
           subtitle={projectSuccessToast.name}
           onClose={() => setProjectSuccessToast(null)}
+        />
+      )}
+      {createErrorToast && (
+        <ToastCard
+          tone="error"
+          icon={<X className="h-4 w-4" strokeWidth={2} />}
+          title="会话创建失败"
+          subtitle={createErrorToast.message}
+          onClose={() => setCreateErrorToast(null)}
         />
       )}
     </div>

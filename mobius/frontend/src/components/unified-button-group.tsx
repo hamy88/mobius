@@ -181,7 +181,6 @@ export const UnifiedButton = forwardRef<HTMLButtonElement, UnifiedButtonProps>(f
       >
         {isSwitch ? <><span className="min-w-0 flex-1 truncate">{label}</span><span aria-hidden="true" className="relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors" style={{ background: checked ? 'var(--accent-primary)' : 'var(--input-border)' }}><span className="absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform" style={{ transform: checked ? 'translateX(18px)' : 'translateX(2px)' }} /></span></> : <>
           {icon && <span className={`inline-flex ${iconClassName || 'h-4 w-4'} flex-shrink-0 items-center justify-center transition-transform ${iconMotion}`}>{icon}</span>}
-          {displayLabel && <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-4">{label}</span>}
           {badge}
         </>}
       </button>

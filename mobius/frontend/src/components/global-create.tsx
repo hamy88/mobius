@@ -32,7 +32,7 @@ import {
 } from './session-mention-picker'
 import {
   Plus, ChevronDown, FolderPlus, CircleDot, MessagesSquare, FlaskConical,
-  X, Eye, RefreshCw, Paperclip, Image as ImageIcon, Trash2,
+  X, Eye, Sparkles, RefreshCw, Paperclip, Image as ImageIcon, Trash2,
   CheckCircle2, ExternalLink, Lock, Ban, Search, Dices, FolderOpen, History, Upload,
 } from 'lucide-react'
 
@@ -213,15 +213,15 @@ function SelectShell({ label, hint, current, placeholder, loading, onRefresh, ch
 //   3. native 下拉用 OS 主题, dark 下变白底 (本组件完全跟随主题)
 //   4. 列表项只能纯文本 (本组件支持 description / badge / disabled)
 // 自动反向展开: 若下方空间不足且上方足够, 自动向上展开.
-type DropdownOption = {
+export type DropdownOption = {
   value: string
   label: string
   description?: string
   disabled?: boolean
   badge?: { text: string; color: string; bg: string }
 }
-function DropdownSelect({
-  value, onChange, options, placeholder, dark, disabled, emptyText, forceSearch, panelAction,
+export function DropdownSelect({
+  value, onChange, options, placeholder, dark, disabled, emptyText, forceSearch, panelAction, icon, size = 'md', iconOnly = false,
 }: {
   value: string
   onChange: (v: string) => void
@@ -232,6 +232,12 @@ function DropdownSelect({
   emptyText?: string
   forceSearch?: boolean
   panelAction?: { label: string; onClick: () => void; disabled?: boolean }
+  /** 触发器前置图标: 紧凑态下选项名很短, 图标用来指明这一项选的是什么 */
+  icon?: React.ReactNode
+  /** sm = 简易模式欢迎页配置条上的紧凑触发器 (高度 28px, 宽度跟随内容) */
+  size?: 'md' | 'sm'
+  /** 仅显示前置图标；有有效选项时用高亮边框与图标表示已经选择 */
+  iconOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
@@ -240,6 +246,7 @@ function DropdownSelect({
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null)
 
   const selected = options.find(o => o.value === value)
+  const hasValidValue = !!selected
   const showSearch = !!forceSearch || options.length > 6
 
   // 计算 panel 位置 (开/关/滚动/resize 时刷新), 自动判断反向展开
@@ -250,7 +257,8 @@ function DropdownSelect({
       const r = el.getBoundingClientRect()
       const panelH = Math.min(340, options.length * 48 + (showSearch ? 56 : 0) + 16)
       const openUp = r.bottom + panelH + 12 > window.innerHeight && r.top - panelH > 8
-      setPos({ top: openUp ? Math.max(8, r.top - panelH - 4) : r.bottom + 4, left: r.left, width: r.width })
+      // 紧凑触发器宽度随内容收缩, 面板按需加宽, 避免长项目/任务名被挤成一列窄条.
+      setPos({ top: openUp ? Math.max(8, r.top - panelH - 4) : r.bottom + 4, left: r.left, width: size === 'sm' ? Math.max(r.width, 200) : r.width })
     }
     update()
     const onScroll = () => update()
@@ -260,7 +268,7 @@ function DropdownSelect({
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', onScroll)
     }
-  }, [open, options.length, showSearch])
+  }, [open, options.length, showSearch, size])
 
   // 外部点击 / Escape 关闭
   useEffect(() => {
@@ -295,12 +303,23 @@ function DropdownSelect({
   return (
     <>
       <button ref={triggerRef} type="button" disabled={disabled} onClick={() => setOpen(v => !v)}
-        className="w-full h-10 px-2.5 rounded-xl text-[13px] text-left flex items-center justify-between gap-2 focus:outline-none focus:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors hover:border-[var(--border-color-strong,#475569)]"
-        style={{ background: 'var(--input-bg)', border: open ? '1px solid rgba(59,130,246,0.55)' : '1px solid var(--input-border)', color: dark ? '#f1f5f9' : '#1e293b' }}>
-        <span className={`truncate ${selected ? '' : 'opacity-60'}`}>
-          {selected ? selected.label : (placeholder || '— 请选择 —')}
+        title={size === 'sm' ? (selected ? selected.label : (placeholder || '')) : undefined}
+        aria-label={iconOnly ? `${placeholder || '选择'}${selected ? `：${selected.label}` : ''}` : undefined}
+        data-has-value={hasValidValue ? 'true' : 'false'}
+        className={`${size === 'sm' ? (iconOnly ? 'h-7 w-7 flex-shrink-0 rounded-lg p-0 text-[11px]' : 'max-w-[168px] h-7 px-2 gap-1 rounded-lg text-[11px]') : 'w-full h-10 px-2.5 gap-2 rounded-xl text-[13px]'} text-left flex items-center justify-between focus:outline-none focus:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors hover:border-[var(--border-color-strong,#475569)]`}
+        style={{
+          background: 'var(--input-bg)',
+          border: open || (iconOnly && hasValidValue) ? '1px solid rgba(59,130,246,0.72)' : '1px solid var(--input-border)',
+          color: dark ? '#f1f5f9' : '#1e293b',
+          boxShadow: iconOnly && hasValidValue ? '0 0 0 1px rgba(59,130,246,0.08)' : undefined,
+        }}>
+        <span className={`flex min-w-0 flex-1 items-center gap-1.5 ${iconOnly ? 'justify-center' : ''}`}>
+          {icon && <span className="flex-shrink-0" style={{ color: iconOnly && hasValidValue ? '#60a5fa' : 'var(--text-muted)' }}>{icon}</span>}
+          {!iconOnly && <span className={`truncate ${selected ? '' : 'opacity-60'}`}>
+            {selected ? selected.label : (placeholder || '— 请选择 —')}
+          </span>}
         </span>
-        <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} style={{ color: 'var(--text-muted)' }} />
+        {!iconOnly && <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} style={{ color: 'var(--text-muted)' }} />}
       </button>
       {open && pos && createPortal(
         <div ref={panelRef} className="fixed z-[100]" style={{ top: pos.top, left: pos.left, width: pos.width }}>
@@ -486,6 +505,8 @@ export function SkillMemoryPicker({
   onToggleSkill, onToggleMemory,
   skillLockedOf, skillMutexOf, skillAccentOf,
   disabled, dark,
+  singleTrigger = false,
+  iconOnlyTrigger = false,
   emptySkillText = '该任务未启用 Skill',
   emptyMemoryText = '无可用 Memory',
 }: {
@@ -500,6 +521,10 @@ export function SkillMemoryPicker({
   skillAccentOf?: (id: string) => string | undefined
   disabled?: boolean
   dark: boolean
+  /** 单按钮形态 (简易模式欢迎页): 一个入口开弹窗, 弹窗内用 tab 切换 Skill / Memory */
+  singleTrigger?: boolean
+  /** 单按钮仅显示图标；存在至少一个已启用项时高亮边框与图标 */
+  iconOnlyTrigger?: boolean
   emptySkillText?: string
   emptyMemoryText?: string
 }) {
@@ -508,6 +533,9 @@ export function SkillMemoryPicker({
 
   const enabledSkillCount = skills.filter(it => (skillLockedOf?.(it.id) || (!skillMutexOf?.(it.id) && !excludedSkills.has(it.id)))).length
   const enabledMemoryCount = memories.filter(it => !excludedMemories.has(it.id)).length
+  const enabledTotal = enabledSkillCount + enabledMemoryCount
+  const availableTotal = skills.length + memories.length
+  const hasValidValue = !disabled && enabledTotal > 0
 
   const items = panel === 'skill' ? skills : memories
   const filtered = useMemo(() => {
@@ -522,34 +550,74 @@ export function SkillMemoryPicker({
 
   return (
     <>
-      <div className="grid grid-cols-2 gap-2">
-        <button type="button" onClick={() => setPanel('skill')} disabled={disabled} className={btnCls}
-          style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
-          <span className="flex items-center gap-1.5 truncate">
-            <span style={{ color: '#60a5fa' }}><Lock className="w-3 h-3" /></span>
-            Skill
-          </span>
-          <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>{enabledSkillCount}/{skills.length}</span>
-        </button>
-        <button type="button" onClick={() => setPanel('memory')} disabled={disabled} className={btnCls}
-          style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
-          <span className="flex items-center gap-1.5 truncate">
-            <span style={{ color: '#a855f7' }}><Eye className="w-3 h-3" /></span>
-            Memory
-          </span>
-          <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>{enabledMemoryCount}/{memories.length}</span>
-        </button>
+      <div className={singleTrigger ? '' : 'grid grid-cols-2 gap-2'}>
+        {singleTrigger ? (
+          <button type="button" onClick={() => setPanel('skill')} disabled={disabled}
+            title="选择注入本次会话的 Skill 与 Memory"
+            aria-label={`记忆和技能：${enabledTotal}/${availableTotal} 已启用`}
+            data-has-value={hasValidValue ? 'true' : 'false'}
+            className={`${iconOnlyTrigger ? 'h-7 w-7 flex-shrink-0 justify-center p-0' : 'h-7 min-w-0 max-w-[168px] justify-between gap-1 px-2'} rounded-lg border text-[11px] flex items-center transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-50 disabled:cursor-not-allowed`}
+            style={{
+              borderColor: hasValidValue ? 'rgba(59,130,246,0.72)' : 'var(--input-border)',
+              color: hasValidValue ? '#60a5fa' : 'var(--text-secondary)',
+              boxShadow: hasValidValue ? '0 0 0 1px rgba(59,130,246,0.08)' : undefined,
+            }}>
+            <span className={`flex min-w-0 items-center gap-1.5 truncate ${iconOnlyTrigger ? 'justify-center' : ''}`}>
+              <Sparkles className="h-3 w-3 flex-shrink-0" />
+              {!iconOnlyTrigger && '记忆和技能'}
+            </span>
+            {!iconOnlyTrigger && <span className="flex-shrink-0 tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              {enabledTotal}/{availableTotal}
+            </span>}
+          </button>
+        ) : (
+          <>
+            <button type="button" onClick={() => setPanel('skill')} disabled={disabled} className={btnCls}
+              style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
+              <span className="flex items-center gap-1.5 truncate">
+                <span style={{ color: '#60a5fa' }}><Lock className="w-3 h-3" /></span>
+                Skill
+              </span>
+              <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>{enabledSkillCount}/{skills.length}</span>
+            </button>
+            <button type="button" onClick={() => setPanel('memory')} disabled={disabled} className={btnCls}
+              style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
+              <span className="flex items-center gap-1.5 truncate">
+                <span style={{ color: '#a855f7' }}><Eye className="w-3 h-3" /></span>
+                Memory
+              </span>
+              <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>{enabledMemoryCount}/{memories.length}</span>
+            </button>
+          </>
+        )}
       </div>
 
-      {panel && (
+      {/* 走 portal: 调用方可能位于 backdrop-filter/overflow:hidden 的容器内 (简易模式输入框),
+          那种祖先会成为 fixed 定位的包含块并把浮层裁掉. */}
+      {panel && createPortal(
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={close}>
           <div className="flex max-h-[min(600px,calc(100vh-64px))] w-[min(520px,calc(100vw-32px))] flex-col rounded-2xl shadow-2xl"
             onClick={e => e.stopPropagation()} style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
             <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: 'var(--border-color)' }}>
               <div className="min-w-0">
-                <div className="text-[14px] font-semibold" style={{ color: dark ? '#f1f5f9' : '#1e293b' }}>
-                  {panel === 'skill' ? 'Skill 选择' : 'Memory 选择'}
-                </div>
+                {singleTrigger ? (
+                  // 单入口形态: 弹窗内用 tab 在 Skill / Memory 之间切换
+                  <div className="flex items-center gap-1 rounded-lg p-0.5" style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)' }}>
+                    {(['skill', 'memory'] as const).map(kind => (
+                      <button key={kind} type="button" onClick={() => { setPanel(kind); setQ('') }}
+                        className="h-7 rounded-md px-2.5 text-[12px] transition-colors"
+                        style={panel === kind
+                          ? { background: 'rgba(59,130,246,0.18)', color: '#60a5fa' }
+                          : { color: 'var(--text-muted)' }}>
+                        {kind === 'skill' ? `Skill ${enabledSkillCount}/${skills.length}` : `Memory ${enabledMemoryCount}/${memories.length}`}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[14px] font-semibold" style={{ color: dark ? '#f1f5f9' : '#1e293b' }}>
+                    {panel === 'skill' ? 'Skill 选择' : 'Memory 选择'}
+                  </div>
+                )}
                 <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                   {panel === 'skill' ? `${enabledSkillCount}/${skills.length} 已启用 · 取消勾选的将不注入 Agent 上下文` : `${enabledMemoryCount}/${memories.length} 已启用 · 取消勾选的将不注入 Agent 上下文`}
                 </div>
@@ -605,7 +673,8 @@ export function SkillMemoryPicker({
               <button type="button" onClick={close} className="h-8 px-4 rounded-lg text-[12px] btn-primary">完成</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   )

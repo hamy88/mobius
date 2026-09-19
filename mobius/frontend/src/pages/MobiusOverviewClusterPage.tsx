@@ -1887,9 +1887,8 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
   })
   const [timeRange, setTimeRange] = useState<TimeRangeKey>('24h')
   const [graphDataByProject, setGraphDataByProject] = useState<Record<string, ProjectGraphData>>({})
-  const graphDataByProjectRef = useRef<Record<string, ProjectGraphData>>({})
   const missingSessionRefreshesRef = useRef<Map<string, number>>(new Map())
-  const [loadingIds, setLoadingIds] = useState<Set<string>>(() => new Set())
+  const [snapshotLoading, setSnapshotLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Selection | null>(null)
   const [hoverLabel, setHoverLabel] = useState<{ x: number; y: number; title: string; meta: string } | null>(null)
@@ -1950,8 +1949,6 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
     hit?: HitTarget | null
   }>(null)
 
-  graphDataByProjectRef.current = graphDataByProject
-
   const hideSidebar = useCallback(() => {
     // 移动端由 TopNav 汉堡按钮控制抽屉显隐；桌面端才持久化「隐藏」状态。
     if (isMobile) {
@@ -1998,12 +1995,6 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
     return () => window.removeEventListener('keydown', onKey)
   }, [embedded, goBack])
 
-  useEffect(() => {
-    api('/api/projects?all=true')
-      .then((arr: any[]) => setProjects(sortByRecent(arr || [])))
-      .catch((e: any) => setError(e?.message || '项目加载失败'))
-  }, [setProjects])
-
   const candidateProjects = useMemo(
     () => sortByRecent((projects || []).filter((project: any) => (
       !project.hidden
@@ -2012,43 +2003,6 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
     ))),
     [projects, query, cutoffMs],
   )
-
-  const loadProjectGraph = useCallback((projectId: string) => {
-    if (!projectId || graphDataByProject[projectId] || loadingIds.has(projectId)) return
-    setLoadingIds((prev) => new Set(prev).add(projectId))
-    setError('')
-    Promise.all([
-      api(`/api/projects/${encodeURIComponent(projectId)}/issues`),
-      api(`/api/projects/${encodeURIComponent(projectId)}/researches`),
-    ])
-      .then(([issues, researches]: any[]) => {
-        const issueIds = (issues || []).map((issue: any) => String(issue?.id || '').trim()).filter(Boolean)
-        const researchIds = (researches || []).map((research: any) => String(research?.id || '').trim()).filter(Boolean)
-        const qs = new URLSearchParams()
-        if (issueIds.length > 0) qs.set('issue_ids', issueIds.join(','))
-        if (researchIds.length > 0) qs.set('research_ids', researchIds.join(','))
-        qs.set('preview_limit', '500')
-        return api(`/api/projects/${encodeURIComponent(projectId)}/sessions-overview?${qs.toString()}`)
-          .then((sessionsOverview: any) => ({ issues, researches, sessionsOverview }))
-      })
-      .then(({ issues, researches, sessionsOverview }: any) => {
-        setGraphDataByProject((prev) => ({
-          ...prev,
-          [projectId]: {
-            issues: issues || [],
-            researches: researches || [],
-            sessionsByIssue: sessionsOverview?.issues || {},
-            sessionsByResearch: sessionsOverview?.researches || {},
-          },
-        }))
-      })
-      .catch((e: any) => setError(e?.message || '图谱加载失败'))
-      .finally(() => setLoadingIds((prev) => {
-        const next = new Set(prev)
-        next.delete(projectId)
-        return next
-      }))
-  }, [graphDataByProject, loadingIds])
 
   const mergeSessionBuckets = useCallback((
     projectId: string,
@@ -2083,73 +2037,58 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
     return merged
   }, [])
 
-  const refreshProjectGraph = useCallback(async (projectId: string, signal?: AbortSignal) => {
-    const data = graphDataByProjectRef.current[projectId]
-    if (!data) return null
-    try {
-      const issueIds = data.issues.map((issue: any) => String(issue?.id || '').trim()).filter(Boolean)
-      const researchIds = data.researches.map((research: any) => String(research?.id || '').trim()).filter(Boolean)
-      const qs = new URLSearchParams()
-      if (issueIds.length) qs.set('issue_ids', issueIds.join(','))
-      if (researchIds.length) qs.set('research_ids', researchIds.join(','))
-      qs.set('preview_limit', '500')
-      const sessionsOverview = await api(`/api/projects/${encodeURIComponent(projectId)}/sessions-overview?${qs.toString()}`, signal ? { signal } : undefined)
-      if (signal?.aborted) return null
-      return {
-        projectId,
-        sessionsByIssue: sessionsOverview?.issues || {},
-        sessionsByResearch: sessionsOverview?.researches || {},
-      }
-    } catch (e: any) {
-      // Polling teardown/timeout aborts the request intentionally. Do not expose the
-      // browser's "signal is aborted without reason" text as a page error.
-      if (signal?.aborted || e?.name === 'AbortError' || /\babort(ed)?\b/i.test(String(e?.message || ''))) return
-      setError(e?.message || '会话状态刷新失败')
-      return null
-    }
-  }, [])
-
-  useEffect(() => {
-    const stop = pollRecursive(async (signal) => {
-      const arr: any[] = await api('/api/projects?all=true', { signal })
-      if (signal.aborted) return
-      const projectIds = Object.keys(graphDataByProjectRef.current)
-      const updates = await Promise.all(projectIds.map((id) => refreshProjectGraph(id, signal)))
-      if (signal.aborted) return
-      setProjects(sortByRecent(arr || []))
-      const validUpdates = updates.filter((update): update is NonNullable<typeof update> => !!update)
-      if (validUpdates.length === 0) return
-      setGraphDataByProject((previous) => {
-        const next = { ...previous }
-        validUpdates.forEach((update) => {
-          const current = previous[update.projectId]
-          if (!current) return
-          next[update.projectId] = {
-            ...current,
-            sessionsByIssue: mergeSessionBuckets(update.projectId, 'issue', current.sessionsByIssue, update.sessionsByIssue),
-            sessionsByResearch: mergeSessionBuckets(update.projectId, 'research', current.sessionsByResearch, update.sessionsByResearch),
-          }
-        })
-        graphDataByProjectRef.current = next
-        return next
+  const applyClusterSnapshot = useCallback((payload: any) => {
+    const incoming = payload?.graphs && typeof payload.graphs === 'object' ? payload.graphs : {}
+    setProjects(sortByRecent(Array.isArray(payload?.projects) ? payload.projects : []))
+    setGraphDataByProject((previous) => {
+      const next: Record<string, ProjectGraphData> = {}
+      Object.entries(incoming).forEach(([projectId, raw]) => {
+        const data = (raw || {}) as ProjectGraphData
+        const current = previous[projectId]
+        next[projectId] = {
+          issues: Array.isArray(data.issues) ? data.issues : [],
+          researches: Array.isArray(data.researches) ? data.researches : [],
+          sessionsByIssue: current
+            ? mergeSessionBuckets(projectId, 'issue', current.sessionsByIssue, data.sessionsByIssue || {})
+            : data.sessionsByIssue || {},
+          sessionsByResearch: current
+            ? mergeSessionBuckets(projectId, 'research', current.sessionsByResearch, data.sessionsByResearch || {})
+            : data.sessionsByResearch || {},
+        }
       })
-    }, 10_000)
-    return stop
-  }, [mergeSessionBuckets, refreshProjectGraph, setProjects])
+      return next
+    })
+  }, [mergeSessionBuckets, setProjects])
+
+  const loadClusterSnapshot = useCallback(async (signal?: AbortSignal) => {
+    const payload = await api(`/api/projects/cluster-overview?range=${encodeURIComponent(timeRange)}`, signal ? { signal } : undefined)
+    if (signal?.aborted) return
+    applyClusterSnapshot(payload)
+  }, [applyClusterSnapshot, timeRange])
 
   useEffect(() => {
-    let cancelled = false
-    const ids = candidateProjects.map((project: any) => project.id).filter((id: string) => !graphDataByProject[id])
-    const run = async () => {
-      for (let index = 0; index < ids.length; index += 3) {
-        if (cancelled) return
-        ids.slice(index, index + 3).forEach((id: string) => loadProjectGraph(id))
-        await new Promise((resolve) => window.setTimeout(resolve, 80))
-      }
+    const controller = new AbortController()
+    setSnapshotLoading(true)
+    setError('')
+    loadClusterSnapshot(controller.signal)
+      .catch((e: any) => {
+        if (controller.signal.aborted || e?.name === 'AbortError' || /\babort(ed)?\b/i.test(String(e?.message || ''))) return
+        setError(e?.message || '图谱加载失败')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSnapshotLoading(false)
+      })
+    return () => controller.abort()
+  }, [loadClusterSnapshot])
+
+  useEffect(() => pollRecursive(async (signal) => {
+    try {
+      await loadClusterSnapshot(signal)
+    } catch (e: any) {
+      if (signal.aborted || e?.name === 'AbortError' || /\babort(ed)?\b/i.test(String(e?.message || ''))) return
+      setError(e?.message || '会话状态刷新失败')
     }
-    run()
-    return () => { cancelled = true }
-  }, [candidateProjects, graphDataByProject, loadProjectGraph])
+  }, 10_000, 10_000, { startImmediately: false }), [loadClusterSnapshot])
 
   const model = useMemo(() => buildClusterModel(candidateProjects, graphDataByProject, cutoffMs, clusterMode), [candidateProjects, graphDataByProject, cutoffMs, clusterMode])
   const harnessStats = useMemo(() => {
@@ -2164,10 +2103,10 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
   const overlaySessions = useMemo(() => model.nodes.filter((node) => !dismissedOverlayIds.has(node.id)).map((node) => ({ id: node.id, title: node.title, projectId: node.projectId, projectName: node.projectName, creatorId: node.creatorId, parentId: node.parentId, parentKind: node.parentKind, color: sessionColor(node), x: node.x, y: node.y, active: recentOverlayIds ? recentOverlayIds.has(node.id) : ['running', 'executing', 'in_progress', 'working'].includes(String(node.status || '').toLowerCase()) || node.source?.agent_status === 'running' || manualOverlayIds.has(node.id) })), [model.nodes, manualOverlayIds, dismissedOverlayIds, recentOverlayIds])
   const activeProjectIds = useMemo(() => new Set(model.projectClusters.map((project) => project.id)), [model.projectClusters])
   const visibleProjects = useMemo(
-    () => candidateProjects.filter((project: any) => activeProjectIds.has(project.id) || loadingIds.has(project.id) || !graphDataByProject[project.id]),
-    [candidateProjects, activeProjectIds, loadingIds, graphDataByProject],
+    () => candidateProjects.filter((project: any) => activeProjectIds.has(project.id) || snapshotLoading || !graphDataByProject[project.id]),
+    [candidateProjects, activeProjectIds, snapshotLoading, graphDataByProject],
   )
-  const loadingCount = loadingIds.size
+  const loadingCount = snapshotLoading ? 1 : 0
   const pendingProjectCount = useMemo(
     () => candidateProjects.reduce((count: number, project: any) => count + (graphDataByProject[project.id] ? 0 : 1), 0),
     [candidateProjects, graphDataByProject],
@@ -2861,7 +2800,7 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>{project.name}</span>
                       <span className="mt-0.5 flex items-center gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        <span>{cluster ? compactCount(cluster.sessions.length) : loadingIds.has(project.id) ? '加载中' : '0'} Sessions</span>
+                        <span>{cluster ? compactCount(cluster.sessions.length) : snapshotLoading ? '加载中' : '0'} Sessions</span>
                         <span>{timeAgoPrecise(activeTimeValue(project))}</span>
                       </span>
                     </span>
@@ -2904,7 +2843,7 @@ export default function MobiusOverviewClusterPage({ embedded = false }: { embedd
                 {clusterMode === 'creator' && <span>{model.creatorClusters.length} Creators</span>}
                 <span>{model.projectClusters.length} Projects · {model.parentClusters.length} Issues / Research · {model.nodes.length} Sessions / Agents</span>
                 <span title="按执行引擎统计当前视图内的智能体节点">claude code {harnessStats.cc} · codex {harnessStats.codex}</span>
-                {loadingCount > 0 && <span>{loadingCount} 个项目加载中</span>}
+                {snapshotLoading && <span>正在加载全局快照</span>}
               </div>
             </div>
             <div className="flex flex-shrink-0 items-center rounded-md border p-0.5" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>

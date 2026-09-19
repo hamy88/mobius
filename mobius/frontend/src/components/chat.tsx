@@ -35,7 +35,8 @@ import { RemoteComputeMemoryModal } from './memories'
 import { AdvancedInteractionBtn } from './advanced-interaction-btn'
 import { EasySessionChatInput } from './easy-session-chat-input'
 import { AdvancedSessionActions } from './advanced-session-actions'
-import { UnifiedButtonGroup } from './unified-button-group'
+import { UnifiedButtonGroup, type VisibilityOption } from './unified-button-group'
+import { EasySessionToolBar } from './easy-session-tool-bar'
 import { draftClear, draftLoad, draftSave } from '../services/input-drafts'
 import { extensionAppUrlForProject } from '../services/extension-entry'
 import { isFireAndForgetSession } from '../services/session-start-policy'
@@ -61,6 +62,26 @@ const CHAT_INPUT_MIN_RATIO = 0.14
 const CHAT_INPUT_MIN_WIDTH = 224
 const CHAT_INPUT_MAX_WIDTH = 720
 const CHAT_HISTORY_MIN_WIDTH = 360
+// 「会话统一按钮组」的显示设置清单: 标准布局的侧栏与简易模式的工具浮层共用同一份,
+// 否则两处的显示开关会漂移 (存储 key 相同, 清单不同会互相隐藏对方的按钮).
+const SESSION_TOOL_VISIBILITY_OPTIONS: VisibilityOption[] = [
+  { id: 'file-changes', label: '查看文件修改' },
+  { id: 'bash-commands', label: '查看运行命令' },
+  { id: 'input-replay', label: '回放输入' },
+  { id: 'jsonl-meta', label: '显示时间与序号' },
+  { id: 'project-port', label: '进入项目端口' },
+  { id: 'terminal', label: '打开终端' },
+  { id: 'cooperable-pc', label: '可合作计算机' },
+  { id: 'knowledge', label: '查看当前项目知识/任务知识' },
+  { id: 'send-knowledge', label: '项目知识沉淀到记忆' },
+  { id: 'continue-model', label: '修改模型并继续' },
+  { id: 'skill', label: 'Skill' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'git', label: 'Git' },
+  { id: 'ports', label: '端口' },
+  { id: 'time', label: '耗时' },
+  { id: 'search', label: '会话内搜索' },
+]
 
 type LiveDebugTailEntry = {
   type: string | null
@@ -4086,6 +4107,27 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     </JsonlCountSlot>
   )
 
+  // 会话工具按钮组只有这一份定义: 标准布局挂在输入侧栏, 简易模式收进 EasySessionToolBar 浮层,
+  // 避免入口/禁用条件/显示开关两处漂移 (按钮本体由 AdvancedSessionActions 定义).
+  const renderSessionToolGroup = (opts: { variant: 'default' | 'compact' | 'menu'; className: string; initialPanel: null | 'memory'; persistActivePanel?: boolean }) => (
+    <UnifiedButtonGroup
+      className={opts.className}
+      aria-label="会话统一按钮组"
+      visibilityStorageKey="mobius:session-sidebar-buttons:hidden"
+    >
+      <SessionSkillMemoryEditor
+        sessionId={currentSession?.session_id || sessionId}
+        projectId={currentProjectId || undefined}
+        initialPanel={opts.initialPanel}
+        persistActivePanel={opts.persistActivePanel}
+        onSessionSearchHits={applySessionSearchHits}
+        leadingControls={renderAdvancedSessionActions(opts.variant)}
+        onOpenKnowledge={currentProjectId && currentIssueId ? () => setKnowledgeEditorOpen(true) : undefined}
+        visibilityOptions={SESSION_TOOL_VISIBILITY_OPTIONS}
+      />
+    </UnifiedButtonGroup>
+  )
+
   return (
     <div className={`flex-1 flex flex-col h-full min-w-0${layout === 'easy' ? ' mobius-chat-area--easy' : ''} chat-major-panel`} style={{ background: 'var(--bg-secondary)' }}>
       <RemoteFileMentionDrawer
@@ -4448,6 +4490,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           {layout === 'easy' && (
             <div className="easy-session-chat-input-shell min-w-0 flex-shrink-0 p-3">
               <EasySessionChatInput
+                mode="follow_session_mode"
                 input={input}
                 inputRef={inputRef}
                 inputPlaceholder={inputPlaceholder}
@@ -4461,6 +4504,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 hasReadyAttachments={attachments.some(attachment => attachment.status === 'done')}
                 hasPendingSend={!!pendingSendAt}
                 modelAvailable={modelAvailable}
+                onStop={handleStopSession}
+                stopFeedbackActive={stopFeedbackActive}
                 onChange={handleChatInputChange}
                 onPaste={handlePaste}
                 onFocus={() => setInputFocused(true)}
@@ -4471,6 +4516,19 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 }}
                 onToggleVoice={toggleVoiceRecording}
                 onSend={send}
+                toolbar={
+                  // 简易布局下标准侧栏按钮组不渲染, 这里把它收进贴住输入框的工具浮层 (同一份定义).
+                  <EasySessionToolBar label="会话工具" disabled={!currentSession?.session_id && !sessionId}>
+                    {renderSessionToolGroup({
+                      // 与标准布局侧栏完全同一个 variant 与按钮清单: 简易模式只是把这一组搬进浮层,
+                      // 图标态也避免了 'menu'/'compact' 形态与资源编辑器重复出 Skill/Memory/Git.
+                      variant: 'default',
+                      className: 'flex min-h-0 flex-col',
+                      initialPanel: null,
+                      persistActivePanel: true,
+                    })}
+                  </EasySessionToolBar>
+                }
                 onKeyDown={e => {
                   if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
                     handleInputArrowUp(e)
@@ -4728,41 +4786,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             <div className="mobius-chat-input-side flex-1 overflow-y-auto p-3">
               <PlanningEditor projectId={currentProjectId} sessionId={sessionId} />
             </div>
-          ) : (
-            <UnifiedButtonGroup
-              className="mobius-chat-input-side flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-0"
-              aria-label="会话统一按钮组"
-              visibilityStorageKey="mobius:session-sidebar-buttons:hidden"
-            >
-              <SessionSkillMemoryEditor
-                sessionId={currentSession?.session_id || sessionId}
-                projectId={currentProjectId || undefined}
-                initialPanel="memory"
-                persistActivePanel
-                onSessionSearchHits={applySessionSearchHits}
-                leadingControls={renderAdvancedSessionActions('default')}
-                onOpenKnowledge={currentProjectId && currentIssueId ? () => setKnowledgeEditorOpen(true) : undefined}
-                visibilityOptions={[
-                    { id: 'file-changes', label: '查看文件修改' },
-                    { id: 'bash-commands', label: '查看运行命令' },
-                    { id: 'input-replay', label: '回放输入' },
-                    { id: 'jsonl-meta', label: '显示时间与序号' },
-                    { id: 'project-port', label: '进入项目端口' },
-                    { id: 'terminal', label: '打开终端' },
-                    { id: 'cooperable-pc', label: '可合作计算机' },
-                    { id: 'knowledge', label: '查看当前项目知识/任务知识' },
-                    { id: 'send-knowledge', label: '项目知识沉淀到记忆' },
-                    { id: 'continue-model', label: '修改模型并继续' },
-                    { id: 'skill', label: 'Skill' },
-                    { id: 'memory', label: 'Memory' },
-                    { id: 'git', label: 'Git' },
-                    { id: 'ports', label: '端口' },
-                    { id: 'time', label: '耗时' },
-                    { id: 'search', label: '会话内搜索' },
-                  ]}
-              />
-            </UnifiedButtonGroup>
-          ))}
+          ) : renderSessionToolGroup({
+            variant: 'default',
+            className: 'mobius-chat-input-side flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-0',
+            initialPanel: 'memory',
+            persistActivePanel: true,
+          }))}
         </div>
       </div>
 

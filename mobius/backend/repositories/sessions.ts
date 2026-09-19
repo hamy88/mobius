@@ -244,6 +244,55 @@ const Sessions = {
     });
   },
 
+  // 全局会话图谱的批量快照。旧链路按项目各发一次 sessions-overview，项目数增加后
+  // 会形成 N 个 HTTP 请求和 N 次 SQL。这里把时间窗口内的可展示会话一次取回，路由层
+  // 再按访问权限和父级分桶。只选择列表字段，避免把 selection snapshot 等重字段带进首屏。
+  listActiveForProjectsSince: (projectIds: string[] = [], sinceIso: string, previewLimit = 500): SessionListRow[] => {
+    const cleanProjectIds = Array.from(new Set(
+      projectIds.map((id) => String(id || '').trim()).filter(Boolean),
+    ));
+    if (cleanProjectIds.length === 0) return [];
+    const rows: SessionListRow[] = [];
+    for (let offset = 0; offset < cleanProjectIds.length; offset += 100) {
+      const chunk = cleanProjectIds.slice(offset, offset + 100);
+      const placeholders = chunk.map(() => '?').join(',');
+      rows.push(...db.prepare(`
+        SELECT ${SESSION_LIST_COLUMNS}, u.display_name as user_display_name
+        FROM sessions_v2 s
+        LEFT JOIN users u ON s.user_id = u.id
+        WHERE s.project_id IN (${placeholders})
+          AND s.status != 'archived'
+          AND s.deleted_at IS NULL
+          AND s.last_active >= ?
+        ORDER BY
+          s.project_id ASC,
+          s.scope_type ASC,
+          COALESCE(s.issue_id, s.research_id) ASC,
+          CASE
+            WHEN s.agent_status = 'running' THEN 0
+            WHEN s.status = 'active' THEN 1
+            ELSE 2
+          END,
+          CASE
+            WHEN s.status = 'completed' THEN COALESCE(s.completed_at, s.last_active)
+            ELSE s.last_active
+          END DESC,
+          CASE s.research_role WHEN 'chief_researcher' THEN 0 ELSE 1 END,
+          s.created_at DESC
+      `).all(...chunk, sinceIso) as SessionListRow[]);
+    }
+    const limit = Math.max(1, Math.min(Number(previewLimit) || 500, 500));
+    const seen = new Map<string, number>();
+    return rows.filter((row: any) => {
+      const parentId = row.scope_type === 'research' ? row.research_id : row.issue_id;
+      const key = `${row.project_id}:${row.scope_type}:${parentId || ''}`;
+      const count = seen.get(key) || 0;
+      if (count >= limit) return false;
+      seen.set(key, count + 1);
+      return true;
+    });
+  },
+
   // 项目页层级搜索只需要会话元数据。使用 instr 而不是 LIKE，确保用户输入的
   // `%` / `_` 按字面量匹配，不会意外变成通配符。
   searchActiveByProjectMetadata: (projectId: string, rawQuery: string): SessionListRow[] => {

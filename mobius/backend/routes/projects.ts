@@ -511,6 +511,15 @@ const EXTENSION_DISPLAY_NAME_MAX_LENGTH = 120;
 const EXTENSION_DESCRIPTION_MAX_LENGTH = 1000;
 const PROJECT_OVERVIEW_MAX_PROJECTS = 100;
 const PROJECT_OVERVIEW_ITEM_LIMIT = 5;
+const CLUSTER_OVERVIEW_RANGES_MS: Record<string, number> = {
+  '1h': 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '48h': 48 * 60 * 60 * 1000,
+  '72h': 72 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+};
 
 function hasOwn(obj: any, key: string): boolean {
   return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
@@ -1875,6 +1884,113 @@ function createSessionBucket(ids: Set<string>): Record<string, any[]> {
   ids.forEach((id) => { bucket[id] = []; });
   return bucket;
 }
+
+function clusterOverviewRange(raw: unknown): { key: string; ms: number } {
+  const key = String(raw || '24h');
+  return { key: CLUSTER_OVERVIEW_RANGES_MS[key] ? key : '24h', ms: CLUSTER_OVERVIEW_RANGES_MS[key] || CLUSTER_OVERVIEW_RANGES_MS['24h'] };
+}
+
+function overviewActivityMs(item: any): number {
+  const value = item?.last_session_activity_at || item?.last_active || item?.updated_at || item?.created_at;
+  const ms = new Date(value || 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function rowsForProjects(table: 'issues' | 'researches', projectIds: string[]): any[] {
+  if (projectIds.length === 0) return [];
+  const alias = table === 'issues' ? 'i' : 'r';
+  const rows: any[] = [];
+  for (let offset = 0; offset < projectIds.length; offset += 100) {
+    const chunk = projectIds.slice(offset, offset + 100);
+    const placeholders = chunk.map(() => '?').join(',');
+    rows.push(...db.prepare(`
+      SELECT ${alias}.*, u.display_name AS created_by_name
+      FROM ${table} ${alias}
+      LEFT JOIN users u ON ${alias}.created_by = u.id
+      WHERE ${alias}.project_id IN (${placeholders})
+      ORDER BY ${alias}.last_active DESC
+    `).all(...chunk));
+  }
+  return rows;
+}
+
+// 点阵纵观首屏快照：项目、父级与时间窗口内的会话一次返回。旧实现对每个项目分别请求
+// issues / researches / sessions-overview（3 × N 个 HTTP 请求），大项目还会把数百个父级 ID
+// 拼进 URL。批量快照在服务端按至多 100 个项目一批完成查询、权限过滤和分桶；前端首屏
+// 与轮询都只需一个请求，也不会因项目总数超过 100 而静默漏掉活跃数据。
+router.get('/cluster-overview', auth, (req: express.Request, res: express.Response) => {
+  const user = userOf(req);
+  const { key: range, ms: rangeMs } = clusterOverviewRange(req.query.range);
+  const sinceMs = Date.now() - rangeMs;
+  const sinceIso = new Date(sinceMs).toISOString();
+  const readableProjects = filterProjectListForUser(readableProjectsForUser(user), user, { showAll: true })
+    .filter((project: any) => !isHidden(user.id, 'project', project.id));
+  const activeProjects = readableProjects
+    .filter((project: any) => overviewActivityMs(project) >= sinceMs);
+  const projectIds = activeProjects.map((project: any) => String(project.id));
+
+  const readableIssues = rowsForProjects('issues', projectIds)
+    .filter((issue: any) => canReadIssue(user, issue));
+  const readableResearches = rowsForProjects('researches', projectIds)
+    .filter((research: any) => canReadResearch(user, research));
+  const issuesById = new Map(readableIssues.map((issue: any) => [String(issue.id), issue]));
+  const researchesById = new Map(readableResearches.map((research: any) => [String(research.id), research]));
+  const sessions = Sessions.listActiveForProjectsSince(projectIds, sinceIso, 500)
+    .filter((session: any) => {
+      if (!canReadSession(user, session)) return false;
+      if (session.scope_type === 'issue') return issuesById.has(String(session.issue_id || ''));
+      if (session.scope_type === 'research') return researchesById.has(String(session.research_id || ''));
+      return false;
+    });
+
+  const graphs: Record<string, any> = {};
+  activeProjects.forEach((project: any) => {
+    graphs[project.id] = { issues: [], researches: [], sessionsByIssue: {}, sessionsByResearch: {} };
+  });
+  sessions.forEach((session: any) => {
+    const graph = graphs[String(session.project_id || '')];
+    if (!graph) return;
+    if (session.scope_type === 'issue') {
+      const parentId = String(session.issue_id || '');
+      if (!graph.sessionsByIssue[parentId]) graph.sessionsByIssue[parentId] = [];
+      graph.sessionsByIssue[parentId].push(session);
+    } else if (session.scope_type === 'research') {
+      const parentId = String(session.research_id || '');
+      if (!graph.sessionsByResearch[parentId]) graph.sessionsByResearch[parentId] = [];
+      graph.sessionsByResearch[parentId].push(session);
+    }
+  });
+  readableIssues.forEach((issue: any) => {
+    const graph = graphs[String(issue.project_id || '')];
+    const bucket = graph?.sessionsByIssue?.[String(issue.id)] || [];
+    if (!graph || bucket.length === 0) return;
+    graph.issues.push(shapeOverviewItem({
+      ...issue,
+      session_count: bucket.length,
+      running_session_count: bucket.filter((session: any) => session.agent_status === 'running').length,
+    }));
+  });
+  readableResearches.forEach((research: any) => {
+    const graph = graphs[String(research.project_id || '')];
+    const bucket = graph?.sessionsByResearch?.[String(research.id)] || [];
+    if (!graph || bucket.length === 0) return;
+    graph.researches.push(shapeOverviewItem({
+      ...research,
+      session_count: bucket.length,
+      running_session_count: bucket.filter((session: any) => session.agent_status === 'running').length,
+      chief_count: bucket.filter((session: any) => session.research_role === 'chief_researcher').length,
+    }));
+  });
+
+  auditAdminProjectList(req, 'cluster_overview_projects', activeProjects);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({
+    range,
+    generated_at: new Date().toISOString(),
+    projects: shapeProjectList(readableProjects, req),
+    graphs,
+  });
+});
 
 router.get('/overview', auth, (req: express.Request, res: express.Response) => {
   const user = userOf(req);

@@ -6092,13 +6092,15 @@ body.mobius-resizing .mobius-resizable-handle {
 /* 编辑器圆角框本身承担不透明底 + 毛玻璃，避免悬浮输入框透出背后滚动的 JSONL 内容
    (参考 ChatGPT 悬浮输入: 纯不透明背景 + 边框 + 阴影的清晰浮层)。
    外层 .mobius-chat-input 保持透明仅承载居中定位; 不透明 + blur 下放到此框。
-   内联 background 是 var(--input-bg)(alpha≈0.03 近乎透明), 须 !important 覆盖。 */
-.mobius-chat-body.mobius-chat-body--easy .mobius-chat-input [data-tour="session-chat-input"] {
+   内联 background 是 var(--input-bg)(alpha≈0.03 近乎透明), 须 !important 覆盖。
+   欢迎页与会话内复用同一个输入框组件, 选择器同时覆盖欢迎页, 保证两处视觉完全一致。 */
+.mobius-chat-body.mobius-chat-body--easy .mobius-chat-input [data-tour="session-chat-input"],
+[data-page="easy-mode"] .easy-welcome-card [data-tour="session-chat-input"] {
   overflow: visible;
   height: 96px !important;
   min-height: 0 !important;
   max-height: 96px !important;
-  border-radius: 22px !important;
+  border-radius: 11px !important;
   background: color-mix(in srgb, var(--bg-secondary) 94%, transparent) !important;
   backdrop-filter: blur(22px);
   -webkit-backdrop-filter: blur(22px);
@@ -6212,7 +6214,7 @@ body.mobius-resizing .mobius-resizable-handle {
   .chat-major-panel:not(.mobius-chat-area--easy) {
     border-top: 1px solid var(--border-color);
     border-left: 1px solid var(--border-color);
-    border-top-left-radius: 12px;
+    border-top-left-radius: 7px;
     overflow: hidden;
   }
 }
@@ -6544,6 +6546,10 @@ body:has([data-page="easy-mode"]) .easy-search-hit > strong { overflow: hidden; 
   padding: 26px 30px 40px;
 }
 [data-page="easy-mode"] .easy-content--overview {
+  /* 撑满高度 (padding 0 的整块卡片) 的 flex 纵列, 懒加载期间「正在加载全局纵观…」
+     才能垂直居中; 加载完成后簇根节点 h-full 的几何完全不变。 */
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   padding: 0;
 }
@@ -6623,7 +6629,16 @@ body:has([data-page="easy-mode"]) .easy-search-hit > strong { overflow: hidden; 
   gap: 10px;
   color: var(--text-muted);
 }
-[data-page="easy-mode"] .easy-content--empty { align-items: center; justify-content: center; text-align: center; color: var(--text-muted); }
+/* 整块卡片居中一列。缺 display:flex 时 align-items/justify-content 不生效,
+   图标+标题+副标题+按钮会挤成一行 (旧的空态就是这样), 下面的 margin-top 也撑不开。 */
+[data-page="easy-mode"] .easy-content--empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-muted);
+}
 [data-page="easy-mode"] .easy-content--empty strong { margin-top: 12px; color: var(--text-primary); font-size: 13px; }
 [data-page="easy-mode"] .easy-content--empty span { margin-top: 5px; }
 [data-page="easy-mode"] .easy-content--empty button { display: inline-flex; align-items: center; gap: 6px; margin-top: 16px; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 12px; color: var(--text-primary); background: var(--bg-card); }
@@ -6638,17 +6653,6 @@ body:has([data-page="easy-mode"]) .easy-search-hit > strong { overflow: hidden; 
 [data-page="easy-mode"] .easy-welcome-card .mobius-chat-body--easy { min-height: 0; }
 [data-page="easy-mode"] .easy-welcome-logo { display: block; margin: 0 0 14px; }
 [data-page="easy-mode"] .easy-welcome-card h1 { margin: 0 0 22px; color: var(--text-primary); font-size: 26px; font-weight: 700; line-height: 1.32; letter-spacing: -.025em; }
-[data-page="easy-mode"] .easy-welcome-composer { display: flex; flex-direction: column; gap: 8px; padding: 14px 14px 10px; border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent); border-radius: 22px; background: var(--bg-primary); box-shadow: 0 18px 45px rgba(0,0,0,.09); text-align: left; }
-[data-page="easy-mode"] .easy-welcome-composer textarea { width: 100%; resize: vertical; min-height: 72px; border: 0; outline: 0; background: transparent; color: var(--text-primary); font-size: 14px; line-height: 1.55; }
-[data-page="easy-mode"] .easy-welcome-composer textarea::placeholder { color: var(--text-muted); }
-[data-page="easy-mode"] .easy-welcome-composer__toolbar { display: flex; align-items: center; gap: 7px; }
-[data-page="easy-mode"] .easy-welcome-tool, [data-page="easy-mode"] .easy-welcome-pill { display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 32px; border: 1px solid var(--border-color); border-radius: 999px; padding: 0 10px; color: var(--text-secondary); background: transparent; font-size: 12px; }
-[data-page="easy-mode"] .easy-welcome-tool { width: 32px; padding: 0; }
-[data-page="easy-mode"] .easy-welcome-tool:hover, [data-page="easy-mode"] .easy-welcome-pill:hover { background: var(--bg-hover); }
-[data-page="easy-mode"] .easy-welcome-send { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-left: auto; border-radius: 50%; color: var(--text-primary); background: var(--bg-hover); }
-[data-page="easy-mode"] .easy-welcome-send:disabled { cursor: not-allowed; opacity: .45; }
-[data-page="easy-mode"] .easy-welcome-project { display: flex; align-items: center; gap: 6px; margin: 0 -14px -10px; border-top: 1px solid color-mix(in srgb, var(--border-color) 65%, transparent); padding: 10px 14px; color: var(--text-secondary); font-size: 12px; }
-[data-page="easy-mode"] .easy-welcome-project svg:last-child { margin-left: 0; }
 [data-page="easy-mode"] .easy-welcome-suggestions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 [data-page="easy-mode"] .easy-welcome-suggestions span { border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent); border-radius: 999px; padding: 9px 15px; color: var(--text-secondary); background: var(--bg-primary); font-size: 12px; }
 [data-page="easy-mode"] .easy-content--context { display: flex; flex-direction: column; overflow: hidden; }
@@ -6699,10 +6703,18 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
   .mobius-chat-area--easy {
     border-top: 1px solid var(--border-color);
     border-left: 1px solid var(--border-color);
-    border-radius: 14px 0 0 0 !important;
+    border-radius: 7px 0 0 0 !important;
     /* 裁掉内层顶栏 (.easy-session-context, 与卡片同底色) 的直角,
        否则它会把卡片圆角填回方形, 侧栏底色透不出来。 */
     overflow: hidden;
+  }
+  /* 右侧的各个面板 (新任务/全局纵观/项目与拓展/跨设备/记忆与技能) 与会话页同款:
+     同一条左上边线 + 左上圆角。overflow 保持各自原值 (列表要滚动) —— 非 visible 的
+     overflow 本身就按圆角裁剪, 侧栏底色能正常从圆角透出来, 无需再补 hidden。 */
+  [data-page="easy-mode"] .easy-content {
+    border-top: 1px solid var(--border-color);
+    border-left: 1px solid var(--border-color);
+    border-radius: 7px 0 0 0;
   }
 }
 

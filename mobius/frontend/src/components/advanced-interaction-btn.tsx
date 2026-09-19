@@ -1,7 +1,7 @@
 import { forwardRef, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
-type AdvancedInteractionAccent = 'blue' | 'emerald' | 'cyan' | 'violet' | 'amber'
+type AdvancedInteractionAccent = 'blue' | 'emerald' | 'cyan' | 'violet' | 'amber' | 'red'
 
 const ACCENT_CLASS: Record<AdvancedInteractionAccent, string> = {
   blue: 'text-blue-400 hover:bg-blue-500/10',
@@ -9,6 +9,7 @@ const ACCENT_CLASS: Record<AdvancedInteractionAccent, string> = {
   cyan: 'text-cyan-400 hover:bg-cyan-500/10',
   violet: 'text-violet-400 hover:bg-violet-500/10',
   amber: 'text-amber-400 hover:bg-amber-500/10',
+  red: 'text-red-400 hover:bg-red-500/10',
 }
 
 type AdvancedInteractionBtnProps = ButtonHTMLAttributes<HTMLButtonElement> & {
