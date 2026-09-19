@@ -6615,6 +6615,11 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
   aside.mobius-resizable:has(+ .chat-major-panel) {
     border-right-width: 0;
   }
+  aside.mobius-resizable:has(+ .chat-major-panel) > .mobius-resizable-handle {
+    opacity: 0;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
   [data-page="easy-mode"] .mobius-topnav {
     border-bottom-width: 0;
   }
