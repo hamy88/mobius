@@ -6210,7 +6210,7 @@ body.mobius-resizing .mobius-resizable-handle {
    body:has 让桌面侧栏与 portal 移动抽屉共用样式；正常模式不会命中。
    ===================================================================== */
 body:has([data-page="easy-mode"]) .easy-sidebar {
-  border-right: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-right: 0 !important;
   background: color-mix(in srgb, var(--bg-primary) 96%, var(--bg-secondary));
   color: var(--text-secondary);
 }

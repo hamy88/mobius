@@ -581,23 +581,6 @@ export default function JsonlViewEasy({
   return (
     <div className="text-[12px]">
       <span className="sr-only" aria-live="polite" aria-atomic="true">{roundHeaderPaletteAnnouncement}</span>
-      <div ref={headerRef} className="flex items-center gap-2 px-1 py-1 sticky top-0 z-10 backdrop-blur-lg bg-[var(--bg-page)]/80">
-        {headerTitle && <span className="min-w-0 truncate text-[var(--text-secondary)] font-semibold" title={headerTitle}>{headerTitle}</span>}
-        {groups.length > 0 && <span className="text-[var(--text-muted)] text-[11px]">{groups.length} 轮</span>}
-        {loadedGroups < groups.length && (
-          <span className="text-[var(--text-muted)] text-[11px]" title="展开对应轮次时按需加载明细">已载 {loadedGroups}/{groups.length} 轮 · 共 {totalEntryCount} 条</span>
-        )}
-        {lastRoundUserSummary && (
-          <button
-            type="button"
-            onClick={jumpToLastRound}
-            className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-0 p-0 cursor-pointer text-left transition-colors"
-            title={`点击跳转到末轮：${lastRoundUserSummary}`}
-          >
-            <span className="opacity-60">末轮 ·</span> {lastRoundUserSummary}
-          </button>
-        )}
-      </div>
       <VirtualizedBlockList
         blocks={renderBlocks}
         renderBlock={renderBlock}
