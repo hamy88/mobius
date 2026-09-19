@@ -713,6 +713,7 @@ export default function EasyModePage() {
           </div>
 
           <div className="easy-sidebar-tools justify-end" aria-label="会话工具">
+            <span className="easy-sidebar-tools__label">{sessionListMode === 'grouped' ? '项目分组' : '近期会话'}</span>
             <button type="button" className={sessionSearchOpen ? 'is-active' : ''} onClick={() => setSessionSearchOpen(value => !value)} title="搜索项目、任务或会话" aria-label="搜索项目、任务或会话">
               <SearchIcon className="h-4 w-4" />
             </button>

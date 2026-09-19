@@ -6278,6 +6278,13 @@ body:has([data-page="easy-mode"]) .easy-sidebar-tools {
   padding: 4px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--border-color) 58%, transparent);
 }
+body:has([data-page="easy-mode"]) .easy-sidebar-tools__label {
+  flex: 0 0 auto;
+  padding-right: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
 body:has([data-page="easy-mode"]) .easy-sidebar-tools button,
 body:has([data-page="easy-mode"]) .easy-sidebar-footer button {
   display: inline-flex;
