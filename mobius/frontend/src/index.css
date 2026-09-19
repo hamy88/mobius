@@ -6202,7 +6202,7 @@ body.mobius-resizing .mobius-resizable-handle {
 .mobius-session-chat-header {
   border-top: 1px solid var(--border-color);
   border-top-left-radius: 12px;
-  border-top-right-radius: 12px;
+  border-top-right-radius: 0;
 }
 
 /* =====================================================================
@@ -6630,6 +6630,7 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
     border-top: 1px solid var(--border-color);
     border-left: 1px solid var(--border-color);
     border-top-left-radius: 14px;
+    border-top-right-radius: 0;
     /* 裁掉内层顶栏 (.easy-session-context, 与卡片同底色) 的直角,
        否则它会把卡片圆角填回方形, 侧栏底色透不出来。 */
     overflow: hidden;
