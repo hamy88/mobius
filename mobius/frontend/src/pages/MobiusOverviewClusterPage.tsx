@@ -1856,7 +1856,7 @@ function DetailDrawer({ selection, userParam, onClose, onShowConversation }: { s
   )
 }
 
-export default function MobiusOverviewClusterPage() {
+export default function MobiusOverviewClusterPage({ embedded = false }: { embedded?: boolean } = {}) {
   const params = useParams()
   const userParam = params.user || ''
   const {
@@ -1873,9 +1873,10 @@ export default function MobiusOverviewClusterPage() {
   const isMobile = useIsMobile()
   // 全屏工具页的出口: 优先回到真正的"上一界面", 直接进入/刷新时兜底回用户主页。
   const goBack = useCallback(() => {
+    if (embedded) return
     if (window.history.length > 1) navigate(-1)
     else navigate(`/u/${encodeURIComponent(userParam)}`)
-  }, [navigate, userParam])
+  }, [embedded, navigate, userParam])
   const [query, setQuery] = useState('')
   const [clusterMode, setClusterMode] = useState<ClusterMode>(() => {
     try {
@@ -1974,12 +1975,13 @@ export default function MobiusOverviewClusterPage() {
   const cutoffMs = useMemo(() => Date.now() - selectedRange.ms, [selectedRange.ms])
 
   useEffect(() => {
+    if (embedded) return
     setCurrentProject(null)
     setCurrentIssue(null)
     setCurrentResearch(null)
     setCurrentSession(null)
     setCurrentTask(null)
-  }, [setCurrentProject, setCurrentIssue, setCurrentResearch, setCurrentSession, setCurrentTask])
+  }, [embedded, setCurrentProject, setCurrentIssue, setCurrentResearch, setCurrentSession, setCurrentTask])
 
   // 聚焦型工具页通用约定: Esc 退出。分层处理 —— 详情抽屉打开时先关抽屉, 否则返回上一页。
   useEffect(() => {
@@ -1989,11 +1991,12 @@ export default function MobiusOverviewClusterPage() {
         setSelected(null)
         return
       }
+      if (embedded) return
       goBack()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [goBack])
+  }, [embedded, goBack])
 
   useEffect(() => {
     api('/api/projects?all=true')
@@ -2747,10 +2750,10 @@ export default function MobiusOverviewClusterPage() {
   }
 
   return (
-    <div className="flex h-screen flex-col" style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
-      <TopNav />
+    <div className={`flex ${embedded ? 'h-full' : 'h-screen'} flex-col`} style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)' }} data-embedded={embedded || undefined}>
+      {!embedded && <TopNav />}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {(!sidebarCollapsed || isMobile) && (
+        {!embedded && (!sidebarCollapsed || isMobile) && (
         <ResizablePanel
           storageKey="mobius:ui:sidebar:overview-cluster"
           defaultWidth={292}
@@ -2872,7 +2875,7 @@ export default function MobiusOverviewClusterPage() {
 
         <main className="relative min-w-0 flex-1 overflow-hidden">
           <div className="absolute inset-x-0 top-0 z-10 flex h-[40px] items-center gap-2 border-b px-3.5" style={{ borderColor: 'var(--border-color)', background: 'color-mix(in srgb, var(--bg-primary) 92%, transparent)' }}>
-            {sidebarCollapsed && !isMobile && (
+            {!embedded && sidebarCollapsed && !isMobile && (
               <button
                 type="button"
                 onClick={showSidebar}
@@ -2884,7 +2887,7 @@ export default function MobiusOverviewClusterPage() {
                 <PanelLeftOpen className="h-3 w-3" />
               </button>
             )}
-            <button
+            {!embedded && <button
               type="button"
               onClick={goBack}
               title="返回上一页 (Esc)"
@@ -2894,7 +2897,7 @@ export default function MobiusOverviewClusterPage() {
             >
               <ArrowLeft className="h-2.5 w-2.5 transition-transform group-hover:-translate-x-0.5" style={{ color: 'var(--accent-primary)' }} />
               返回
-            </button>
+            </button>}
             <div className="min-w-0 flex-1">
               <div className="truncate text-[10px] font-semibold">Mobius 点阵会话地图 · {clusterMode === 'creator' ? '创建者聚集' : '项目聚集'}</div>
               <div className="mt-0.5 flex items-center gap-2 text-[8px]" style={{ color: 'var(--text-muted)' }}>

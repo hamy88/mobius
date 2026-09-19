@@ -1,0 +1,63 @@
+{
+  "releaseTag": "apps-v2026.09.19",
+  "title": "Mobius Apps 2026.09.19",
+  "desktop": {
+    "version": "0.0.30",
+    "builds": [
+      {
+        "platform": "mac",
+        "arch": "arm64",
+        "format": "zip",
+        "file": "mobius-desktop-0.0.30-mac-arm64.zip",
+        "url": "https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.30/mobius-desktop-0.0.30-mac-arm64.zip",
+        "size": 108568291,
+        "sha256": "88fe7324fd2fe0016be7acb25c9b49c5c4d9c7ecf710b40d24adc8185d96c4d9"
+      },
+      {
+        "platform": "mac",
+        "arch": "x64",
+        "format": "zip",
+        "file": "mobius-desktop-0.0.30-mac-x64.zip",
+        "url": "https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.30/mobius-desktop-0.0.30-mac-x64.zip",
+        "size": 114967041,
+        "sha256": "393567d815f5a5ea3ce0ecc42795b949d1c37f9b3bc2fe006d443c43ff6bde30"
+      },
+      {
+        "platform": "win",
+        "arch": "x64",
+        "format": "zip",
+        "file": "mobius-desktop-0.0.30-win-x64.zip",
+        "url": "https://github.com/mobius-system/mobius/releases/download/desktop-v0.0.30/mobius-desktop-0.0.30-win-x64.zip",
+        "size": 145126903,
+        "sha256": "8853d239b668d1a0b2fb018b3b76e1b2afc107f9ecae235b34015f3aca6babec"
+      }
+    ]
+  },
+  "mobile": {
+    "version": "0.1.45",
+    "builds": [
+      {
+        "platform": "android",
+        "arch": "arm64",
+        "format": "apk",
+        "file": "mobius-mobile-0.1.45-android-arm64.apk",
+        "url": "https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.45-android-arm64.apk",
+        "size": 5024924,
+        "sha256": "e4b7613637a162b95acd596224e6ba5c2e8d0d7c530d6332474fef0f55100144"
+      },
+      {
+        "platform": "android",
+        "arch": "armeabi-v7a",
+        "format": "apk",
+        "file": "mobius-mobile-0.1.45-android-armeabi-v7a.apk",
+        "url": "https://serve.nutshellai.cn/publish/auto/mobius-mobile/mobius-mobile-0.1.45-android-armeabi-v7a.apk",
+        "size": 5032892,
+        "sha256": "f549e65394c963c35dc1a971fdfa4444745990dea36089e9902b0cafd57bcabd"
+      }
+    ]
+  },
+  "ios": {
+    "distribution": "TestFlight",
+    "url": "https://testflight.apple.com/join/EgamfnR7"
+  }
+}

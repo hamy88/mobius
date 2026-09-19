@@ -1,15 +1,28 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
+  Bot,
+  Boxes,
+  BrainCircuit,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
+  CircleDot,
+  Cpu,
+  FolderKanban,
   FolderOpen,
-  History,
+  LayoutList,
   Loader2,
   MessageSquare,
+  MonitorSmartphone,
+  Network,
+  PanelLeft,
   Plus,
+  Puzzle,
   Search as SearchIcon,
+  Settings,
+  Sparkles,
   X,
 } from 'lucide-react'
 import { useStore, api } from '../store'
@@ -25,10 +38,13 @@ import {
 } from '../services/project-hierarchy-search'
 import { ChatArea } from '../components/chat'
 import { GlobalCreateRoot, type CreateKind } from '../components/global-create'
+import { MemoriesManager } from '../components/memories'
 import { ResizablePanel } from '../components/resizable-panel'
-import { SessionGroupTree } from '../components/session-group-tree'
 import { Loading, TopNav, timeAgoPrecise } from '../components/shell'
+import { SkillsManager } from '../components/skills'
 import { ToastCard } from '../components/toast-card'
+
+const EmbeddedOverviewCluster = lazy(() => import('./MobiusOverviewClusterPage'))
 
 type RecentSession = {
   session_id: string
@@ -56,9 +72,20 @@ type ProjectOption = {
 }
 
 type WorkView = 'recent' | 'running' | 'completed'
+type EasyPanel = 'sessions' | 'overview' | 'extensions' | 'devices' | 'context'
+type SessionListMode = 'grouped' | 'flat'
 
 const RECENT_SESSION_LIMIT = 50
 const CREATE_SUCCESS_TOAST_MS = 4000
+const EASY_LIST_MODE_KEY = 'mobius:easy-mode:session-list-mode'
+
+function readListMode(): SessionListMode {
+  try {
+    return localStorage.getItem(EASY_LIST_MODE_KEY) === 'flat' ? 'flat' : 'grouped'
+  } catch {
+    return 'grouped'
+  }
+}
 
 function normalizeRecent(value: unknown): RecentSession[] {
   return (Array.isArray(value) ? value : [])
@@ -67,20 +94,6 @@ function normalizeRecent(value: unknown): RecentSession[] {
       new Date(b.last_active || 0).getTime() - new Date(a.last_active || 0).getTime()
     ))
     .slice(0, RECENT_SESSION_LIMIT)
-}
-
-function projectChipStyle(active: boolean): CSSProperties {
-  return active
-    ? {
-        background: 'color-mix(in srgb, var(--accent-primary) 16%, transparent)',
-        color: 'var(--accent-primary)',
-        border: '1px solid color-mix(in srgb, var(--accent-primary) 40%, var(--border-color))',
-      }
-    : {
-        background: 'transparent',
-        color: 'var(--text-secondary)',
-        border: '1px solid var(--border-color)',
-      }
 }
 
 function sessionStatus(session: RecentSession) {
@@ -127,6 +140,12 @@ export default function EasyModePage() {
   const [createSuccessToast, setCreateSuccessToast] = useState<{ name: string } | null>(null)
   const [projectSuccessToast, setProjectSuccessToast] = useState<{ name: string } | null>(null)
   const [collapsedSessionGroups, setCollapsedSessionGroups] = useState<Set<string>>(() => new Set())
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false)
+  const [sessionListMode, setSessionListMode] = useState<SessionListMode>(readListMode)
+  const [contextTab, setContextTab] = useState<'skills' | 'memories'>('skills')
+  const [remotes, setRemotes] = useState<any[]>([])
+  const [remotesLoading, setRemotesLoading] = useState(false)
+  const [remotesError, setRemotesError] = useState('')
   const projectFilterButtonRef = useRef<HTMLButtonElement | null>(null)
   const navigate = useNavigate()
   const layoutMode = useLayoutMode()
@@ -135,6 +154,13 @@ export default function EasyModePage() {
   const workView = (['recent', 'running', 'completed'].includes(search.get('view') || '')
     ? search.get('view')
     : 'recent') as WorkView
+  const requestedPanel = search.get('panel')
+  const activePanel: EasyPanel = requestedPanel === 'overview'
+    || requestedPanel === 'extensions'
+    || requestedPanel === 'devices'
+    || requestedPanel === 'context'
+    ? requestedPanel
+    : 'sessions'
 
   const projectOptions = useMemo<ProjectOption[]>(() => {
     const activity = new Map<string, { count: number; runningCount: number; lastActive: number }>()
@@ -303,6 +329,26 @@ export default function EasyModePage() {
     return () => window.clearTimeout(timer)
   }, [projectSuccessToast])
 
+  const loadRemotes = useCallback((signal?: AbortSignal) => {
+    setRemotesLoading(true)
+    setRemotesError('')
+    return api('/aimux_bridge/api/remotes', { signal })
+      .then((data: any) => setRemotes(Array.isArray(data?.remotes) ? data.remotes : []))
+      .catch((err: any) => {
+        if (err?.name === 'AbortError') return
+        setRemotes([])
+        setRemotesError(err?.message || '跨设备连接信息暂时不可用')
+      })
+      .finally(() => {
+        if (!signal?.aborted) setRemotesLoading(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    if (activePanel !== 'devices') return
+    return pollRecursive((signal) => loadRemotes(signal), 10_000, 10_000)
+  }, [activePanel, loadRemotes])
+
   const handleSessionCreated = (session: RecentSession) => {
     setCreateSuccessToast({ name: session?.name || '新会话' })
     // 创建接口返回的对象可能不含项目/任务展示字段，立即重拉近期列表，避免用户等待
@@ -404,6 +450,7 @@ export default function EasyModePage() {
   const selectSession = (session: RecentSession) => {
     const next = new URLSearchParams(search)
     next.set('session', session.session_id)
+    next.delete('panel')
     if (effectiveProject && session.project_id) next.set('project', session.project_id)
     else next.delete('project')
     setSearch(next)
@@ -437,6 +484,21 @@ export default function EasyModePage() {
   const openCreateSession = (issueId = '') => {
     setCreateIssueOverride(issueId)
     setCreateKind('session')
+  }
+
+  const selectPanel = (panel: EasyPanel) => {
+    const next = new URLSearchParams(search)
+    if (panel === 'sessions') next.delete('panel')
+    else next.set('panel', panel)
+    setSearch(next)
+  }
+
+  const toggleListMode = () => {
+    setSessionListMode(current => {
+      const next = current === 'grouped' ? 'flat' : 'grouped'
+      try { localStorage.setItem(EASY_LIST_MODE_KEY, next) } catch {}
+      return next
+    })
   }
 
   const openSearchSession = async (group: ProjectHierarchyGroup, hit: ProjectHierarchyHit) => {
@@ -489,278 +551,189 @@ export default function EasyModePage() {
     }
   }
 
+  const extensionProjects = projects.filter((project: any) => project?.kind === 'extension')
+  const renderSessionRow = (session: RecentSession, nested = false) => {
+    const active = session.session_id === sessionParam && contextMatchesProject && activePanel === 'sessions'
+    const status = sessionStatus(session)
+    return (
+      <button
+        key={session.session_id}
+        type="button"
+        onClick={() => selectSession(session)}
+        className={`easy-sidebar-session ${active ? 'easy-sidebar-session--active' : ''} ${nested ? 'easy-sidebar-session--nested' : ''}`}
+        data-session-id={session.session_id}
+        aria-current={active ? 'true' : undefined}
+        title={session.name || session.session_id}
+      >
+        <span className="easy-sidebar-session__state" data-status={session.agent_status || session.status || 'idle'} />
+        <span className="min-w-0 flex-1 truncate">{session.name || session.session_id}</span>
+        {session.agent_status === 'running' || session.agent_status === 'pending' ? (
+          <span className="easy-sidebar-session__status">{status.label}</span>
+        ) : null}
+      </button>
+    )
+  }
+
   return (
     <div className="flex h-screen flex-col" style={{ background: 'var(--bg-primary)', fontSize: '11px' }} data-page="easy-mode">
       <TopNav />
       <div className="flex min-h-0 flex-1">
         <ResizablePanel
           storageKey="mobius:ui:sidebar:easy-mode-recent"
-          defaultWidth={304}
-          minWidth={248}
-          maxWidth={460}
+          defaultWidth={268}
+          minWidth={232}
+          maxWidth={380}
           side="left"
-          className="flex flex-col border-r"
-          style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}
+          className="easy-sidebar flex flex-col"
         >
-          <div className="border-b px-3 py-3" style={{ borderColor: 'var(--border-color)' }}>
-            <div className="flex items-center gap-2 px-1">
-              <History className="h-4 w-4" style={{ color: 'var(--accent-primary)' }} />
-              <h1 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>工作导航</h1>
-              {refreshing && <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin" style={{ color: 'var(--text-muted)' }} aria-label="正在刷新工作状态" />}
-              {!loading && !refreshing && (
-                <span className="ml-auto rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>
-                  最近 {sessions.length}
-                </span>
-              )}
-            </div>
+          <div className="easy-sidebar-primary">
+            <button type="button" className="easy-sidebar-nav" disabled title="新任务将在后续版本开放">
+              <Plus className="h-4 w-4" />
+              <span>新任务</span>
+              <span className="easy-sidebar-nav__hint">即将开放</span>
+            </button>
+            <button type="button" className={`easy-sidebar-nav ${activePanel === 'overview' ? 'is-active' : ''}`} onClick={() => selectPanel('overview')}>
+              <Network className="h-4 w-4" />
+              <span>全局纵观</span>
+            </button>
+            <button type="button" className={`easy-sidebar-nav ${activePanel === 'extensions' ? 'is-active' : ''}`} onClick={() => selectPanel('extensions')}>
+              <Boxes className="h-4 w-4" />
+              <span>项目与拓展</span>
+            </button>
+            <button type="button" className={`easy-sidebar-nav ${activePanel === 'devices' ? 'is-active' : ''}`} onClick={() => selectPanel('devices')}>
+              <MonitorSmartphone className="h-4 w-4" />
+              <span>跨设备</span>
+            </button>
+          </div>
 
-            <label className="mt-2.5 flex h-9 items-center gap-2 rounded-lg border px-2.5 focus-within:ring-2 focus-within:ring-blue-500/20" style={{ borderColor: 'var(--border-color)', background: 'var(--input-bg)' }}>
-              <SearchIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
+          <div className="easy-sidebar-tools" aria-label="会话工具">
+            <button type="button" className={sessionSearchOpen ? 'is-active' : ''} onClick={() => setSessionSearchOpen(value => !value)} title="搜索项目、任务或会话" aria-label="搜索项目、任务或会话">
+              <SearchIcon className="h-4 w-4" />
+            </button>
+            <button type="button" onClick={() => openCreateSession()} data-testid="easy-new-session" title="新建会话" aria-label="新建会话">
+              <Plus className="h-4 w-4" />
+            </button>
+            <button type="button" onClick={toggleListMode} title={sessionListMode === 'grouped' ? '切换为最近会话列表' : '切换为项目任务分组'} aria-label="切换会话列表模式">
+              {sessionListMode === 'grouped' ? <LayoutList className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
+            </button>
+            <span className="easy-sidebar-tools__count">{refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : sessions.length}</span>
+          </div>
+
+          {sessionSearchOpen && (
+            <label className="easy-sidebar-search">
+              <SearchIcon className="h-3.5 w-3.5 flex-shrink-0" />
               <input
                 value={sessionQuery}
                 onChange={event => setSessionQuery(event.target.value)}
                 maxLength={200}
-                placeholder="搜索全部项目、任务或会话"
+                placeholder="搜索全部工作"
                 aria-label="搜索全部项目、任务或会话"
-                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[11px] outline-none"
-                style={{ color: 'var(--text-primary)' }}
+                autoFocus
               />
-              {hierarchySearchLoading ? (
-                <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" style={{ color: 'var(--accent-primary)' }} aria-label="正在搜索全部工作" />
-              ) : sessionQuery && (
-                <button type="button" onClick={() => setSessionQuery('')} aria-label="清空搜索" className="rounded p-0.5 hover:bg-[var(--bg-hover)]">
-                  <X className="h-3.5 w-3.5" style={{ color: 'var(--text-muted)' }} />
-                </button>
-              )}
+              {hierarchySearchLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : sessionQuery ? (
+                <button type="button" onClick={() => setSessionQuery('')} aria-label="清空搜索"><X className="h-3.5 w-3.5" /></button>
+              ) : null}
             </label>
+          )}
 
-            {!normalizedSessionQuery && <div className="mt-2 flex min-w-0 items-center gap-2">
-              <div className="relative min-w-0 flex-1" data-testid="easy-project-filter">
-                <button
-                  ref={projectFilterButtonRef}
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setProjectFilterOpen(value => !value)
-                  }}
-                  aria-haspopup="menu"
-                  aria-expanded={projectFilterOpen}
-                  className="flex h-9 w-full min-w-0 items-center gap-1.5 rounded-lg border px-2.5 text-left text-[11px] transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                  style={projectChipStyle(!!effectiveProject)}
-                  title={selectedProjectOption?.name || '所有近期工作'}
-                >
-                  <FolderOpen className="h-3.5 w-3.5 flex-shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{selectedProjectOption?.name || '所有近期工作'}</span>
-                  <span className="flex-shrink-0 text-[11px] opacity-70">
-                    {effectiveProject ? `${projectSessions.length} 会话` : `${projectOptions.length} 项目`}
-                  </span>
-                  <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${projectFilterOpen ? 'rotate-180' : ''}`} />
-                </button>
-                {projectFilterOpen && (
-                  <div
-                    role="menu"
-                    className="absolute left-0 right-0 top-10 z-50 rounded-lg p-1.5 shadow-xl"
-                    style={{ background: 'var(--menu-bg)', border: '1px solid var(--border-color)' }}
-                    onClick={event => event.stopPropagation()}
-                  >
-                    <label className="mb-1 flex h-8 items-center gap-1.5 rounded-md border px-2" style={{ borderColor: 'var(--border-color)', background: 'var(--input-bg)' }}>
-                      <SearchIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
-                      <input
-                        value={projectFilterQuery}
-                        onChange={event => setProjectFilterQuery(event.target.value)}
-                        placeholder={`搜索全部 ${projectOptions.length} 个项目`}
-                        aria-label="搜索全部项目"
-                        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[11px] outline-none"
-                        style={{ color: 'var(--text-primary)' }}
-                        autoFocus
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => selectProjectFilter(null)}
-                      className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[11px] transition-colors hover:bg-[var(--bg-hover)]"
-                      style={{ color: 'var(--text-primary)', background: effectiveProject === '' ? 'var(--bg-active)' : undefined }}
-                    >
-                      <span className="min-w-0 flex-1 truncate">所有近期工作</span>
-                      <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{sessions.length}</span>
-                      {effectiveProject === '' && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />}
-                    </button>
-                    <div className="mt-1 max-h-[280px] overflow-y-auto">
-                      {filteredProjectOptions.length === 0 ? (
-                        <div className="px-2 py-5 text-center text-[11px]" style={{ color: 'var(--text-muted)' }}>没有匹配项目，请尝试简称或项目 ID</div>
-                      ) : filteredProjectOptions.map(project => (
-                        <button
-                          key={project.id}
-                          type="button"
-                          role="menuitem"
-                          onClick={() => selectProjectFilter(project.id)}
-                          title={project.name}
-                          className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[11px] transition-colors hover:bg-[var(--bg-hover)]"
-                          style={{ color: 'var(--text-primary)', background: effectiveProject === project.id ? 'var(--bg-active)' : undefined }}
-                        >
-                          <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                          {project.runningCount > 0 && <span className="text-[11px] text-amber-400">运行 {project.runningCount}</span>}
-                          <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{project.count ? `近期 ${project.count}` : '暂无近期会话'}</span>
-                          {effectiveProject === project.id && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => openCreateSession()}
-                data-testid="easy-new-session"
-                className="inline-flex h-9 flex-shrink-0 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                style={{
-                  borderColor: 'color-mix(in srgb, var(--accent-primary) 42%, var(--border-color))',
-                  color: 'var(--accent-primary)',
-                  background: 'color-mix(in srgb, var(--accent-primary) 10%, transparent)',
-                }}
-                title={selectedProjectOption ? `在 ${selectedProjectOption.name} 新建会话` : '新建会话'}
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>新会话</span>
-              </button>
-            </div>}
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto p-2" data-testid="easy-recent-sessions">
+          <div className="easy-sidebar-list" data-testid="easy-recent-sessions">
             {normalizedSessionQuery ? (
               <div data-testid="easy-global-search-results">
-                <div className="flex min-h-8 items-center justify-between px-2 py-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                  <span>{hierarchySearchLoading ? '正在搜索全部工作…' : `全部工作 · ${activeHierarchySearch.match_count} 条匹配`}</span>
-                  {activeHierarchySearch.truncated && <span>仅显示最相关结果</span>}
-                </div>
-                {hierarchySearchError ? (
-                  <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-5 text-center text-[11px] text-red-300">{hierarchySearchError}</div>
-                ) : !hierarchySearchLoading && activeHierarchySearch.projects.length === 0 ? (
-                  <div className="px-3 py-10 text-center">
-                    <SearchIcon className="mx-auto h-7 w-7" style={{ color: 'var(--text-muted)' }} />
-                    <div className="mt-3 text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>没有找到相关工作</div>
-                    <div className="mt-1 text-[11px] leading-5" style={{ color: 'var(--text-muted)' }}>尝试项目简称、任务标题或会话名称</div>
-                  </div>
-                ) : activeHierarchySearch.projects.map(group => (
-                  <section key={group.project.id} className="mb-2 overflow-hidden rounded-lg border" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-card)' }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSessionQuery('')
-                        selectProjectFilter(String(group.project.id))
-                      }}
-                      className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                      title={`切换到项目：${group.project.name || group.project.id}`}
-                    >
-                      <FolderOpen className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />
-                      <span className="min-w-0 flex-1 truncate text-[11px] font-semibold" style={{ color: 'var(--text-primary)' }}>{group.project.name || group.project.id}</span>
-                      <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{group.project_match ? '项目匹配' : `${group.total_matches} 项`}</span>
-                    </button>
-                    {group.matches.length > 0 && (
-                      <div className="border-t px-1 py-1" style={{ borderColor: 'var(--border-color)' }}>
-                        {group.matches.map(hit => {
-                          const key = `${hit.kind}:${hit.id}`
-                          return (
-                            <button
-                              key={key}
-                              type="button"
-                              data-search-kind={hit.kind}
-                              data-search-id={hit.id}
-                              onClick={() => void openSearchSession(group, hit)}
-                              disabled={!!openingSearchResult}
-                              className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:opacity-60"
-                            >
-                              <span className="mt-0.5 flex-shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: 'var(--bg-active)', color: 'var(--text-secondary)' }}>{hierarchyHitLabel(hit.kind)}</span>
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>{hit.title || hit.id}</span>
-                                <span className="mt-0.5 block truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                                  {hit.parent_title || (hit.kind === 'issue' ? '打开最近会话；没有会话则新建' : hit.kind === 'research' ? '打开研究智能体' : '直接继续会话')}
-                                </span>
-                              </span>
-                              {openingSearchResult === key && <Loader2 className="mt-1 h-3.5 w-3.5 flex-shrink-0 animate-spin" style={{ color: 'var(--accent-primary)' }} />}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )}
+                <div className="easy-sidebar-list__meta">{hierarchySearchLoading ? '正在搜索…' : `${activeHierarchySearch.match_count} 条匹配`}</div>
+                {hierarchySearchError ? <div className="easy-sidebar-empty">{hierarchySearchError}</div> : null}
+                {!hierarchySearchLoading && !hierarchySearchError && activeHierarchySearch.projects.length === 0 ? <div className="easy-sidebar-empty">没有找到相关工作</div> : null}
+                {activeHierarchySearch.projects.map(group => (
+                  <section key={group.project.id} className="easy-search-group">
+                    <div className="easy-search-group__title"><FolderOpen className="h-3.5 w-3.5" /><span>{group.project.name || group.project.id}</span></div>
+                    {group.matches.map(hit => {
+                      const key = `${hit.kind}:${hit.id}`
+                      return (
+                        <button key={key} type="button" className="easy-search-hit" onClick={() => void openSearchSession(group, hit)} disabled={!!openingSearchResult}>
+                          <span>{hierarchyHitLabel(hit.kind)}</span>
+                          <strong>{hit.title || hit.id}</strong>
+                          {openingSearchResult === key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                        </button>
+                      )
+                    })}
                   </section>
                 ))}
               </div>
             ) : loading ? (
-              <div className="px-3 py-8 text-center text-[11px]" style={{ color: 'var(--text-muted)' }}>正在加载工作导航...</div>
+              <div className="easy-sidebar-empty">正在加载会话…</div>
             ) : error ? (
-              <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-5 text-center text-[11px] text-red-300">{error}</div>
+              <div className="easy-sidebar-empty">{error}</div>
             ) : visibleSessions.length === 0 ? (
-              <div className="px-3 py-10 text-center">
-                <FolderOpen className="mx-auto h-7 w-7" style={{ color: 'var(--text-muted)' }} />
-                <div className="mt-3 text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                  {workView !== 'recent' ? `当前没有${workView === 'running' ? '执行中' : '已完成'}的会话` : '这个项目没有近期会话'}
-                </div>
-                <div className="mt-1 text-[11px] leading-5" style={{ color: 'var(--text-muted)' }}>
-                  {selectedProjectOption ? '可以在当前项目中创建一个新会话' : '创建会话后会显示在这里'}
-                </div>
-                {selectedProjectOption && workView === 'recent' && (
-                  <button type="button" onClick={() => openCreateSession()} className="mt-3 rounded-lg border px-3 py-2 text-[11px] font-medium text-blue-400 hover:bg-blue-500/10" style={{ borderColor: 'rgba(59,130,246,.28)' }}>
-                    在当前项目新建会话
-                  </button>
-                )}
+              <div className="easy-sidebar-empty">暂无近期会话</div>
+            ) : sessionListMode === 'flat' ? (
+              <div className="easy-sidebar-flat" aria-label="最近会话列表">
+                {visibleSessions.map(session => renderSessionRow(session))}
               </div>
             ) : (
-              <SessionGroupTree
-                ariaLabel="按项目与任务分组的近期工作"
-                groups={visibleSessionGroups}
-                currentSessionId={sessionParam}
-                highlightCurrentGroup={contextMatchesProject}
-                collapsedKeys={collapsedSessionGroups}
-                onToggleGroup={toggleSessionGroup}
-                testIdPrefix="easy-session"
-                domIdPrefix="easy-session-group"
-                renderSession={session => {
-                  const isResearch = session.scope_type === 'research'
-                  const active = session.session_id === sessionParam && contextMatchesProject
-                  const status = sessionStatus(session)
+              <div className="easy-sidebar-groups" aria-label="按项目与任务分组的近期工作">
+                {visibleSessionGroups.map(group => {
+                  const collapsed = collapsedSessionGroups.has(group.key)
+                  const current = group.sessions.some(session => session.session_id === sessionParam)
                   return (
-                    <button
-                      type="button"
-                      onClick={() => selectSession(session)}
-                      className="relative mt-0.5 flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                      style={{
-                        borderColor: active ? 'color-mix(in srgb, var(--accent-primary) 42%, var(--border-color))' : 'transparent',
-                        background: active ? 'var(--bg-active)' : undefined,
-                      }}
-                      data-session-id={session.session_id}
-                      aria-current={active ? 'true' : undefined}
-                      title={session.name || session.session_id}
-                    >
-                      <span className="absolute -left-2.5 top-1/2 w-2 border-t" style={{ borderColor: 'var(--border-color)' }} aria-hidden="true" />
-                      <span className="min-w-0 flex-1">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="flex-shrink-0 rounded px-1 py-0.5 text-[11px] font-medium leading-3" style={{ color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
-                            {isResearch ? '智能体' : '会话'}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-4" style={{ color: 'var(--text-primary)' }}>
-                            {session.name || session.session_id}
-                          </span>
-                        </span>
-                        <span className="mt-0.5 flex items-center gap-2 text-[11px] leading-3" style={{ color: 'var(--text-muted)' }}>
-                          <span>{timeAgoPrecise(session.last_active || '')}</span>
-                          <span className="inline-flex items-center gap-1"><MessageSquare className="h-2.5 w-2.5" />{session.message_count || 0}</span>
-                        </span>
-                      </span>
-                      <span className="flex-shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-medium" style={{ color: status.color, background: status.bg }}>
-                        {status.label}
-                      </span>
-                      {active && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />}
-                    </button>
+                    <section key={group.key} className={`easy-sidebar-group ${current ? 'is-current' : ''}`}>
+                      <button type="button" className="easy-sidebar-group__header" onClick={() => toggleSessionGroup(group.key)} aria-expanded={!collapsed}>
+                        {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        <CircleDot className="h-3.5 w-3.5" />
+                        <span className="min-w-0 flex-1 truncate">{group.projectName} · {group.subjectTitle}</span>
+                        {group.activeCount > 0 ? <span className="easy-sidebar-group__running">{group.activeCount}</span> : null}
+                      </button>
+                      {!collapsed && <div className="easy-sidebar-group__sessions">{group.sessions.map(session => renderSessionRow(session, true))}</div>}
+                    </section>
                   )
-                }}
-              />
+                })}
+              </div>
             )}
+          </div>
+
+          <div className="easy-sidebar-footer" aria-label="快捷入口">
+            <button type="button" onClick={() => window.dispatchEvent(new Event('mobius:assistant:open'))} title="打开小莫" aria-label="打开小莫"><Bot className="h-[17px] w-[17px]" /></button>
+            <button type="button" onClick={() => window.openAdminOverlay?.()} title="系统设置" aria-label="系统设置"><Settings className="h-[17px] w-[17px]" /></button>
+            <button type="button" className={activePanel === 'context' ? 'is-active' : ''} onClick={() => selectPanel('context')} title="记忆与技能" aria-label="记忆与技能"><BrainCircuit className="h-[17px] w-[17px]" /></button>
           </div>
         </ResizablePanel>
 
-        {loading ? (
+        {activePanel === 'overview' ? (
+          <main className="easy-content easy-content--overview" data-testid="easy-overview-panel">
+            <Suspense fallback={<Loading text="正在加载全局纵观…" />}><EmbeddedOverviewCluster embedded /></Suspense>
+          </main>
+        ) : activePanel === 'extensions' ? (
+          <main className="easy-content" data-testid="easy-extensions-panel">
+            <div className="easy-content-header"><Boxes className="h-5 w-5" /><div><h1>系统拓展</h1><p>当前系统中可用的拓展应用</p></div><span>{extensionProjects.length}</span></div>
+            <div className="easy-extension-grid">
+              {extensionProjects.length === 0 ? <div className="easy-content-empty"><Puzzle className="h-8 w-8" /><span>当前没有可用拓展</span></div> : extensionProjects.map((project: any) => (
+                <button key={project.id} type="button" className="easy-extension-card" disabled={project.disabled} onClick={() => window.open(`/extension/${encodeURIComponent(project.extension_name)}/`, '_blank', 'noopener,noreferrer')}>
+                  <span className="easy-extension-card__icon"><Puzzle className="h-5 w-5" /></span>
+                  <span className="min-w-0 flex-1"><strong>{project.name || project.extension_name}</strong><small>{project.description || '莫比乌斯拓展应用'}</small></span>
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              ))}
+            </div>
+          </main>
+        ) : activePanel === 'devices' ? (
+          <main className="easy-content" data-testid="easy-devices-panel">
+            <div className="easy-content-header"><MonitorSmartphone className="h-5 w-5" /><div><h1>跨设备</h1><p>AIMUX 可协作设备与连接状态</p></div>{remotesLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <span>{remotes.length}</span>}</div>
+            {remotesError ? <div className="easy-content-empty"><Cpu className="h-8 w-8" /><span>{remotesError}</span></div> : (
+              <div className="easy-device-list">
+                {remotes.length === 0 && !remotesLoading ? <div className="easy-content-empty"><MonitorSmartphone className="h-8 w-8" /><span>暂无已登记的协作设备</span></div> : remotes.map((remote: any, index) => {
+                  const connected = remote.reachable === true || remote.connected === true || remote.status === 'reachable' || remote.event_stream_connected === true
+                  const name = remote.name || remote.identifier || remote.host || `设备 ${index + 1}`
+                  const detail = [remote.user && remote.hostname ? `${remote.user}@${remote.hostname}` : remote.hostname || remote.host, remote.port ? `:${remote.port}` : '', remote.rtt || remote.latency].filter(Boolean).join(' ')
+                  return <div key={name} className="easy-device-row"><span className="easy-device-row__icon"><MonitorSmartphone className="h-5 w-5" /></span><span className="min-w-0 flex-1"><strong>{name}</strong><small>{detail || 'AIMUX remote'}</small></span><span className={`easy-device-row__status ${connected ? 'is-online' : ''}`}><i />{connected ? '在线' : '离线'}</span></div>
+                })}
+              </div>
+            )}
+          </main>
+        ) : activePanel === 'context' ? (
+          <main className="easy-content easy-content--context" data-testid="easy-context-panel">
+            <div className="easy-content-header"><BrainCircuit className="h-5 w-5" /><div><h1>记忆与技能</h1><p>管理新会话默认可用的个人上下文</p></div></div>
+            <div className="easy-context-tabs"><button type="button" className={contextTab === 'skills' ? 'is-active' : ''} onClick={() => setContextTab('skills')}><Sparkles className="h-3.5 w-3.5" />技能</button><button type="button" className={contextTab === 'memories' ? 'is-active' : ''} onClick={() => setContextTab('memories')}><BrainCircuit className="h-3.5 w-3.5" />记忆</button></div>
+            <div className="easy-context-body">{contextTab === 'skills' ? <SkillsManager scope="user" /> : <MemoriesManager scope="user" />}</div>
+          </main>
+        ) : loading ? (
           <Loading text="正在加载工作导航..." />
         ) : currentSession && contextMatchesProject ? (
           <ChatArea
@@ -774,21 +747,11 @@ export default function EasyModePage() {
             }}
           />
         ) : (
-          <main className="flex min-w-0 flex-1 items-center justify-center px-6" style={{ background: 'var(--bg-secondary)' }} data-testid="easy-project-empty">
-            <div className="max-w-sm text-center">
-              <FolderOpen className="mx-auto mb-3 h-9 w-9" style={{ color: 'var(--text-muted)' }} />
-              <div className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                {workView !== 'recent' ? `当前没有${workView === 'running' ? '执行中' : '已完成'}的会话` : selectedProjectOption ? selectedProjectOption.name : '暂无可打开的近期会话'}
-              </div>
-              <div className="mt-1.5 text-[11px] leading-5" style={{ color: 'var(--text-muted)' }}>
-                {workView !== 'recent' ? '切换到“最近”查看其他工作，或创建一个新会话。' : selectedProjectOption ? '这个项目不在最近 50 个会话中。新建会话后可以直接从这里继续工作。' : '选择一个项目或创建会话后开始工作。'}
-              </div>
-              {selectedProjectOption && workView === 'recent' && (
-                <button type="button" onClick={() => openCreateSession()} className="mt-4 rounded-lg bg-blue-500 px-4 py-2 text-[11px] font-medium text-white hover:bg-blue-600">
-                  在当前项目新建会话
-                </button>
-              )}
-            </div>
+          <main className="easy-content easy-content--empty" data-testid="easy-project-empty">
+            <FolderKanban className="h-9 w-9" />
+            <strong>暂无可打开的近期会话</strong>
+            <span>从左侧新建会话后开始工作</span>
+            <button type="button" onClick={() => openCreateSession()}><Plus className="h-4 w-4" />新建会话</button>
           </main>
         )}
       </div>

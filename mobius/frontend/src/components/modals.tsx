@@ -3976,7 +3976,7 @@ function DesktopDownloadRowItem({ row, theme }: { row: DesktopDownloadRow; theme
   )
 }
 
-// GitHub Release 跳转地址 — releases/latest 由 GitHub 自动重定向到最新 desktop-v* 版本。
+// GitHub Release 跳转地址 — releases/latest 指向最新统一 apps-v* Release。
 const DESKTOP_GITHUB_RELEASES_URL = 'https://github.com/mobius-system/mobius/releases/latest'
 
 type DesktopDownloadTab = 'github' | 'local'
@@ -4033,7 +4033,7 @@ export function DesktopDownloadModal({ onClose }: { onClose: () => void }) {
           <button onClick={onClose} className="text-[18px] leading-none opacity-60 hover:opacity-100" style={{ color: theme !== 'light' ? '#9ca3af' : '#64748b' }}>×</button>
         </div>
 
-        {/* Tab: GitHub 最新 Release (默认, 跳转) | 本地服务器 (原 manifest 下载) */}
+        {/* Tab: GitHub 统一 apps-v* Release (默认, 跳转) | 本地服务器 (manifest 下载) */}
         <div className="flex justify-start mt-3">
           <div className="inline-flex rounded-md border p-0.5 text-[12px]"
             style={{ background: 'var(--input-bg)', borderColor: 'var(--border-color)' }}>

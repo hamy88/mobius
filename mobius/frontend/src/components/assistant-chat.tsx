@@ -1683,6 +1683,14 @@ export function AssistantChat() {
   const [unreadCompletion, setUnreadCompletion] = useState(0)
   const openRef = useRef(open)
   openRef.current = open
+  useEffect(() => {
+    const showAssistant = () => {
+      setOpen(true)
+      setUnreadCompletion(0)
+    }
+    window.addEventListener('mobius:assistant:open', showAssistant)
+    return () => window.removeEventListener('mobius:assistant:open', showAssistant)
+  }, [])
   const [panelSize, setPanelSize] = useState<AssistantPanelSize>('compact')
   const [panelStyle, setPanelStyle] = useState<CSSProperties>({})
   // 小莫 FAB 自定义位置: null=默认右下角 (CSS), 否则用 inline left/top 定位
