@@ -6228,6 +6228,11 @@ body.mobius-resizing .mobius-resizable-handle {
   font-weight: 520;
   transition: background .14s ease, color .14s ease;
 }
+[data-page="easy-mode"] .easy-sidebar-nav > svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+}
 [data-page="easy-mode"] .easy-sidebar-nav:hover:not(:disabled),
 [data-page="easy-mode"] .easy-sidebar-nav.is-active {
   background: var(--bg-hover);
@@ -6264,6 +6269,12 @@ body.mobius-resizing .mobius-resizable-handle {
   border-radius: 7px;
   color: var(--text-muted);
   transition: background .14s ease, color .14s ease;
+}
+[data-page="easy-mode"] .easy-sidebar-tools button > svg,
+[data-page="easy-mode"] .easy-sidebar-footer button > svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
 }
 [data-page="easy-mode"] .easy-sidebar-tools button:hover,
 [data-page="easy-mode"] .easy-sidebar-tools button.is-active,
