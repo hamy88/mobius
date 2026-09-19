@@ -5,7 +5,7 @@ import type { SessionHistoryStore } from '../services/agent-history-store'
 import { useHistorySnapshotOf } from '../services/agent-history-store'
 import { scrollDebug } from './scroll-debug'
 
-const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
+const JsonlViewEasy = lazy(() => import('./viewer/JsonlViewEasy'))
 
 // LIVE token output is deliberately paced instead of rendering every network chunk.
 const LIVE_TOKEN_MAX_BUFFER_CHARS = 3200
@@ -344,17 +344,18 @@ function SessionJsonlPanelInner({
             <VSCodeOpenProvider projectId={currentProjectId}>
               {variant === 'easy' ? (
                 <Suspense fallback={<div className="py-10 text-center text-[12px] text-[var(--text-muted)]">正在整理简易对话...</div>}>
-                  <EasyJsonlView
-                    entries={visibleJsonl}
+                  <JsonlViewEasy
+                    snapshot={historySnapshot}
+                    store={historyStore}
+                    title=""
                     emptyLoadingText={jsonlEmptyLoadingText}
                     initialLoading={jsonlInitialLoading}
-                    working={!!(backendAlive && backendWorking)}
-                    liveText={realTimeInfo}
+                    showMeta={showJsonlMeta}
                     scrollToEntryUuid={effectiveScrollToEntryUuid}
                     scrollToMatchTs={effectiveScrollToMatchTs}
+                    searchNavigationRequested={!!(scrollToEntryUuid || scrollToMatchTs)}
                     onScrollResolved={onMatchScrollResolved}
-                    onRoundCountChange={onEasyRoundCountChange}
-                    expandAllSignal={easyExpandAllSignal}
+                    onPauseToDequeue={onPauseToDequeue}
                   />
                 </Suspense>
               ) : (
