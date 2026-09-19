@@ -490,7 +490,7 @@ export default function EasyModePage() {
   }
 
   return (
-    <div className="flex h-screen flex-col" style={{ background: 'var(--bg-primary)' }} data-page="easy-mode">
+    <div className="flex h-screen flex-col" style={{ background: 'var(--bg-primary)', fontSize: '11px' }} data-page="easy-mode">
       <TopNav />
       <div className="flex min-h-0 flex-1">
         <ResizablePanel
@@ -505,10 +505,10 @@ export default function EasyModePage() {
           <div className="border-b px-3 py-3" style={{ borderColor: 'var(--border-color)' }}>
             <div className="flex items-center gap-2 px-1">
               <History className="h-4 w-4" style={{ color: 'var(--accent-primary)' }} />
-              <h1 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>工作导航</h1>
+              <h1 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>工作导航</h1>
               {refreshing && <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin" style={{ color: 'var(--text-muted)' }} aria-label="正在刷新工作状态" />}
               {!loading && !refreshing && (
-                <span className="ml-auto rounded-full px-2 py-0.5 text-[10px]" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>
+                <span className="ml-auto rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--bg-card)', color: 'var(--text-muted)' }}>
                   最近 {sessions.length}
                 </span>
               )}
@@ -522,7 +522,7 @@ export default function EasyModePage() {
                 maxLength={200}
                 placeholder="搜索全部项目、任务或会话"
                 aria-label="搜索全部项目、任务或会话"
-                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[12px] outline-none"
+                className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[11px] outline-none"
                 style={{ color: 'var(--text-primary)' }}
               />
               {hierarchySearchLoading ? (
@@ -545,13 +545,13 @@ export default function EasyModePage() {
                   }}
                   aria-haspopup="menu"
                   aria-expanded={projectFilterOpen}
-                  className="flex h-9 w-full min-w-0 items-center gap-1.5 rounded-lg border px-2.5 text-left text-[12px] transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
+                  className="flex h-9 w-full min-w-0 items-center gap-1.5 rounded-lg border px-2.5 text-left text-[11px] transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
                   style={projectChipStyle(!!effectiveProject)}
                   title={selectedProjectOption?.name || '所有近期工作'}
                 >
                   <FolderOpen className="h-3.5 w-3.5 flex-shrink-0" />
                   <span className="min-w-0 flex-1 truncate">{selectedProjectOption?.name || '所有近期工作'}</span>
-                  <span className="flex-shrink-0 text-[10px] opacity-70">
+                  <span className="flex-shrink-0 text-[11px] opacity-70">
                     {effectiveProject ? `${projectSessions.length} 会话` : `${projectOptions.length} 项目`}
                   </span>
                   <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${projectFilterOpen ? 'rotate-180' : ''}`} />
@@ -583,7 +583,7 @@ export default function EasyModePage() {
                       style={{ color: 'var(--text-primary)', background: effectiveProject === '' ? 'var(--bg-active)' : undefined }}
                     >
                       <span className="min-w-0 flex-1 truncate">所有近期工作</span>
-                      <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{sessions.length}</span>
+                      <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{sessions.length}</span>
                       {effectiveProject === '' && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />}
                     </button>
                     <div className="mt-1 max-h-[280px] overflow-y-auto">
@@ -600,8 +600,8 @@ export default function EasyModePage() {
                           style={{ color: 'var(--text-primary)', background: effectiveProject === project.id ? 'var(--bg-active)' : undefined }}
                         >
                           <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                          {project.runningCount > 0 && <span className="text-[10px] text-amber-400">运行 {project.runningCount}</span>}
-                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{project.count ? `近期 ${project.count}` : '暂无近期会话'}</span>
+                          {project.runningCount > 0 && <span className="text-[11px] text-amber-400">运行 {project.runningCount}</span>}
+                          <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{project.count ? `近期 ${project.count}` : '暂无近期会话'}</span>
                           {effectiveProject === project.id && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />}
                         </button>
                       ))}
@@ -630,7 +630,7 @@ export default function EasyModePage() {
           <div className="min-h-0 flex-1 overflow-y-auto p-2" data-testid="easy-recent-sessions">
             {normalizedSessionQuery ? (
               <div data-testid="easy-global-search-results">
-                <div className="flex min-h-8 items-center justify-between px-2 py-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                <div className="flex min-h-8 items-center justify-between px-2 py-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
                   <span>{hierarchySearchLoading ? '正在搜索全部工作…' : `全部工作 · ${activeHierarchySearch.match_count} 条匹配`}</span>
                   {activeHierarchySearch.truncated && <span>仅显示最相关结果</span>}
                 </div>
@@ -639,7 +639,7 @@ export default function EasyModePage() {
                 ) : !hierarchySearchLoading && activeHierarchySearch.projects.length === 0 ? (
                   <div className="px-3 py-10 text-center">
                     <SearchIcon className="mx-auto h-7 w-7" style={{ color: 'var(--text-muted)' }} />
-                    <div className="mt-3 text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>没有找到相关工作</div>
+                    <div className="mt-3 text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>没有找到相关工作</div>
                     <div className="mt-1 text-[11px] leading-5" style={{ color: 'var(--text-muted)' }}>尝试项目简称、任务标题或会话名称</div>
                   </div>
                 ) : activeHierarchySearch.projects.map(group => (
@@ -655,7 +655,7 @@ export default function EasyModePage() {
                     >
                       <FolderOpen className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />
                       <span className="min-w-0 flex-1 truncate text-[11px] font-semibold" style={{ color: 'var(--text-primary)' }}>{group.project.name || group.project.id}</span>
-                      <span className="text-[9px]" style={{ color: 'var(--text-muted)' }}>{group.project_match ? '项目匹配' : `${group.total_matches} 项`}</span>
+                      <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{group.project_match ? '项目匹配' : `${group.total_matches} 项`}</span>
                     </button>
                     {group.matches.length > 0 && (
                       <div className="border-t px-1 py-1" style={{ borderColor: 'var(--border-color)' }}>
@@ -671,10 +671,10 @@ export default function EasyModePage() {
                               disabled={!!openingSearchResult}
                               className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-[var(--bg-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:opacity-60"
                             >
-                              <span className="mt-0.5 flex-shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium" style={{ background: 'var(--bg-active)', color: 'var(--text-secondary)' }}>{hierarchyHitLabel(hit.kind)}</span>
+                              <span className="mt-0.5 flex-shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: 'var(--bg-active)', color: 'var(--text-secondary)' }}>{hierarchyHitLabel(hit.kind)}</span>
                               <span className="min-w-0 flex-1">
                                 <span className="block truncate text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>{hit.title || hit.id}</span>
-                                <span className="mt-0.5 block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                <span className="mt-0.5 block truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
                                   {hit.parent_title || (hit.kind === 'issue' ? '打开最近会话；没有会话则新建' : hit.kind === 'research' ? '打开研究智能体' : '直接继续会话')}
                                 </span>
                               </span>
@@ -688,13 +688,13 @@ export default function EasyModePage() {
                 ))}
               </div>
             ) : loading ? (
-              <div className="px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>正在加载工作导航...</div>
+              <div className="px-3 py-8 text-center text-[11px]" style={{ color: 'var(--text-muted)' }}>正在加载工作导航...</div>
             ) : error ? (
-              <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-5 text-center text-[12px] text-red-300">{error}</div>
+              <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-5 text-center text-[11px] text-red-300">{error}</div>
             ) : visibleSessions.length === 0 ? (
               <div className="px-3 py-10 text-center">
                 <FolderOpen className="mx-auto h-7 w-7" style={{ color: 'var(--text-muted)' }} />
-                <div className="mt-3 text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                <div className="mt-3 text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>
                   {workView !== 'recent' ? `当前没有${workView === 'running' ? '执行中' : '已完成'}的会话` : '这个项目没有近期会话'}
                 </div>
                 <div className="mt-1 text-[11px] leading-5" style={{ color: 'var(--text-muted)' }}>
@@ -736,19 +736,19 @@ export default function EasyModePage() {
                       <span className="absolute -left-2.5 top-1/2 w-2 border-t" style={{ borderColor: 'var(--border-color)' }} aria-hidden="true" />
                       <span className="min-w-0 flex-1">
                         <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="flex-shrink-0 rounded px-1 py-0.5 text-[9px] font-medium leading-3" style={{ color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
+                          <span className="flex-shrink-0 rounded px-1 py-0.5 text-[11px] font-medium leading-3" style={{ color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
                             {isResearch ? '智能体' : '会话'}
                           </span>
                           <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-4" style={{ color: 'var(--text-primary)' }}>
                             {session.name || session.session_id}
                           </span>
                         </span>
-                        <span className="mt-0.5 flex items-center gap-2 text-[9px] leading-3" style={{ color: 'var(--text-muted)' }}>
+                        <span className="mt-0.5 flex items-center gap-2 text-[11px] leading-3" style={{ color: 'var(--text-muted)' }}>
                           <span>{timeAgoPrecise(session.last_active || '')}</span>
                           <span className="inline-flex items-center gap-1"><MessageSquare className="h-2.5 w-2.5" />{session.message_count || 0}</span>
                         </span>
                       </span>
-                      <span className="flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium" style={{ color: status.color, background: status.bg }}>
+                      <span className="flex-shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-medium" style={{ color: status.color, background: status.bg }}>
                         {status.label}
                       </span>
                       {active && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--accent-primary)' }} />}
@@ -777,14 +777,14 @@ export default function EasyModePage() {
           <main className="flex min-w-0 flex-1 items-center justify-center px-6" style={{ background: 'var(--bg-secondary)' }} data-testid="easy-project-empty">
             <div className="max-w-sm text-center">
               <FolderOpen className="mx-auto mb-3 h-9 w-9" style={{ color: 'var(--text-muted)' }} />
-              <div className="text-[15px] font-medium" style={{ color: 'var(--text-primary)' }}>
+              <div className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
                 {workView !== 'recent' ? `当前没有${workView === 'running' ? '执行中' : '已完成'}的会话` : selectedProjectOption ? selectedProjectOption.name : '暂无可打开的近期会话'}
               </div>
-              <div className="mt-1.5 text-[12px] leading-5" style={{ color: 'var(--text-muted)' }}>
+              <div className="mt-1.5 text-[11px] leading-5" style={{ color: 'var(--text-muted)' }}>
                 {workView !== 'recent' ? '切换到“最近”查看其他工作，或创建一个新会话。' : selectedProjectOption ? '这个项目不在最近 50 个会话中。新建会话后可以直接从这里继续工作。' : '选择一个项目或创建会话后开始工作。'}
               </div>
               {selectedProjectOption && workView === 'recent' && (
-                <button type="button" onClick={() => openCreateSession()} className="mt-4 rounded-lg bg-blue-500 px-4 py-2 text-[12px] font-medium text-white hover:bg-blue-600">
+                <button type="button" onClick={() => openCreateSession()} className="mt-4 rounded-lg bg-blue-500 px-4 py-2 text-[11px] font-medium text-white hover:bg-blue-600">
                   在当前项目新建会话
                 </button>
               )}

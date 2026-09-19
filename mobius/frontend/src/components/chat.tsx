@@ -4095,7 +4095,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   )
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0" style={{ background: 'var(--bg-secondary)' }}>
+    <div className={`flex-1 flex flex-col h-full min-w-0${layout === 'easy' ? ' mobius-chat-area--easy' : ''}`} style={{ background: 'var(--bg-secondary)' }}>
       <RemoteFileMentionDrawer
         projectId={currentProjectId}
         issueId={currentIssueId || undefined}
