@@ -6201,6 +6201,7 @@ body.mobius-resizing .mobius-resizable-handle {
 /* Keep the standard session header visually separated from the shared shell. */
 .mobius-session-chat-header {
   border-top: 1px solid var(--border-color);
+  border-left: 1px solid var(--border-color);
   border-radius: 12px 0 0 0 !important;
 }
 
