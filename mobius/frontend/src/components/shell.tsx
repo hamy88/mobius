@@ -1078,7 +1078,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
             newTab
             aria-label="回到主页"
             title="回到主页"
-            className="mobius-topnav-userlink text-[13px] hover:text-blue-400 truncate flex-shrink-0"
+            className="mobius-topnav-userlink uppercase text-[13px] hover:text-blue-400 truncate flex-shrink-0"
             style={{ color: 'var(--text-secondary)', maxWidth: 140 }}>
             {userParam}
           </LinklessRouteButton>
@@ -1087,7 +1087,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               <span className="mobius-topnav-sep-post text-[13px]" style={{ color: 'var(--text-muted)' }}>/</span>
               <div className="mobius-topnav-projectcrumb relative flex min-w-0 items-center">
                 <LinklessRouteButton to={`/u/${userParam}/p/${projectParam}`}
-                  className="text-[13px] hover:text-blue-400 truncate"
+                  className="uppercase text-[13px] hover:text-blue-400 truncate"
                   style={{ color: 'var(--text-secondary)', maxWidth: 180 }}
                   title={projectName}>
                   {projectName}

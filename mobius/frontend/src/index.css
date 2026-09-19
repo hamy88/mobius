@@ -6073,6 +6073,8 @@ body.mobius-resizing .mobius-resizable-handle {
 .mobius-chat-body.mobius-chat-body--easy {
   position: relative;
   flex-direction: column;
+  /* Keep the conversation surface inset from the shell on both sides. */
+  padding-inline: 20px;
 }
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-history {
   width: 100% !important;
@@ -6646,6 +6648,9 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
 }
 
 @media (max-width: 640px) {
+  .mobius-chat-body.mobius-chat-body--easy {
+    padding-inline: 8px;
+  }
   .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input {
     bottom: 8px;
     width: calc(100% - 16px) !important;
