@@ -6086,7 +6086,7 @@ body.mobius-resizing .mobius-resizable-handle {
   z-index: 20;
   bottom: 16px;
   left: 50%;
-  width: min(880px, calc(100% - 40px)) !important;
+  width: min(920px, calc(100% - 40px)) !important;
   min-height: 0;
   transform: translateX(-50%);
   border: 0 !important;
@@ -6125,7 +6125,7 @@ body.mobius-resizing .mobius-resizable-handle {
   .easy-input-project-menu { animation: none; }
 }
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input.mobius-chat-input--with-actions {
-  width: min(944px, calc(100% - 32px)) !important;
+  width: min(920px, calc(100% - 40px)) !important;
   flex-direction: row;
   align-items: flex-end;
   gap: 8px;
@@ -6659,7 +6659,7 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
   }
   .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input {
     bottom: 8px;
-    width: calc(100% - 16px) !important;
+    width: min(920px, calc(100% - 40px)) !important;
   }
 }
 
