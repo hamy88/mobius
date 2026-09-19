@@ -712,15 +712,15 @@ export default function EasyModePage() {
             </button>
           </div>
 
-          <div className="easy-sidebar-tools" aria-label="会话工具">
+          <div className="easy-sidebar-tools justify-end" aria-label="会话工具">
             <button type="button" className={sessionSearchOpen ? 'is-active' : ''} onClick={() => setSessionSearchOpen(value => !value)} title="搜索项目、任务或会话" aria-label="搜索项目、任务或会话">
               <SearchIcon className="h-4 w-4" />
             </button>
-            <button type="button" onClick={() => openCreateSession()} data-testid="easy-new-session" title="新建会话" aria-label="新建会话">
-              <Plus className="h-4 w-4" />
-            </button>
             <button type="button" onClick={toggleListMode} title={sessionListMode === 'grouped' ? '切换为最近会话列表' : '切换为项目任务分组'} aria-label="切换会话列表模式">
               {sessionListMode === 'grouped' ? <LayoutList className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={() => openCreateSession()} data-testid="easy-new-session" title="新建会话" aria-label="新建会话">
+              <Plus className="h-4 w-4" />
             </button>
           </div>
 
