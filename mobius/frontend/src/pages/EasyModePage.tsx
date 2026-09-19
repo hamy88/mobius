@@ -217,7 +217,10 @@ export default function EasyModePage() {
   const [openingSearchResult, setOpeningSearchResult] = useState('')
   const [lookupFailedSessionId, setLookupFailedSessionId] = useState('')
   const [createKind, setCreateKind] = useState<CreateKind | null>(null)
-  const [showWelcome, setShowWelcome] = useState(true)
+  // 首屏由 URL 决定: 带 ?session= 直接落到对应会话, 不带才停在「新任务」欢迎页。
+  // 不能写死 true —— 下面的上下文同步 effect 在 showWelcome 时会提前 return, 那样刷新
+  // /easy_mode?session=<id> 会被欢迎页永久挡在前面, 会话怎么都打不开。
+  const [showWelcome, setShowWelcome] = useState(() => !search.get('session'))
   const [welcomePrompt, setWelcomePrompt] = useState('')
   const [createIssueOverride, setCreateIssueOverride] = useState('')
   const [createSuccessToast, setCreateSuccessToast] = useState<{ name: string } | null>(null)
@@ -719,7 +722,6 @@ export default function EasyModePage() {
             <button type="button" onClick={toggleListMode} title={sessionListMode === 'grouped' ? '切换为最近会话列表' : '切换为项目任务分组'} aria-label="切换会话列表模式">
               {sessionListMode === 'grouped' ? <LayoutList className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
-            <span className="easy-sidebar-tools__count">{refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : sessions.length}</span>
           </div>
 
           {sessionSearchOpen && (
