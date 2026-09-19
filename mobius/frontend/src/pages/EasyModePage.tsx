@@ -12,6 +12,7 @@ import {
   Cpu,
   FolderKanban,
   FolderOpen,
+  History,
   LayoutList,
   Loader2,
   MessageSquare,
@@ -713,7 +714,19 @@ export default function EasyModePage() {
           </div>
 
           <div className="easy-sidebar-tools justify-end" aria-label="会话工具">
-            <span className="easy-sidebar-tools__label">{sessionListMode === 'grouped' ? '项目分组' : '近期会话'}</span>
+            <span className="easy-sidebar-tools__label">
+              {sessionListMode === 'grouped' ? (
+                <>
+                  <FolderKanban className="easy-sidebar-tools__label-icon" aria-hidden="true" />
+                  项目分组
+                </>
+              ) : (
+                <>
+                  <History className="easy-sidebar-tools__label-icon" aria-hidden="true" />
+                  近期会话
+                </>
+              )}
+            </span>
             <button type="button" className={sessionSearchOpen ? 'is-active' : ''} onClick={() => setSessionSearchOpen(value => !value)} title="搜索项目、任务或会话" aria-label="搜索项目、任务或会话">
               <SearchIcon className="h-4 w-4" />
             </button>
@@ -784,7 +797,7 @@ export default function EasyModePage() {
                       <button type="button" className="easy-sidebar-group__header" onClick={() => toggleSessionGroup(group.key)} aria-expanded={!collapsed}>
                         {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                         <CircleDot className="h-3.5 w-3.5" />
-                        <span className="min-w-0 flex-1 truncate">{group.projectName} · {group.subjectTitle}</span>
+                        <span className="min-w-0 flex-1 truncate">{group.subjectTitle} · {group.projectName}</span>
                         {group.activeCount > 0 ? <span className="easy-sidebar-group__running">{group.activeCount}</span> : null}
                       </button>
                       {!collapsed && <div className="easy-sidebar-group__sessions">{group.sessions.map(session => renderSessionRow(session, true))}</div>}
