@@ -4268,7 +4268,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       )}
 
       {/* 标准模式保留完整会话标题栏；简易模式使用上方轻量上下文与监督栏。 */}
-      {layout !== 'easy' && <div data-tour="session-chat-header" className="h-9 border-b flex items-center justify-between px-5 flex-shrink-0" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
+      {layout !== 'easy' && <div data-tour="session-chat-header" className="mobius-session-chat-header h-9 border-b flex items-center justify-between px-5 flex-shrink-0" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="min-w-0 flex items-center gap-2">
             <SessionStatusChip

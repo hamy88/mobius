@@ -6198,6 +6198,13 @@ body.mobius-resizing .mobius-resizable-handle {
   display: none !important;
 }
 
+/* Keep the standard session header visually separated from the shared shell. */
+.mobius-session-chat-header {
+  border-top: 1px solid var(--border-color);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
 /* =====================================================================
    简易模式侧栏
    body:has 让桌面侧栏与 portal 移动抽屉共用样式；正常模式不会命中。
