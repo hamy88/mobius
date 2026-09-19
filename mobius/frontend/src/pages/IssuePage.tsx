@@ -21,6 +21,7 @@ import { buildRecentSessionTreeGroups } from '../services/recent-session-tree'
 import { normalizeRecentSessions, recentSessionTarget, RECENT_SESSION_LIMIT, type RecentSession } from '../services/recent-sessions'
 import { RecentSessionRow } from '../components/recent-session-row'
 import { useLayoutMode } from '../services/layout-mode'
+import { useListReorderAnimation } from '../services/list-reorder-animation'
 
 const EditorPane = lazy(() => import('../components/workspace/editor-pane').then(m => ({ default: m.EditorPane })))
 const CodeConversationPane = lazy(() => import('../components/workspace/code-conversation-pane').then(m => ({ default: m.CodeConversationPane })))
@@ -363,6 +364,18 @@ export default function IssuePage() {
     if (sessionListRef.current) sessionListRef.current.scrollTop = 0
   }, [sidebarPagination.page, sessionListMode])
 
+  // 列表顺序变化 (活跃会话上浮 / last_active 刷新 / 增删 / 翻页) 时让会话行滑动到位, 而不是瞬间跳位.
+  // 只有这份 key 拼接串变化才测量位置, 其余重渲染零开销 (见 services/list-reorder-animation.ts).
+  const sessionListOrderKey = useMemo(() => {
+    if (sessionListMode === 'issue') {
+      return `issue:${sidebarPagination.pagedItems.map((s: any) => s.session_id).join('|')}`
+    }
+    return `recent:${recentSessionGroups
+      .map(group => `${group.key}[${group.sessions.map(session => session.session_id).join(',')}]`)
+      .join('|')}`
+  }, [sessionListMode, sidebarPagination.pagedItems, recentSessionGroups])
+  useListReorderAnimation(sessionListRef, sessionListOrderKey)
+
   return (
     <div
       className="flex flex-col h-screen"
@@ -565,6 +578,7 @@ export default function IssuePage() {
                     <section
                       key={group.key}
                       className="mb-1.5"
+                      data-flip-key={`group:${group.key}`}
                       data-testid="issue-recent-session-group"
                       data-project-id={group.projectId}
                       data-subject-id={group.subjectId}
@@ -610,6 +624,7 @@ export default function IssuePage() {
                           return (
                             <RecentSessionRow
                               key={session.session_id}
+                              dataFlipKey={`recent:${session.session_id}`}
                               session={session}
                               active={session.session_id === sessionParam}
                               disabled={!target}

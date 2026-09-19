@@ -19,6 +19,7 @@ export function RecentSessionRow({
   onClick,
   title,
   variant = 'default',
+  dataFlipKey,
 }: {
   session: RecentSession
   active?: boolean
@@ -26,6 +27,8 @@ export function RecentSessionRow({
   onClick?: () => void
   title?: string
   variant?: 'default' | 'mention'
+  // 供 useListReorderAnimation 记录/比对位置 (见 services/list-reorder-animation.ts), 不传则不参与动画.
+  dataFlipKey?: string
 }) {
   const isResearch = session.scope_type === 'research'
   const status = recentSessionStatusPill(session)
@@ -79,6 +82,7 @@ export function RecentSessionRow({
       className="relative mt-0.5 flex min-h-9 w-full items-center gap-1.5 rounded-md border px-1.5 py-1 text-left transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-default disabled:opacity-50"
       style={{ borderColor: active ? 'color-mix(in srgb, var(--accent-primary) 42%, var(--border-color))' : 'transparent', background: active ? 'var(--bg-active)' : undefined }}
       data-session-id={session.session_id}
+      data-flip-key={dataFlipKey}
       aria-current={active ? 'true' : undefined}
     >
       <span className="absolute -left-2 top-1/2 w-1.5 border-t" style={{ borderColor: 'var(--border-color)' }} aria-hidden="true" />

@@ -1858,6 +1858,7 @@ export function SessionRow({ session, isSelected, onSelect, onEdit, onDelete, pi
   return (
     <div onClick={() => onSelect(session)}
       data-tour={dataTour}
+      data-flip-key={session.session_id}
       className={`group flex h-[54px] items-center gap-1.5 overflow-hidden px-2 py-1.5 rounded-lg cursor-pointer mb-0.5 transition-colors ${
         isSelected ? 'bg-blue-500/10 border border-blue-500/20' : 'hover:bg-[var(--bg-card-hover)] border border-transparent'
       } ${nameMuted ? 'opacity-75' : ''}`}>
