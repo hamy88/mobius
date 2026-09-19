@@ -6073,8 +6073,6 @@ body.mobius-resizing .mobius-resizable-handle {
 .mobius-chat-body.mobius-chat-body--easy {
   position: relative;
   flex-direction: column;
-  /* Keep the conversation surface inset from the shell on both sides. */
-  padding-inline: 20px;
 }
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-history {
   width: 100% !important;
@@ -6086,7 +6084,7 @@ body.mobius-resizing .mobius-resizable-handle {
   z-index: 20;
   bottom: 16px;
   left: 50%;
-  width: min(920px, calc(100% - 40px)) !important;
+  width: min(880px, calc(100% - 40px)) !important;
   min-height: 0;
   transform: translateX(-50%);
   border: 0 !important;
@@ -6125,7 +6123,7 @@ body.mobius-resizing .mobius-resizable-handle {
   .easy-input-project-menu { animation: none; }
 }
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input.mobius-chat-input--with-actions {
-  width: min(920px, calc(100% - 40px)) !important;
+  width: min(944px, calc(100% - 32px)) !important;
   flex-direction: row;
   align-items: flex-end;
   gap: 8px;
@@ -6657,12 +6655,9 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
 }
 
 @media (max-width: 640px) {
-  .mobius-chat-body.mobius-chat-body--easy {
-    padding-inline: 8px;
-  }
   .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input {
     bottom: 8px;
-    width: min(920px, calc(100% - 40px)) !important;
+    width: calc(100% - 16px) !important;
   }
 }
 
