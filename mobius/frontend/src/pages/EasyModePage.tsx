@@ -18,9 +18,11 @@ import {
   MonitorSmartphone,
   Network,
   PanelLeft,
+  Paperclip,
   Plus,
   Puzzle,
   Search as SearchIcon,
+  SendHorizontal,
   Settings,
   Sparkles,
   X,
@@ -79,6 +81,72 @@ type SessionListMode = 'grouped' | 'flat'
 const RECENT_SESSION_LIMIT = 50
 const CREATE_SUCCESS_TOAST_MS = 4000
 const EASY_LIST_MODE_KEY = 'mobius:easy-mode:session-list-mode'
+
+type SessionCreationChatBotProps = {
+  value: string
+  onChange: (value: string) => void
+  onSubmit: () => void
+}
+
+/**
+ * 简易模式欢迎页的会话创建输入框。
+ * 视觉上沿用 ChatArea 的 session-chat-input：输入区、工具栏和圆形发送按钮
+ * 保持同一组边框、间距和交互反馈，但提交后进入完整的新建会话配置。
+ */
+function SessionCreationChatBot({ value, onChange, onSubmit }: SessionCreationChatBotProps) {
+  const submitOnEnter = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+    event.preventDefault()
+    onSubmit()
+  }
+
+  return (
+    <div className="easy-welcome-composer" data-testid="session-creation-chatbot">
+      <textarea
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        onKeyDown={submitOnEnter}
+        placeholder="描述你想让莫比乌斯完成的任务…"
+        aria-label="描述要执行的任务"
+        rows={3}
+      />
+      <div className="easy-welcome-composer__toolbar">
+        <button
+          type="button"
+          className="easy-welcome-tool"
+          onClick={onSubmit}
+          title="打开完整会话设置"
+          aria-label="打开完整会话设置"
+        >
+          <Paperclip className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          className="easy-welcome-pill"
+          onClick={onSubmit}
+          title="选择项目和任务"
+        >
+          选择项目和任务
+          <ChevronDown className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          className="easy-welcome-send"
+          onClick={onSubmit}
+          disabled={!value.trim()}
+          title="开始新会话"
+          aria-label="开始新会话"
+        >
+          <SendHorizontal className="h-[17px] w-[17px]" strokeWidth={2.3} />
+        </button>
+      </div>
+      <div className="easy-welcome-project">
+        <Sparkles className="h-3.5 w-3.5" />
+        <span>提交后可配置项目、任务、模型和上下文</span>
+      </div>
+    </div>
+  )
+}
 
 function readListMode(): SessionListMode {
   try {
@@ -773,7 +841,11 @@ export default function EasyModePage() {
             <div className="easy-welcome-card">
               <MobiusLogo size={46} className="easy-welcome-logo" />
               <h1>{timeGreeting(user?.display_name)}<br />您需要莫比乌斯执行什么任务？</h1>
-                {/* <SessionCreationChatBot/> */}
+              <SessionCreationChatBot
+                value={welcomePrompt}
+                onChange={setWelcomePrompt}
+                onSubmit={submitWelcomePrompt}
+              />
               <div className="easy-welcome-suggestions"><span>钉钉办公</span><span>文档创作</span><span>数据分析</span><span>多人工作台</span><span>创意设计</span><span>深度调研</span></div>
             </div>
           </main>
@@ -803,6 +875,7 @@ export default function EasyModePage() {
         <GlobalCreateRoot
           kind={createKind}
           ctx={{ projectId: createDefaultProjectId, issueId: createDefaultIssueId }}
+          initialPrompt={welcomePrompt}
           sessionSuccessMode="toast"
           entitySuccessMode={createKind === 'project' ? 'external' : 'dialog'}
           onSessionCreated={handleSessionCreated}

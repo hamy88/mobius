@@ -1194,7 +1194,7 @@ function saveLastSelection(snap: LastSessionSelection) {
   draftSave(LAST_SELECTION_KEY, snap, { minChars: 0 })
 }
 
-export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectId, defaultIssueId, successMode = 'dialog' }: { onClose: () => void; onDone: (entity: any, detailUrl?: string) => void; onNavigate?: (path: string) => void; defaultProjectId?: string; defaultIssueId?: string; successMode?: 'dialog' | 'external' }) {
+export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectId, defaultIssueId, initialPrompt = '', successMode = 'dialog' }: { onClose: () => void; onDone: (entity: any, detailUrl?: string) => void; onNavigate?: (path: string) => void; defaultProjectId?: string; defaultIssueId?: string; initialPrompt?: string; successMode?: 'dialog' | 'external' }) {
   const { theme, user } = useStore()
   const dark = theme !== 'light'
   const userParam = user?.id
@@ -1205,7 +1205,7 @@ export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectI
   const [name, setName] = useState(d.name || SESSION_NAME_PLACEHOLDER)
   // 会话名称是否被人类用户手动编辑过. false → 当前是占位/自动生成, 更换目标任务时跟随重生成; true → 用户权威, 不覆盖.
   const nameUserTouchedRef = useRef<boolean>(!!d.name_touched)
-  const [desc, setDesc] = useState(d.desc || '')
+  const [desc, setDesc] = useState(d.desc || initialPrompt || '')
   const [selectedMentions, setSelectedMentions] = useState<SessionMentionSelection[]>(
     Array.isArray(d.mentions) ? d.mentions : [],
   )
@@ -1985,11 +1985,12 @@ export function GlobalCreateMenu({ open, onOpenChange, onPick, inProject, curren
 // research agent 创建成功 → 经 onNavigate 在 SPA 内直接进入该 Session.
 // project / issue 创建成功 → 仍走次级确认弹窗, 「跳转详情」新开浏览器 Tab.
 // 传统「新建 Session · 第 1 步 / 共 2 步」菜单 (modals.tsx) 走自己的 onCreated/goToSession, 不受此处影响.
-export function GlobalCreateRoot({ kind, ctx, onClose, onNavigate, sessionSuccessMode = 'dialog', onSessionCreated, onEntityCreated, entitySuccessMode = 'dialog' }: {
+export function GlobalCreateRoot({ kind, ctx, onClose, onNavigate, initialPrompt = '', sessionSuccessMode = 'dialog', onSessionCreated, onEntityCreated, entitySuccessMode = 'dialog' }: {
   kind: CreateKind | null
   ctx: { projectId?: string; issueId?: string; researchId?: string }
   onClose: () => void
   onNavigate?: (path: string) => void
+  initialPrompt?: string
   sessionSuccessMode?: 'dialog' | 'toast'
   onSessionCreated?: (entity: any, detailUrl?: string) => void
   onEntityCreated?: (kind: CreateKind, entity: any, detailUrl?: string) => void
@@ -2022,7 +2023,7 @@ export function GlobalCreateRoot({ kind, ctx, onClose, onNavigate, sessionSucces
 
   if (kind === 'project') return <CreateProjectForm onClose={onClose} onDone={handleDone} />
   if (kind === 'issue') return <CreateIssueForm onClose={onClose} onDone={handleDone} defaultProjectId={ctx.projectId} />
-  if (kind === 'session') return <CreateSessionForm onClose={onClose} onDone={handleDone} onNavigate={onNavigate} defaultProjectId={ctx.projectId} defaultIssueId={ctx.issueId} successMode={sessionSuccessMode === 'toast' ? 'external' : 'dialog'} />
+  if (kind === 'session') return <CreateSessionForm onClose={onClose} onDone={handleDone} onNavigate={onNavigate} defaultProjectId={ctx.projectId} defaultIssueId={ctx.issueId} initialPrompt={initialPrompt} successMode={sessionSuccessMode === 'toast' ? 'external' : 'dialog'} />
   if (kind === 'research') return <CreateResearchForm onClose={onClose} onDone={handleDone} defaultProjectId={ctx.projectId} />
   return null
 }

@@ -45,7 +45,7 @@ function SessionStatusChipInner({
     <span
       data-tour="session-status"
       aria-label={`会话状态：${label}`}
-      className={`group h-[22px] rounded-full flex-shrink-0 border inline-flex items-center transition-all duration-200 ${alwaysShowLabel ? 'gap-1.5 px-2 border-[var(--border-color)]' : 'gap-0 px-0 border-transparent hover:gap-1.5 hover:px-2'} ${t.text} ${t.hoverBg} ${t.hoverBorder}`}
+      className={`group h-[22px] rounded-full flex-shrink-0 border border-transparent inline-flex items-center transition-all duration-200 ${alwaysShowLabel ? 'gap-1.5 px-2' : `gap-0 px-0 hover:gap-1.5 hover:px-2 ${t.hoverBorder}`} ${t.text} ${t.hoverBg}`}
     >
       <span className="relative inline-flex w-1.5 h-1.5 flex-shrink-0">
         {pulse && <span className={`absolute inset-0 rounded-full ${t.dot} animate-ping opacity-75`} />}

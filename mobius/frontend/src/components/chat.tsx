@@ -4197,11 +4197,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               alwaysShowLabel
             />
             <div className="flex min-w-0 items-center gap-1.5 text-[12px]" aria-label="当前会话上下文">
-              <span className="max-w-[180px] truncate font-medium" style={{ color: 'var(--text-secondary)' }} title={projectForSession?.name || currentProjectId}>
+              <span className="max-w-[180px] truncate font-medium uppercase" style={{ color: 'var(--text-secondary)' }} title={projectForSession?.name || currentProjectId}>
                 {projectForSession?.name || currentProjectId || '项目'}
               </span>
               <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
-              <span className="max-w-[220px] truncate" style={{ color: 'var(--text-secondary)' }} title={(currentResearch as any)?.title || (currentIssue as any)?.title || ''}>
+              <span className="max-w-[220px] truncate uppercase" style={{ color: 'var(--text-secondary)' }} title={(currentResearch as any)?.title || (currentIssue as any)?.title || ''}>
                 {(currentResearch as any)?.title || (currentIssue as any)?.title || '任务'}
               </span>
               <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />

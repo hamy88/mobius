@@ -6095,6 +6095,9 @@ body.mobius-resizing .mobius-resizable-handle {
    内联 background 是 var(--input-bg)(alpha≈0.03 近乎透明), 须 !important 覆盖。 */
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input [data-tour="session-chat-input"] {
   overflow: visible;
+  height: 96px !important;
+  min-height: 0 !important;
+  max-height: 96px !important;
   border-radius: 22px !important;
   background: color-mix(in srgb, var(--bg-secondary) 94%, transparent) !important;
   backdrop-filter: blur(22px);
@@ -6102,7 +6105,9 @@ body.mobius-resizing .mobius-resizable-handle {
   box-shadow: 0 20px 54px rgba(0, 0, 0, .18), inset 0 1px 0 color-mix(in srgb, white 7%, transparent) !important;
 }
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input textarea {
-  min-height: 72px !important;
+  height: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
   font-size: 15px;
   line-height: 1.6;
 }
