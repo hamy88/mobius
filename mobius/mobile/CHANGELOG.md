@@ -3,6 +3,34 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.0] - 2026-09-19
+
+### 新增
+- **OTA 在线升级客户端能力（Phase 1 + 2）**（Issue e5a536be / 分身 #65）：Mobius Mobile 端首次具备"应用内检查更新 / 下载 / 安装 / 验证签名 / 看 changelog"完整闭环。27 个新文件 / 2,971 行新增（OtaManifest / OtaAsset / OtaError / OtaRelease / OtaRepository / ChangelogParser / ChangelogItem / SignatureSchemeValidator / Version / ThresholdEvaluator / OtaCheckUseCase / OtaDialog / OtaDownloader / OtaInstaller + 三平台 Repository 适配 + 8 个单元测试）。
+  - **D1–D5 数据模型**：semver `Version`、JSON manifest `OtaManifest`、资产清单 `OtaAsset`、错误体系 `OtaError`、release 元数据 `OtaRelease`。
+  - **D6 网络层**：`OtaRepository.{android,ios,desktop}.kt` 三平台 HTTP 拉取 manifest；Android 走 Ktor OkHttp engine，iOS 走 `NSURLSession`，Desktop 走 `java.net.HttpURLConnection`。
+  - **D7 Changelog**：`ChangelogParser` 解析 markdown 列表项（`- feat: ...` / `- fix: ...`），按 semver 阈值 `ThresholdEvaluator` 过滤掉低于基线版本的项，避免给"全量升级用户"显示旧版变更。
+  - **D8 UI**：`OtaDialog` Compose Material3 弹窗（检查中 / 有更新 / 已是最新 / 错误四态），内嵌 changelog 列表 + 下载进度条 + 安装确认。
+  - **签名方案跨版本跳跃**：`SignatureSchemeValidator` 在 major 跳跃时强制要求 v2/v3 签名（防 EdDSA / RSA-OAEP 等新算法回归到 v1-only），避免 OTA 升级过程中签名校验失败。
+
+### 修复
+- **OtaDownloader BroadcastReceiver NPE 风险**（commit 9d2c044）：Kotlin 2.0 K2 null-safety 下 `intent.action`（Intent?）的 when 分支需用 `intent?.action` 安全调用，避免广播未带 action 时编译失败（由 CI run 35442145905 自动 commit 修复）。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=23→24` / `versionName="0.3.1"→"0.4.0"`；`mobius/frontend/src/components/modals.tsx` `MOBILE_VERSION='0.4.0'` + APK 文件名 `mobius-mobile-0.4.0-android-{arm64,armeabi-v7a}.apk`（size/sha256 由 GitHub Actions run 35442145905 实测，release `mobile-v0.4.0` 自动发布为 prerelease）。
+- 用户菜单"下载 X"入口加版本号标注：桌面 v0.0.30 / 终端 v0.1.28 / 移动 v0.4.0。
+
+### 保留
+- 0.3.1 服务器地址下拉选择器（commit fdfdd9d）完整保留。
+- 0.3.0 `ServerAddressRepository` + ViewModel API（commit ffd116e）。
+- 0.2.0 聊天长按选取复制修复（commit 271a219）。
+
+### 已知限制
+- iOS 端 OTA 仅做 Repository stub + manifest 解析，未接入真机下载 / 安装（依赖 TestFlight 渠道分发）。
+- Desktop 端 OTA Repository 已写，未接入 Compose Desktop UI（桌面走 GitHub Releases 直下，不走 OTA）。
+- 本地 `./gradlew :androidApp:assembleRelease` 在无 android platforms 的开发机上仍跑不通，必须走 GitHub Actions。
+- 本次发布走 `ci/build-0-4-0-v1` 临时分支触发（参考 0.3.0 路径），后续安卓发版建议拆分独立 `build-android.yml` workflow（单 ABI < 8 分钟）。
+
 ## [0.3.1] - 2026-09-10
 
 ### 变更（UI 重构）
