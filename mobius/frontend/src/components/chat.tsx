@@ -3427,7 +3427,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const el = inputRef.current
     if (!el) return
     const syncHeight = () => {
-      const minHeight = 60
+      const minHeight = layout === 'easy' ? 42 : 60
       const maxHeight = Math.floor(window.innerHeight * 0.7)
       // A multiline placeholder contributes to scrollHeight in Chromium even
       // when the textarea is empty. Measure only the user's value so the
@@ -3444,7 +3444,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     syncHeight()
     window.addEventListener('resize', syncHeight)
     return () => window.removeEventListener('resize', syncHeight)
-  }, [input, sessionId])
+  }, [input, sessionId, layout])
 
   const resolveProjectBindPath = useCallback(async () => {
     if (!currentProjectId) throw new Error('当前会话没有所属项目, 无法写入项目知识沉淀')
@@ -4597,165 +4597,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 }}
                 placeholder={input && inputPlaceholder}
                 className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[11px] focus:outline-none overflow-y-auto"
-                style={{ height: inputHeight, minHeight: 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
+                style={{ height: inputHeight, minHeight: layout === 'easy' ? 42 : 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
               />
               </div>
             </div>
             <div className="relative flex items-end gap-2 px-3 pb-3 pt-0">
-              {layout === 'easy' && easyProjectControl && (
-                <div className="easy-input-project-row relative mr-auto flex min-w-0 items-center" ref={easyProjectMenuRef}>
-                  <button
-                    ref={easyProjectButtonRef}
-                    type="button"
-                    onClick={() => setEasyProjectMenuOpen(value => !value)}
-                    aria-haspopup="menu"
-                    aria-expanded={easyProjectMenuOpen}
-                    className="easy-input-project-trigger inline-flex h-8 max-w-[320px] min-w-0 cursor-pointer items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                    style={{ background: 'var(--bg-active)', color: 'var(--text-primary)' }}
-                    title={easyProjectControl.selectedProjectName || '所有项目'}
-                  >
-                    <FolderOpen className="h-4 w-4 flex-shrink-0" strokeWidth={1.8} />
-                    <span className="min-w-0 truncate">{easyProjectControl.selectedProjectName || '所有项目'}</span>
-                    <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${easyProjectMenuOpen ? 'rotate-180' : ''}`} />
-                  </button>
-
-                  {easyProjectMenuOpen && (
-                    <div
-                      role="menu"
-                      aria-label="选择项目"
-                      className="easy-input-project-menu absolute bottom-11 left-0 z-40 w-[360px] max-w-[calc(100vw-48px)] overflow-hidden rounded-2xl p-2 shadow-2xl"
-                      style={{ background: 'var(--menu-bg)', border: '1px solid var(--border-color)' }}
-                    >
-                      <label className="flex h-10 items-center gap-2 rounded-xl px-3" style={{ background: 'var(--input-bg)', color: 'var(--text-secondary)' }}>
-                        <Search className="h-4 w-4 flex-shrink-0" strokeWidth={1.8} />
-                        <input
-                          value={easyProjectQuery}
-                          onChange={event => setEasyProjectQuery(event.target.value)}
-                          placeholder="搜索项目"
-                          aria-label="搜索项目"
-                          autoFocus
-                          className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] outline-none placeholder:text-[var(--text-muted)]"
-                          style={{ color: 'var(--text-primary)' }}
-                        />
-                        {easyProjectQuery && (
-                          <button type="button" onClick={() => setEasyProjectQuery('')} className="inline-flex h-7 w-7 items-center justify-center rounded-lg hover:bg-[var(--bg-hover)]" aria-label="清空项目搜索">
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </label>
-
-                      <div className="mt-2 max-h-[260px] overflow-y-auto">
-                        {easyFilteredProjects.length === 0 ? (
-                          <div className="px-3 py-7 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>没有匹配的项目</div>
-                        ) : easyFilteredProjects.map(project => {
-                          const active = project.id === easyProjectControl.selectedProjectId
-                          return (
-                            <button
-                              key={project.id}
-                              type="button"
-                              role="menuitemradio"
-                              aria-checked={active}
-                              onClick={() => {
-                                easyProjectControl.onSelectProject(project.id)
-                                setEasyProjectMenuOpen(false)
-                                setEasyProjectQuery('')
-                              }}
-                              className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                              style={{ background: active ? 'var(--bg-active)' : undefined, color: 'var(--text-primary)' }}
-                            >
-                              <FolderOpen className="h-4 w-4 flex-shrink-0" strokeWidth={1.8} />
-                              <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{project.name}</span>
-                              {project.runningCount ? <span className="text-[10px] text-amber-400">运行 {project.runningCount}</span> : null}
-                              {active && <Check className="h-4 w-4 flex-shrink-0" strokeWidth={2} />}
-                            </button>
-                          )
-                        })}
-                      </div>
-
-                      <div className="mt-2 border-t pt-2" style={{ borderColor: 'var(--border-color)' }}>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            setEasyProjectMenuOpen(false)
-                            easyProjectControl.onCreateProject()
-                          }}
-                          className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] font-semibold transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                          style={{ color: 'var(--text-primary)' }}
-                        >
-                          <FolderPlus className="h-4 w-4" strokeWidth={1.8} />
-                          新建项目
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            easyProjectControl.onSelectProject(null)
-                            setEasyProjectMenuOpen(false)
-                            setEasyProjectQuery('')
-                          }}
-                          className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                          style={{ color: 'var(--text-secondary)' }}
-                        >
-                          <X className="h-4 w-4" strokeWidth={1.8} />
-                          不限项目
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div className="relative">
-                <AdvancedInteractionBtn
-                  ref={inputMenuButtonRef}
-                  onClick={toggleInputMenu}
-                  aria-haspopup="menu"
-                  aria-expanded={inputMenuOpen}
-                  label="更多输入功能"
-                  tooltip="更多输入功能"
-                  accent="blue"
-                  motion="breathe"
-                  buttonClassName="h-7 w-7 rounded-full"
-                  iconClassName="h-[17px] w-[17px]"
-                  style={{
-                    color: theme !== 'light' ? '#d1d5db' : '#374151',
-                    border: `1px solid ${inputMenuOpen ? 'rgba(96,165,250,0.38)' : (theme !== 'light' ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)')}`,
-                    background: inputMenuOpen ? 'rgba(59,130,246,0.12)' : undefined,
-                  }}
-                  icon={<Plus className="h-[17px] w-[17px]" strokeWidth={2.2} />}
-                />
-                {inputMenuOpen && (
-                  <div
-                    ref={inputMenuRef}
-                    role="menu"
-                    className="absolute bottom-11 left-0 z-30 min-w-[200px] rounded-lg shadow-xl py-1"
-                    style={{
-                      background: 'var(--menu-bg)',
-                      border: '1px solid var(--border-color)',
-                    }}
-                  >
-                    <button type="button" role="menuitem" onClick={() => { setInputMenuOpen(false); openFilePicker() }}
-                      className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                      style={{ color: 'var(--text-primary)' }}>
-                      <Paperclip className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />
-                      <span>上传文件</span>
-                    </button>
-                    <button type="button" role="menuitem" onClick={() => { setInputMenuOpen(false); setCompactConfirmOpen(true) }}
-                      disabled={!sessionId}
-                      className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                      style={{ color: 'var(--text-primary)' }}>
-                      <Archive className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />
-                      <span>压缩上文</span>
-                    </button>
-                    <button type="button" role="menuitem" onClick={() => { setInputMenuOpen(false); toggleInputExpanded() }}
-                      className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                      style={{ color: 'var(--text-primary)' }}>
-                      {inputExpanded ? <Minimize2 className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} /> : <Maximize2 className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />}
-                      <span>{inputExpanded ? '收起大输入' : '展开大输入'}</span>
-                    </button>
-                  </div>
-                )}
-              </div>
               <AdvancedInteractionBtn
                 onClick={toggleVoiceRecording}
                 disabled={messageSubmitting || voiceState === 'transcribing'}
