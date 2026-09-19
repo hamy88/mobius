@@ -4391,7 +4391,11 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       {/* body: 默认横向分栏，JsonlView 与输入/skill-memory 之间可拖拽调宽；初始 68/32。
           窄屏改纵向堆叠 (见 index.css .mobius-chat-body).
           layout='stacked' 时附加 mobius-chat-body--stacked, 与视口无关地强制纵向堆叠 (代码对话模式). */}
-      <div ref={chatBodyRef} className={`mobius-chat-body flex-1 flex min-h-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}`}>
+      <div
+        ref={chatBodyRef}
+        className={`mobius-chat-body flex-1 flex min-h-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}`}
+        style={layout === 'easy' ? { paddingLeft: '10%', paddingRight: '10%' } : undefined}
+      >
         {/* 左侧: JSONL 视图，自动占满右栏之外的剩余宽度。
             快照订阅在面板内部 (Chat 不随每条数据重渲染); 条目驱动的自动滚底由旁边的 EntriesAutoScroll 承担. */}
         <SessionJsonlPanel

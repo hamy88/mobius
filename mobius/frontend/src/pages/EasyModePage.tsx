@@ -136,6 +136,8 @@ export default function EasyModePage() {
   const [openingSearchResult, setOpeningSearchResult] = useState('')
   const [lookupFailedSessionId, setLookupFailedSessionId] = useState('')
   const [createKind, setCreateKind] = useState<CreateKind | null>(null)
+  const [showWelcome, setShowWelcome] = useState(true)
+  const [welcomePrompt, setWelcomePrompt] = useState('')
   const [createIssueOverride, setCreateIssueOverride] = useState('')
   const [createSuccessToast, setCreateSuccessToast] = useState<{ name: string } | null>(null)
   const [projectSuccessToast, setProjectSuccessToast] = useState<{ name: string } | null>(null)
@@ -388,6 +390,7 @@ export default function EasyModePage() {
   // 若该项目在近期列表中没有会话，清空右侧并给出创建入口，绝不保留另一项目的上下文。
   useEffect(() => {
     if (loading) return
+    if (showWelcome) return
     if (sessionParam && !selectedSession && lookupFailedSessionId !== sessionParam) return
     if (projectParam && projectOptions.length > 0 && !effectiveProject) {
       const next = new URLSearchParams(search)
@@ -445,9 +448,10 @@ export default function EasyModePage() {
         title: selected.issue_title || '任务',
       } as any : null)
     }
-  }, [loading, sessions, sessionParam, selectedSession, lookupFailedSessionId, projectParam, effectiveProject, projectOptions.length, projects, currentSession?.session_id, search, setSearch, workView])
+  }, [loading, showWelcome, sessions, sessionParam, selectedSession, lookupFailedSessionId, projectParam, effectiveProject, projectOptions.length, projects, currentSession?.session_id, search, setSearch, workView])
 
   const selectSession = (session: RecentSession) => {
+    setShowWelcome(false)
     const next = new URLSearchParams(search)
     next.set('session', session.session_id)
     next.delete('panel')
@@ -484,6 +488,25 @@ export default function EasyModePage() {
   const openCreateSession = (issueId = '') => {
     setCreateIssueOverride(issueId)
     setCreateKind('session')
+  }
+
+  const openWelcome = () => {
+    setShowWelcome(true)
+    setWelcomePrompt('')
+    setCurrentSession(null)
+    setCurrentTask(null)
+    setCurrentIssue(null)
+    setCurrentResearch(null)
+    const next = new URLSearchParams(search)
+    next.delete('session')
+    next.delete('project')
+    next.delete('panel')
+    setSearch(next)
+  }
+
+  const submitWelcomePrompt = () => {
+    if (!welcomePrompt.trim()) return
+    openCreateSession()
   }
 
   const selectPanel = (panel: EasyPanel) => {
@@ -587,10 +610,9 @@ export default function EasyModePage() {
           className="easy-sidebar flex flex-col"
         >
           <div className="easy-sidebar-primary">
-            <button type="button" className="easy-sidebar-nav" disabled title="新任务将在后续版本开放">
+            <button type="button" className={`easy-sidebar-nav ${showWelcome ? 'is-active' : ''}`} onClick={openWelcome} title="新建任务">
               <Plus className="h-4 w-4" />
               <span>新任务</span>
-              <span className="easy-sidebar-nav__hint">即将开放</span>
             </button>
             <button type="button" className={`easy-sidebar-nav ${activePanel === 'overview' ? 'is-active' : ''}`} onClick={() => selectPanel('overview')}>
               <Network className="h-4 w-4" />
@@ -732,6 +754,24 @@ export default function EasyModePage() {
             <div className="easy-content-header"><BrainCircuit className="h-5 w-5" /><div><h1>记忆与技能</h1><p>管理新会话默认可用的个人上下文</p></div></div>
             <div className="easy-context-tabs"><button type="button" className={contextTab === 'skills' ? 'is-active' : ''} onClick={() => setContextTab('skills')}><Sparkles className="h-3.5 w-3.5" />技能</button><button type="button" className={contextTab === 'memories' ? 'is-active' : ''} onClick={() => setContextTab('memories')}><BrainCircuit className="h-3.5 w-3.5" />记忆</button></div>
             <div className="easy-context-body">{contextTab === 'skills' ? <SkillsManager scope="user" /> : <MemoriesManager scope="user" />}</div>
+          </main>
+        ) : showWelcome ? (
+          <main className="easy-content easy-content--welcome" data-testid="easy-welcome-panel">
+            <div className="easy-welcome-card">
+              <div className="easy-welcome-icon"><Sparkles className="h-6 w-6" /></div>
+              <h1>欢迎使用莫比乌斯</h1>
+              <p>告诉我你想完成什么，我会帮你开始一个新的任务。</p>
+              <form className="easy-welcome-composer" onSubmit={(event) => { event.preventDefault(); submitWelcomePrompt() }}>
+                <textarea
+                  value={welcomePrompt}
+                  onChange={event => setWelcomePrompt(event.target.value)}
+                  placeholder="输入你想完成的任务..."
+                  aria-label="新任务内容"
+                  rows={3}
+                />
+                <button type="submit" disabled={!welcomePrompt.trim()}><MessageSquare className="h-4 w-4" />开始新任务</button>
+              </form>
+            </div>
           </main>
         ) : loading ? (
           <Loading text="正在加载工作导航..." />
