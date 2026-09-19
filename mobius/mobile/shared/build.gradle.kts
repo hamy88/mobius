@@ -65,6 +65,8 @@ kotlin {
                 // org.intellij.markdown 是 multiplatform-markdown-renderer 的传递运行时依赖,
                 // 但未暴露到编译类路径; MarkdownTableParseTest 需直接用其解析器做表格诊断。
                 implementation("org.jetbrains:markdown:0.7.3")
+                // D6 网络接入测试用 MockEngine（OtaRepositoryHttpTest 覆盖错误映射）。
+                implementation(libs.ktor.client.mock)
             }
         }
         iosMain.dependencies {
