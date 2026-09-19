@@ -1,4 +1,4 @@
-import type { ChangeEvent, CSSProperties, KeyboardEvent, RefObject } from 'react'
+import type { ChangeEvent, ClipboardEvent, CSSProperties, FocusEvent, KeyboardEvent, RefObject } from 'react'
 import { Mic, RefreshCw, SendHorizontal, Square, Zap } from 'lucide-react'
 import { AdvancedInteractionBtn } from './advanced-interaction-btn'
 import type { VoiceInputState } from '../services/assistant-voice'
@@ -6,7 +6,6 @@ import type { VoiceInputState } from '../services/assistant-voice'
 type EasySessionChatInputProps = {
   input: string
   inputRef: RefObject<HTMLTextAreaElement>
-  inputHeight: number
   inputPlaceholder: string
   inputFocused: boolean
   theme: string
@@ -21,7 +20,7 @@ type EasySessionChatInputProps = {
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void
   onPaste: (event: React.ClipboardEvent<HTMLDivElement>) => void
   onFocus: () => void
-  onBlur: (event: React.FocusEvent<HTMLDivElement>) => void
+  onBlur: (event: FocusEvent<HTMLDivElement>) => void
   onToggleVoice: () => void
   onSend: (urgent?: boolean) => void
 }
@@ -30,7 +29,6 @@ type EasySessionChatInputProps = {
 export function EasySessionChatInput({
   input,
   inputRef,
-  inputHeight,
   inputPlaceholder,
   inputFocused,
   theme,

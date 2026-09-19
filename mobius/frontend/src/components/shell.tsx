@@ -1179,44 +1179,51 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
         {/* 中间弹性填充 spacer (整条顶栏已统一挂拖拽, 此处仅占位; 不再单独挂 DesktopDragHandle 以免重复触发)。 */}
         <div className="mobius-topnav-spacer flex-1 self-stretch" aria-hidden style={{ cursor: topnavDrag.enabled ? 'grab' : undefined }} />
 
-        {/* 右侧操作在简易与普通模式下保持一致；模式只改变顶栏下方的工作区呈现。 */}
+        {/* 右侧操作: 普通模式全量呈现; 简易模式只保留"外观"入口, 新建/搜索/系统可视化/系统状态
+            (磁盘·内存·版本) 一律不渲染 —— 简易模式有页面内自带的创建与检索入口, 顶栏再放一份
+            纯属噪音。注意这里用条件渲染而非 CSS 隐藏: 磁盘/版本徽标内部有 30~60s 轮询, 不渲染
+            就连带停掉请求 (见 DiskIndicator / VersionIndicator 内的 pollRecursive)。 */}
         <div className="mobius-topnav-actions flex min-w-0 flex-shrink-0 items-center gap-1.5 xl:gap-2">
           {rightExtra}
           {/* 桌面端 aimux 反向连接状态徽标 — 仅 Electron 检测到时渲染（搜索按钮左侧） */}
           <AimuxStatusBadge />
           {/* 桌面端项目本地路径绑定闸门 — 仅 Electron + 进入未绑定项目时弹窗（替代旧 Electron 注入 overlay） */}
           <ProjectPathBindGate projectId={projectParam} />
-          {/* 新建下拉 — 全局 4 类创建 (项目 / Issue / Session / Research Agent) */}
-          <GlobalCreateMenu
-            open={showNewMenu}
-            onOpenChange={setShowNewMenu}
-            onPick={setCreateKind}
-            inProject={inProject}
-            currentProject={currentProject}
-          />
-          {/* 工作区布局切换 (会话 ↔ 代码对话) — 仅 Issue/Research 路由渲染, 桌面端可见 */}
-          <WorkspaceLayoutToggle />
-          {/* 顶栏搜索 — 跨项目/Issue/Research 搜索所有会话内容 (紧邻 +新建) */}
-          <TopNavActionElement
-            type="button"
-            onClick={() => setShowSearch(true)}
-            title="搜索会话内容"
-            aria-label="搜索会话内容"
-            data-tour="top-search"
-            className="mobius-search-trigger">
-            <Search className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-            {/* {!isMobile && <span className="mobius-topnav-search-label text-[12px] font-medium">搜索</span>} */}
-          </TopNavActionElement>
-          {/* 系统可视化入口 — 固定在搜索按钮右侧，沿用当前用户路由上下文。 */}
-          <TopNavActionElement
-            type="button"
-            onClick={() => navigate(`/u/${userParam}/mobius_overview_cluster`)}
-            title="系统可视化"
-            aria-label="前往系统可视化"
-            data-tour="top-overview-cluster"
-          >
-            <Sparkles className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-          </TopNavActionElement>
+          {!easyModeEnabled && (
+            <>
+              {/* 新建下拉 — 全局 4 类创建 (项目 / Issue / Session / Research Agent) */}
+              <GlobalCreateMenu
+                open={showNewMenu}
+                onOpenChange={setShowNewMenu}
+                onPick={setCreateKind}
+                inProject={inProject}
+                currentProject={currentProject}
+              />
+              {/* 工作区布局切换 (会话 ↔ 代码对话) — 仅 Issue/Research 路由渲染, 桌面端可见 */}
+              <WorkspaceLayoutToggle />
+              {/* 顶栏搜索 — 跨项目/Issue/Research 搜索所有会话内容 (紧邻 +新建) */}
+              <TopNavActionElement
+                type="button"
+                onClick={() => setShowSearch(true)}
+                title="搜索会话内容"
+                aria-label="搜索会话内容"
+                data-tour="top-search"
+                className="mobius-search-trigger">
+                <Search className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+                {/* {!isMobile && <span className="mobius-topnav-search-label text-[12px] font-medium">搜索</span>} */}
+              </TopNavActionElement>
+              {/* 系统可视化入口 — 固定在搜索按钮右侧，沿用当前用户路由上下文。 */}
+              <TopNavActionElement
+                type="button"
+                onClick={() => navigate(`/u/${userParam}/mobius_overview_cluster`)}
+                title="系统可视化"
+                aria-label="前往系统可视化"
+                data-tour="top-overview-cluster"
+              >
+                <Sparkles className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+              </TopNavActionElement>
+            </>
+          )}
           {/* 帮助与引导入口已并入用户菜单 (top-user-menu) 内的「帮助与引导」菜单项 */}
           <TopNavActionElement
             as="a"
@@ -1229,7 +1236,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
           >
             <GithubIcon className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
           </TopNavActionElement>
-          {!IS_DESKTOP && (
+          {!IS_DESKTOP && !easyModeEnabled && (
             <div data-tour="top-system-status" className="mobius-topnav-status flex shrink-0 items-center gap-2">
               <DiskIndicator />
               <MemoryIndicator />

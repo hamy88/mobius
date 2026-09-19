@@ -4450,7 +4450,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               <EasySessionChatInput
                 input={input}
                 inputRef={inputRef}
-                inputHeight={inputHeight}
                 inputPlaceholder={inputPlaceholder}
                 inputFocused={inputFocused}
                 theme={theme}
