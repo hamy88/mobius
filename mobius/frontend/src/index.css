@@ -6611,6 +6611,10 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
    桌面端专属: 窄屏侧栏走抽屉、内容区占满整屏, 卡角贴屏幕边缘会显得残缺。
    ====================================================================== */
 @media (min-width: 769px) {
+  /* The resize handle is the single divider beside the standard chat area. */
+  aside.mobius-resizable:has(+ .chat-major-panel) {
+    border-right-width: 0;
+  }
   [data-page="easy-mode"] .mobius-topnav {
     border-bottom-width: 0;
   }
