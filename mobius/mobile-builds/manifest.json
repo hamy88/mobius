@@ -1,8 +1,10 @@
 {
   "version": "0.3.1",
   "platform": "android",
-  "generatedAt": "2026-09-10T01:53:00Z",
+  "generatedAt": "2026-09-19T12:17:00Z",
   "builds": [
+    {"platform":"android","arch":"arm64","format":"apk","file":"mobius-mobile-0.4.0-android-arm64.apk","size":5120104,"version":"0.4.0","versionCode":24,"sha256":"c316c3adbeb03ff48c559a559b60fe93b11f43a2cc5701825a09139ce853234d","source":"github-actions run 35442145905 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 9d2c044; OTA Phase 1+2 + OtaDownloader null-safety fix)"},
+    {"platform":"android","arch":"armeabi-v7a","format":"apk","file":"mobius-mobile-0.4.0-android-armeabi-v7a.apk","size":5128072,"version":"0.4.0","versionCode":24,"sha256":"f1a0d0f6a656d07ac04439a5140b9ca6389afaf50c80ba9a53b33555308f9192","source":"github-actions run 35442145905 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 9d2c044; OTA Phase 1+2 + OtaDownloader null-safety fix)"},
     {"platform":"android","arch":"arm64","format":"apk","file":"mobius-mobile-0.3.1-android-arm64.apk","size":5103720,"version":"0.3.1","versionCode":23,"sha256":"d2ba838e5435fffd6319511ab749779b24553471c264e129de698b41691b802f","source":"github-actions run 34426692664 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 310591c)"},
     {"platform":"android","arch":"armeabi-v7a","format":"apk","file":"mobius-mobile-0.3.1-android-armeabi-v7a.apk","size":5111688,"version":"0.3.1","versionCode":23,"sha256":"3ffc7803308f12089d6872d7d45df85c8ec064c0f5c66fbbdde1fb578b4d0f1e","source":"github-actions run 34426692664 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 310591c)"},
     {"platform":"android","arch":"arm64","format":"apk","file":"mobius-mobile-0.2.0-android-arm64.apk","size":5024928,"version":"0.2.0","versionCode":21,"sha256":"cc37ffbd585a196df67bf29077827519bd485977d6af9b195325d14b3ccd934c","source":"github-release mobile-v0.2.0 (CI build, debug-signed)"},
