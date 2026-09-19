@@ -6201,8 +6201,7 @@ body.mobius-resizing .mobius-resizable-handle {
 /* Keep the standard session header visually separated from the shared shell. */
 .mobius-session-chat-header {
   border-top: 1px solid var(--border-color);
-  border-top-left-radius: 12px;
-  border-top-right-radius: 0;
+  border-radius: 12px 0 0 0 !important;
 }
 
 /* =====================================================================
@@ -6629,8 +6628,7 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
   .mobius-chat-area--easy {
     border-top: 1px solid var(--border-color);
     border-left: 1px solid var(--border-color);
-    border-top-left-radius: 14px;
-    border-top-right-radius: 0;
+    border-radius: 14px 0 0 0 !important;
     /* 裁掉内层顶栏 (.easy-session-context, 与卡片同底色) 的直角,
        否则它会把卡片圆角填回方形, 侧栏底色透不出来。 */
     overflow: hidden;
