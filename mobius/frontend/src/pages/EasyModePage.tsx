@@ -43,6 +43,7 @@ import { ResizablePanel } from '../components/resizable-panel'
 import { Loading, TopNav, timeAgoPrecise } from '../components/shell'
 import { SkillsManager } from '../components/skills'
 import { ToastCard } from '../components/toast-card'
+import { MobiusLogo } from '../components/mobius-logo'
 
 const EmbeddedOverviewCluster = lazy(() => import('./MobiusOverviewClusterPage'))
 
@@ -122,6 +123,7 @@ export default function EasyModePage() {
     setCurrentResearch,
     setCurrentSession,
     setCurrentTask,
+    user,
   } = useStore()
   const [sessions, setSessions] = useState<RecentSession[]>([])
   const [loading, setLoading] = useState(true)
@@ -758,9 +760,8 @@ export default function EasyModePage() {
         ) : showWelcome ? (
           <main className="easy-content easy-content--welcome" data-testid="easy-welcome-panel">
             <div className="easy-welcome-card">
-              <div className="easy-welcome-icon"><Sparkles className="h-6 w-6" /></div>
-              <h1>欢迎使用莫比乌斯</h1>
-              <p>告诉我你想完成什么，我会帮你开始一个新的任务。</p>
+              <MobiusLogo size={46} className="easy-welcome-logo" />
+              <h1>还没休息，{user?.display_name || '朋友'}<br />开始一个新的任务吧</h1>
               <form className="easy-welcome-composer" onSubmit={(event) => { event.preventDefault(); submitWelcomePrompt() }}>
                 <textarea
                   value={welcomePrompt}
@@ -769,8 +770,16 @@ export default function EasyModePage() {
                   aria-label="新任务内容"
                   rows={3}
                 />
-                <button type="submit" disabled={!welcomePrompt.trim()}><MessageSquare className="h-4 w-4" />开始新任务</button>
+                <div className="easy-welcome-composer__toolbar">
+                  <button type="button" className="easy-welcome-tool" aria-label="添加附件"><Plus className="h-4 w-4" /></button>
+                  <button type="button" className="easy-welcome-tool" aria-label="选择技能"><Sparkles className="h-4 w-4" /></button>
+                  <button type="button" className="easy-welcome-pill">通用 <ChevronDown className="h-3.5 w-3.5" /></button>
+                  <button type="button" className="easy-welcome-pill">默认权限</button>
+                  <button type="submit" className="easy-welcome-send" disabled={!welcomePrompt.trim()} aria-label="开始新任务"><MessageSquare className="h-4 w-4" /></button>
+                </div>
+                <div className="easy-welcome-project"><FolderOpen className="h-4 w-4" />{selectedProjectOption?.name || '选择项目'}<ChevronDown className="h-3.5 w-3.5" /></div>
               </form>
+              <div className="easy-welcome-suggestions"><span>钉钉办公</span><span>文档创作</span><span>数据分析</span><span>多人工作台</span><span>创意设计</span><span>深度调研</span></div>
             </div>
           </main>
         ) : loading ? (
