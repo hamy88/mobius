@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,23 @@ def find_local(filename: str, source_dirs: list[Path]) -> Path | None:
     return None
 
 
+def download_with_retries(url: str, destination: Path, attempts: int = 3) -> None:
+    partial = destination.with_name(f"{destination.name}.part")
+    request = urllib.request.Request(url, headers={"User-Agent": "Mobius-Apps-Release/1.0"})
+    for attempt in range(1, attempts + 1):
+        try:
+            partial.unlink(missing_ok=True)
+            with urllib.request.urlopen(request, timeout=300) as response, partial.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+            partial.replace(destination)
+            return
+        except Exception:
+            partial.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            time.sleep(attempt * 3)
+
+
 def stage_build(build: dict, output: Path, source_dirs: list[Path]) -> dict:
     filename = build["file"]
     destination = output / filename
@@ -35,9 +53,7 @@ def stage_build(build: dict, output: Path, source_dirs: list[Path]) -> dict:
     if local:
         shutil.copy2(local, destination)
     else:
-        request = urllib.request.Request(build["url"], headers={"User-Agent": "Mobius-Apps-Release/1.0"})
-        with urllib.request.urlopen(request, timeout=300) as response, destination.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
+        download_with_retries(build["url"], destination)
 
     actual_size = destination.stat().st_size
     actual_sha256 = sha256_of(destination)

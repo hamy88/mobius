@@ -71,6 +71,11 @@ function downloadFile(url, destPath, expectedSize, token, force = false) {
       file.on("finish", () => {
         clearTimeout(timeout);
         file.close();
+        if (Number.isFinite(expectedSize) && file.bytesWritten !== expectedSize) {
+          fs.unlink(destPath, () => {});
+          reject(new Error(`Size mismatch: ${file.bytesWritten} != ${expectedSize}`));
+          return;
+        }
         resolve({ skipped: false, file: path.basename(destPath), size: file.bytesWritten });
       });
       file.on("error", (err) => { clearTimeout(timeout); file.close(); fs.unlink(destPath, () => {}); reject(err); });
@@ -187,20 +192,22 @@ async function syncDesktopBuilds(options = {}) {
 
   // 4. 清理旧版本文件 (不在当前 release 中的 zip, 保留 manifest.json)
   const currentDesktopNames = new Set(assets.map(a => a.destName).filter(n => DESKTOP_ASSET_RE.test(n)));
-  try {
-    for (const entry of fs.readdirSync(DESKTOP_BUILDS_DIR)) {
-      if (entry === "manifest.json") continue;
-      if (DESKTOP_ASSET_RE.test(entry) && !currentDesktopNames.has(entry)) {
-        const oldPath = path.join(DESKTOP_BUILDS_DIR, entry);
-        fs.unlinkSync(oldPath);
-        log(`[desktop-sync]   ✕ removed old: ${entry}`);
+  if (failed === 0) {
+    try {
+      for (const entry of fs.readdirSync(DESKTOP_BUILDS_DIR)) {
+        if (entry === "manifest.json") continue;
+        if (DESKTOP_ASSET_RE.test(entry) && !currentDesktopNames.has(entry)) {
+          const oldPath = path.join(DESKTOP_BUILDS_DIR, entry);
+          fs.unlinkSync(oldPath);
+          log(`[desktop-sync]   ✕ removed old: ${entry}`);
+        }
       }
-    }
-  } catch (_) { /* 清理失败不影响 */ }
+    } catch (_) { /* 清理失败不影响 */ }
+  }
 
   // 5. 若 Release 未包含 manifest.json (旧 CI), 则从本地 zip 重新生成
   const hasManifest = assets.some(a => a.isManifest);
-  if (!hasManifest && downloaded > 0) {
+  if (!hasManifest && currentDesktopNames.size > 0) {
     try {
       const version = (release.tag_name || "").replace("desktop-v", "");
       const builds = [];
@@ -331,14 +338,16 @@ async function syncMobileBuilds(options = {}) {
 
   // 清理旧版本 APK (mobius-mobile-*.apk 且不在当前 release 中; 备份目录 _backup-* 不动)
   const currentApkNames = new Set(apkAssets.map((a) => a.destName).filter((name) => MOBILE_ASSET_RE.test(name)));
-  try {
-    for (const entry of fs.readdirSync(MOBILE_BUILDS_DIR)) {
-      if (entry.startsWith("mobius-mobile-") && entry.endsWith(".apk") && !currentApkNames.has(entry)) {
-        fs.unlinkSync(path.join(MOBILE_BUILDS_DIR, entry));
-        log(`[mobile-sync]   ✕ removed old: ${entry}`);
+  if (results.every((result) => !result.error)) {
+    try {
+      for (const entry of fs.readdirSync(MOBILE_BUILDS_DIR)) {
+        if (entry.startsWith("mobius-mobile-") && entry.endsWith(".apk") && !currentApkNames.has(entry)) {
+          fs.unlinkSync(path.join(MOBILE_BUILDS_DIR, entry));
+          log(`[mobile-sync]   ✕ removed old: ${entry}`);
+        }
       }
-    }
-  } catch (_) { /* 清理失败不影响 */ }
+    } catch (_) { /* 清理失败不影响 */ }
+  }
 
   // 若 Release 未包含 manifest.json (旧 CI 或独立 APK 仓库), 则从本地 APK 重新生成。
   // 镜像桌面 syncDesktopBuilds 165-197 行的 hasManifest 分支, 供 MobileDownloadModal 运行时读取。
