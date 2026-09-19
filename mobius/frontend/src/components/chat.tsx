@@ -4016,16 +4016,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       })
   }, [sessionId, setTyping, setStreamContent, currentIssueId, holdLiveOverride])
 
-  if (!currentSession && !currentTask) return (
-    <div className="flex-1 flex items-center justify-center" style={{ background: 'var(--bg-secondary)' }}>
-      <div className="text-center max-w-md">
-        <MobiusLogo size={72} className="mx-auto mb-6" />
-        <h2 className="text-2xl font-bold mb-2" style={{ color: theme !== 'light' ? '#f1f5f9' : '#1e293b' }}>Mobius 莫比乌斯</h2>
-        <p className="text-[14px] leading-relaxed" style={{ color: theme !== 'light' ? '#6b7280' : '#64748b' }}>从左侧选择会话或新建会话开始对话</p>
-      </div>
-    </div>
-  )
-
   const showSessionStartModal = !!(
     currentSession
     && historyLoaded
