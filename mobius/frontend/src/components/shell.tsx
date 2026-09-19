@@ -797,6 +797,10 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
   const location = useLocation()
   const layoutMode = useLayoutMode()
   const easyModeEnabled = layoutMode === 'easy_mode'
+  // 顶栏右侧动作区是否收起。除了全局模式, 还要看当前路由: 直接深链进 /easy_mode 时
+  // layout_mode 可能还没写进 localStorage (此时 useLayoutMode() 是 null), 但页面已经是简易模式,
+  // 动作区必须一并收起, 否则同一个页面会出现两副顶栏。
+  const easyTopNavCollapsed = easyModeEnabled || /\/easy_mode\/?$/.test(location.pathname)
   // 会话页内 (Issue/Research 且选中了会话) 的开关切换的是"呈现密度":
   // 原地换 ChatArea 的 layout, 不导航不卸载 → 代码对话编辑器等工作区状态全保留.
   // 非会话区域 (用户主页/项目页/easy_mode 页本身) 仍走全局 layout_mode 切换页面.
@@ -1189,7 +1193,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
           <AimuxStatusBadge />
           {/* 桌面端项目本地路径绑定闸门 — 仅 Electron + 进入未绑定项目时弹窗（替代旧 Electron 注入 overlay） */}
           <ProjectPathBindGate projectId={projectParam} />
-          {!easyModeEnabled && (
+          {!easyTopNavCollapsed && (
             <>
               {/* 新建下拉 — 全局 4 类创建 (项目 / Issue / Session / Research Agent) */}
               <GlobalCreateMenu
@@ -1236,7 +1240,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
           >
             <GithubIcon className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
           </TopNavActionElement>
-          {!IS_DESKTOP && !easyModeEnabled && (
+          {!IS_DESKTOP && !easyTopNavCollapsed && (
             <div data-tour="top-system-status" className="mobius-topnav-status flex shrink-0 items-center gap-2">
               <DiskIndicator />
               <MemoryIndicator />
