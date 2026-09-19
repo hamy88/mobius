@@ -338,7 +338,7 @@ function SessionJsonlPanelInner({
       >
         <div
           className={exclusiveContent == null ? 'px-5 py-5' : 'flex min-h-full items-center justify-center p-4'}
-          style={exclusiveContent == null && variant === 'easy' ? { paddingBottom: 360 } : undefined}
+          style={undefined}
         >
           {exclusiveContent == null ? (
             <VSCodeOpenProvider projectId={currentProjectId}>
