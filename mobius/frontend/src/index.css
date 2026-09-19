@@ -6200,9 +6200,18 @@ body.mobius-resizing .mobius-resizable-handle {
 
 /* Keep the standard session header visually separated from the shared shell. */
 .mobius-session-chat-header {
-  border-top: 1px solid var(--border-color);
-  border-left: 1px solid var(--border-color);
-  border-radius: 12px 0 0 0 !important;
+  border-top: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+
+@media (min-width: 769px) {
+  .chat-major-panel:not(.mobius-chat-area--easy) {
+    border-top: 1px solid var(--border-color);
+    border-left: 1px solid var(--border-color);
+    border-top-left-radius: 12px;
+    overflow: hidden;
+  }
 }
 
 /* =====================================================================
