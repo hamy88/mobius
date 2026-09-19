@@ -6628,6 +6628,9 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
     background: transparent !important;
     box-shadow: none !important;
   }
+  body:not(:has([data-page="easy-mode"])) aside.mobius-resizable {
+    border-right-width: 0 !important;
+  }
   /* The resize handle is the single divider beside the standard chat area. */
   aside.mobius-resizable:has(+ .chat-major-panel) {
     border-right-width: 0;
