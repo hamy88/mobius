@@ -6082,6 +6082,7 @@ body.mobius-resizing .mobius-resizable-handle {
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input {
   position: relative;
   z-index: 20;
+  margin-bottom: 30px;
   width: 100% !important;
   min-height: 0;
   flex: 0 0 auto;
