@@ -19,7 +19,7 @@ import { useDesktopWindowDrag, WindowControls } from './window-controls'
 import { WorkspaceLayoutToggle } from './workspace/workspace-layout-toggle'
 import { TopNavActionElement } from './top-nav-action'
 import { RecentSessionGroupList } from './recent-session-group-list'
-import { setLayoutMode, useLayoutMode, setSessionDensity, useSessionDensity } from '../services/layout-mode'
+import { setLayoutMode, useLayoutMode } from '../services/layout-mode'
 import { buildEasyModeUrlFromContext } from '../services/easy-route-state'
 import { buildRecentSessionTreeGroups } from '../services/recent-session-tree'
 
@@ -796,13 +796,11 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
   const navigate = useNavigate()
   const location = useLocation()
   const layoutMode = useLayoutMode()
-  const sessionDensity = useSessionDensity()
   const easyModeEnabled = layoutMode === 'easy_mode'
   // 会话页内 (Issue/Research 且选中了会话) 的开关切换的是"呈现密度":
   // 原地换 ChatArea 的 layout, 不导航不卸载 → 代码对话编辑器等工作区状态全保留.
   // 非会话区域 (用户主页/项目页/easy_mode 页本身) 仍走全局 layout_mode 切换页面.
-  const inSessionContext = !!(params.issue || params.research) && !!currentSession
-  const sessionEasyEnabled = inSessionContext ? sessionDensity === 'easy' : easyModeEnabled
+  const sessionEasyEnabled = easyModeEnabled
   const [showChangePw, setShowChangePw] = useState(false)
   const [showAimuxGuide, setShowAimuxGuide] = useState(false)
   const [showDesktopDownload, setShowDesktopDownload] = useState(false)
@@ -1365,13 +1363,6 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                   data-testid="easy-mode-switch"
                   onClick={() => {
                     setShowThemeMenu(false)
-                    if (inSessionContext) {
-                      // 会话内原地切换: 只改呈现密度, 不动路由不动全局模式.
-                      // ChatArea 因 layout prop 变化重渲染, 但组件不卸载 →
-                      // SSE/草稿/代码对话 iframe 等全部保活.
-                      setSessionDensity(sessionDensity === 'easy' ? 'professional' : 'easy')
-                      return
-                    }
                     const nextEnabled = !easyModeEnabled
                     setLayoutMode(nextEnabled ? 'easy_mode' : 'normal_mode')
                     if (nextEnabled) {
@@ -1396,7 +1387,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                   <span className="min-w-0 flex-1">
                     <span className="block text-[12px] font-semibold leading-4">简易模式</span>
                     <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>
-                      {inSessionContext ? '会话内原地切换 · ' : '精简会话界面 · '}{sessionEasyEnabled ? '已开启' : '已关闭'}
+                      {'精简会话界面 · '}{sessionEasyEnabled ? '已开启' : '已关闭'}
                     </span>
                   </span>
                   <span
