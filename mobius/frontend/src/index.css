@@ -657,15 +657,15 @@ label,
 }
 
 .light {
-  --bg-primary: #f8fafc;
+  --bg-primary: #f7f8fa;
   --bg-secondary: #ffffff;
-  --bg-tertiary: #f1f5f9;
-  --bg-hover: rgba(0, 0, 0, 0.04);
-  --bg-active: rgba(59, 130, 246, 0.08);
-  --bg-card: rgba(0, 0, 0, 0.025);
-  --bg-card-hover: rgba(0, 0, 0, 0.05);
-  --border-color: rgba(0, 0, 0, 0.08);
-  --border-color-strong: rgba(0, 0, 0, 0.12);
+  --bg-tertiary: #f4f6f8;
+  --bg-hover: rgba(15, 23, 42, 0.045);
+  --bg-active: rgba(37, 99, 235, 0.07);
+  --bg-card: rgba(15, 23, 42, 0.018);
+  --bg-card-hover: rgba(15, 23, 42, 0.04);
+  --border-color: rgba(15, 23, 42, 0.075);
+  --border-color-strong: rgba(15, 23, 42, 0.13);
   --text-primary: #1e293b;
   --text-secondary: #64748b;
   --text-muted: #64748b;
@@ -700,26 +700,20 @@ label,
   --syntax-built-in: #0e7490;
   --syntax-meta: #c026d3;
   --syntax-attr: #c2410c;
-  --input-bg: rgba(0, 0, 0, 0.03);
-  --input-border: rgba(0, 0, 0, 0.12);
+  --input-bg: #fbfcfd;
+  --input-border: rgba(15, 23, 42, 0.13);
   --modal-bg: #ffffff;
   --menu-bg: #ffffff;
   --placeholder-color: #64748b;
   --accent-primary: #2563eb;
   --accent-secondary: #0d9488;
   --assistant-panel-border: rgba(15, 23, 42, .12);
-  --assistant-panel-bg:
-    linear-gradient(180deg, rgba(255, 255, 255, .96) 0%, rgba(246, 250, 255, .96) 46%, rgba(240, 253, 250, .94) 100%),
-    radial-gradient(circle at 14% 0%, rgba(14, 165, 233, .14), transparent 36%),
-    radial-gradient(circle at 86% 10%, rgba(244, 114, 182, .10), transparent 30%),
-    radial-gradient(circle at 70% 92%, rgba(20, 184, 166, .13), transparent 34%);
+  --assistant-panel-bg: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
   --assistant-panel-shadow:
     0 24px 70px rgba(15, 23, 42, .16),
     0 0 0 1px rgba(14, 165, 233, .08),
     inset 0 1px 0 rgba(255, 255, 255, .86);
-  --assistant-header-bg:
-    linear-gradient(135deg, rgba(255, 255, 255, .86), rgba(241, 245, 249, .72)),
-    radial-gradient(circle at 0% 0%, rgba(14, 165, 233, .13), transparent 34%);
+  --assistant-header-bg: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
   --assistant-input-bg:
     linear-gradient(180deg, rgba(248, 250, 252, .66), rgba(255, 255, 255, .88)),
     var(--bg-primary);
@@ -744,8 +738,8 @@ label,
   --bg-flow-a: rgba(37, 99, 235, .18);
   --bg-flow-b: rgba(20, 184, 166, .16);
   --bg-flow-c: rgba(244, 114, 182, .13);
-  --bg-flow-opacity-back: .08;
-  --bg-flow-opacity-front: .16;
+  --bg-flow-opacity-back: .025;
+  --bg-flow-opacity-front: .045;
   --bg-flow-blend: multiply;
 }
 
