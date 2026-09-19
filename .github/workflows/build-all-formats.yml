@@ -1,8 +1,19 @@
 name: build-all-formats
 
+# 桌面端 + iOS 打包 workflow。Android 已迁到 build-android.yml,
+# 此处不再跑 android, 避免每次发安卓都拖 3 个桌面 / iOS job 多花 ~20+ 分钟。
+#
+# 触发方式:
+#   1) workflow_dispatch 手动 Run workflow 按钮
+#   2) push 到 ci/build-all-formats/** 临时分支(批量调试时用, 用完即删)
+#
+# 后续如果还需要加平台, 在 matrix.include 里追加项即可; 不要把 android 放回来。
+
 on:
-  # 仅手动触发(build-all-formats 在 main 上长期失败, 避免 push 即跑出失败 run)。
   workflow_dispatch:
+  push:
+    branches:
+      - ci/build-all-formats/**
 
 jobs:
   build:
@@ -11,9 +22,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            target: android-apk
-            artifact: android-apk
           - os: windows-2022
             target: windows-exe
             artifact: windows-exe
@@ -28,7 +36,7 @@ jobs:
       run:
         shell: bash
         # mobile 工程在仓库内 mobius/mobile/ 子目录(仓库根对应整个 /app 而非 mobius/)。
-        # 所有 ./gradlew、iosApp/、shared/、androidApp/ 相对路径均以 mobius/mobile 为基准。
+        # 所有 ./gradlew、iosApp/、shared/、desktopApp/ 相对路径均以 mobius/mobile 为基准。
         working-directory: mobius/mobile
     steps:
       - uses: actions/checkout@v4
@@ -36,37 +44,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Provision Android release keystore (optional)
-        if: matrix.target == 'android-apk'
-        env:
-          MOMO_ANDROID_KEYSTORE_B64: ${{ secrets.MOMO_ANDROID_KEYSTORE_B64 }}
-          MOMO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.MOMO_ANDROID_KEYSTORE_PASSWORD }}
-          MOMO_ANDROID_KEY_ALIAS: ${{ secrets.MOMO_ANDROID_KEY_ALIAS }}
-          MOMO_ANDROID_KEY_PASSWORD: ${{ secrets.MOMO_ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          # 仅当 4 个 secret 全部配置时才启用 release 签名;
-          # 任一缺失则降级为 debug 签名(Gradle 自动从 signingConfigs.debug 读取),
-          # 避免阻塞现有的 CI 流程。
-          if [ -z "$MOMO_ANDROID_KEYSTORE_B64" ] \
-             || [ -z "$MOMO_ANDROID_KEYSTORE_PASSWORD" ] \
-             || [ -z "$MOMO_ANDROID_KEY_ALIAS" ] \
-             || [ -z "$MOMO_ANDROID_KEY_PASSWORD" ]; then
-            echo "::warning::MOMO_ANDROID_KEYSTORE_* secrets not fully configured; falling back to debug signing for this run."
-            exit 0
-          fi
-          echo "$MOMO_ANDROID_KEYSTORE_B64" | base64 -d > /tmp/mobius-release.keystore
-          ls -la /tmp/mobius-release.keystore
-          echo "MOMO_ANDROID_KEYSTORE_PATH=/tmp/mobius-release.keystore" >> "$GITHUB_ENV"
-          echo "MOMO_ANDROID_KEYSTORE_PASSWORD=$MOMO_ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "MOMO_ANDROID_KEY_ALIAS=$MOMO_ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
-          echo "MOMO_ANDROID_KEY_PASSWORD=$MOMO_ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
-          echo "Release keystore provisioned; signingConfig.release will be activated by Gradle."
-
-      - name: Build Android APK
-        if: matrix.target == 'android-apk'
-        run: ./gradlew --no-daemon :androidApp:assembleRelease
 
       - name: Build Windows EXE
         if: matrix.target == 'windows-exe'
@@ -124,9 +101,6 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           case "${{ matrix.target }}" in
-            android-apk)
-              cp androidApp/build/outputs/apk/release/*.apk artifacts/
-              ;;
             windows-exe)
               cp desktopApp/build/compose/binaries/main/exe/*.exe artifacts/
               ;;
@@ -158,9 +132,8 @@ jobs:
           path: mobius/mobile/artifacts/
           if-no-files-found: error
 
-  # 4 平台全部成功后, 把 artifacts 发布为 GitHub Release (pre-release)。
-  # Release asset 匿名可下载, 供服务器侧 sync-mobile-builds 与用户直链分发;
-  # 本机无 GitHub PAT 时这是唯一能把 CI 产物取下来的通道。
+  # 3 个桌面 / iOS 平台全部成功后, 把 artifacts 发布为 GitHub Release (pre-release)。
+  # Release asset 匿名可下载, 供用户直链分发(本机无 GitHub PAT 时这是唯一通道)。
   release:
     name: Publish artifacts to GitHub Release
     needs: build
@@ -176,26 +149,23 @@ jobs:
         with:
           path: all-artifacts
 
-      - name: Stage release files (rename to distribution names)
+      - name: Stage release files (versioned rename + sha256)
         id: ver
         run: |
           set -euo pipefail
+          # 桌面/iOS 与 Android 0.4.0 同期发版时, 版本号也写在 androidApp/build.gradle.kts;
+          # 共用同一行 versionName, 保证 4 平台分发名一致。
           VER="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' mobius/mobile/androidApp/build.gradle.kts | head -1)"
           echo "version: $VER"
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           mkdir -p release
-          # Android splits-abi APK → mobius-mobile-<ver>-android-<abi>.apk 分发名 (与 0.1.19 对齐)
-          for apk in all-artifacts/android-apk/*.apk; do
-            base="$(basename "$apk" .apk)"
-            case "$base" in
-              *arm64*)  cp "$apk" "release/mobius-mobile-${VER}-android-arm64.apk" ;;
-              *v7a*)    cp "$apk" "release/mobius-mobile-${VER}-android-armeabi-v7a.apk" ;;
-              *)        cp "$apk" "release/${base}-${VER}.apk" ;;
-            esac
-          done
-          # 其余平台产物原样分发
+          # Windows / macOS / iOS 产物按 mobius-mobile-<ver>-<platform>.<ext> 统一分发名
           find all-artifacts/windows-exe -name '*.exe' -exec cp {} release/ \; 2>/dev/null || true
-          find all-artifacts/macos-dmg -name '*.dmg' -exec cp {} release/ \; 2>/dev/null || true
+          # macos-dmg 时间戳 stamp 加在文件名里(同一 release 多次运行不冲突)
+          for dmg in all-artifacts/macos-dmg/*.dmg; do
+            [ -f "$dmg" ] || continue
+            cp "$dmg" "release/mobius-mobile-${VER}-macos.dmg"
+          done
           [ -d all-artifacts/ios-simulator-app ] && cp all-artifacts/ios-simulator-app/iosApp.zip "release/mobius-mobile-${VER}-ios-simulator-app.zip" || true
           ( cd release && sha256sum * > sha256.txt )
           ls -la release/
