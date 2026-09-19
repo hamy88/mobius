@@ -6581,8 +6581,8 @@ body.mobius-resizing .mobius-resizable-handle {
 
 body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: none; }
 
-/* 简易模式的侧栏已承载工作上下文，顶栏只保留全局操作区。 */
-[data-page="easy-mode"] .mobius-topnav-crumb { display: none; }
+/* 简易模式的侧栏已承载工作上下文：保留品牌 Logo，隐藏其后的路由面包屑。 */
+[data-page="easy-mode"] .mobius-topnav-crumb > :not(:first-child) { display: none; }
 
 /* =====================================================================
    简易模式「内容卡片」
