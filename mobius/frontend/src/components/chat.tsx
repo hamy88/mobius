@@ -1914,9 +1914,11 @@ type EasyProjectOption = {
 
 type SearchHitTarget = { uuid?: string | null; timestamp?: string | null }
 
-export function ChatArea({ layout = 'default', onNewSession, easyProjectControl }: {
+export function ChatArea({ layout = 'default', onNewSession, easyProjectControl, draftMode = false, onDraftSubmit }: {
   layout?: 'default' | 'stacked' | 'easy'
   onNewSession?: () => void
+  draftMode?: boolean
+  onDraftSubmit?: (text: string) => void
   easyProjectControl?: {
     selectedProjectId?: string
     selectedProjectName?: string
@@ -2044,6 +2046,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const [inputMenuOpen, setInputMenuOpen] = useState(false)
   const [easyToolsOpen, setEasyToolsOpen] = useState(false)
   const [easyProjectMenuOpen, setEasyProjectMenuOpen] = useState(false)
+  const [draftInput, setDraftInput] = useState('')
   const [easyProjectQuery, setEasyProjectQuery] = useState('')
   const [inputFocused, setInputFocused] = useState(false)
   // 每个 session 维持一份附件列表 (粘贴 / 拖放 / 上传按钮三路共用).
@@ -2702,9 +2705,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     })
   }, [sessionId])
 
-  const input = drafts[sessionId] || ''
+  const input = sessionId ? (drafts[sessionId] || '') : draftInput
   const setInput = (val: string | ((prev: string) => string)) => {
-    if (!sessionId) return
+    if (!sessionId) {
+      if (draftMode) setDraftInput(prev => typeof val === 'function' ? val(prev) : val)
+      return
+    }
     setDrafts(prev => {
       const next = typeof val === 'function' ? val(prev[sessionId] || '') : val
       draftSave(`session-input:${sessionId}`, { input: next }, { minChars: 1 })
@@ -3704,6 +3710,14 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   }, [sessionId, addMessage, setTyping, postSessionMessage])
 
   const send = useCallback((urgent = false) => {
+    const draftText = input.trim()
+    if (!sessionId && draftMode) {
+      if (draftText) {
+        onDraftSubmit?.(draftText)
+        setDraftInput('')
+      }
+      return
+    }
     // 模型被管理员移除 → 会话只读, 拦截发送并打开与底部按钮一致的"修改模型并继续"流程.
     if (!modelAvailableRef.current) {
       setLastSendError('因之前使用的模型被管理员移除，本次会话不能继续，请先"修改模型并继续"。')
@@ -3779,7 +3793,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         inputRef.current?.focus()
       })
       .finally(() => setMessageSubmitting(false))
-  }, [input, replyTo, sessionId, addMessage, attachments, anyUploading, messageSubmitting, clearAttachments, postSessionMessage, clearSessionInputDraft, voiceState, selectedAgentMentions])
+  }, [input, replyTo, sessionId, draftMode, onDraftSubmit, addMessage, attachments, anyUploading, messageSubmitting, clearAttachments, postSessionMessage, clearSessionInputDraft, voiceState, selectedAgentMentions])
 
   const sendProjectKnowledgePrompt = useCallback(async () => {
     if (!sessionId || projectKnowledgeSending) return

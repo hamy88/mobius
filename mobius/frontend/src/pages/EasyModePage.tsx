@@ -111,6 +111,16 @@ function sessionMatchesView(session: RecentSession, view: WorkView) {
   return true
 }
 
+function timeGreeting(displayName?: string) {
+  const name = displayName || '朋友'
+  const hour = new Date().getHours()
+  if (hour < 5) return `还没休息，${name}`
+  if (hour < 11) return `早上好，${name}`
+  if (hour < 14) return `中午好，${name}`
+  if (hour < 18) return `下午好，${name}`
+  return `晚上好，${name}`
+}
+
 export default function EasyModePage() {
   const params = useParams()
   const [search, setSearch] = useSearchParams()
@@ -759,26 +769,23 @@ export default function EasyModePage() {
           </main>
         ) : showWelcome ? (
           <main className="easy-content easy-content--welcome" data-testid="easy-welcome-panel">
-            <div className="easy-welcome-card">
-              <MobiusLogo size={46} className="easy-welcome-logo" />
-              <h1>还没休息，{user?.display_name || '朋友'}<br />开始一个新的任务吧</h1>
-              <form className="easy-welcome-composer" onSubmit={(event) => { event.preventDefault(); submitWelcomePrompt() }}>
-                <textarea
-                  value={welcomePrompt}
-                  onChange={event => setWelcomePrompt(event.target.value)}
-                  placeholder="输入你想完成的任务..."
-                  aria-label="新任务内容"
-                  rows={3}
-                />
-                <div className="easy-welcome-composer__toolbar">
-                  <button type="button" className="easy-welcome-tool" aria-label="添加附件"><Plus className="h-4 w-4" /></button>
-                  <button type="button" className="easy-welcome-tool" aria-label="选择技能"><Sparkles className="h-4 w-4" /></button>
-                  <button type="button" className="easy-welcome-pill">通用 <ChevronDown className="h-3.5 w-3.5" /></button>
-                  <button type="button" className="easy-welcome-pill">默认权限</button>
-                  <button type="submit" className="easy-welcome-send" disabled={!welcomePrompt.trim()} aria-label="开始新任务"><MessageSquare className="h-4 w-4" /></button>
-                </div>
-                <div className="easy-welcome-project"><FolderOpen className="h-4 w-4" />{selectedProjectOption?.name || '选择项目'}<ChevronDown className="h-3.5 w-3.5" /></div>
-              </form>
+            <div className="easy-welcome-shell">
+              <div className="easy-welcome-heading">
+                <MobiusLogo size={46} className="easy-welcome-logo" />
+                <h1>{timeGreeting(user?.display_name)}<br />您需要莫比乌斯执行什么任务？</h1>
+              </div>
+              <ChatArea
+                layout="easy"
+                draftMode
+                onDraftSubmit={(text) => { setWelcomePrompt(text); submitWelcomePrompt() }}
+                easyProjectControl={{
+                  selectedProjectId: effectiveProject || undefined,
+                  selectedProjectName: selectedProjectOption?.name,
+                  projects: projectOptions,
+                  onSelectProject: selectProjectFilter,
+                  onCreateProject: () => setCreateKind('project'),
+                }}
+              />
               <div className="easy-welcome-suggestions"><span>钉钉办公</span><span>文档创作</span><span>数据分析</span><span>多人工作台</span><span>创意设计</span><span>深度调研</span></div>
             </div>
           </main>
