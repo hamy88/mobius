@@ -4194,7 +4194,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         />
       )}
       {layout === 'easy' && (
-        <div className="easy-session-context flex h-11 flex-shrink-0 items-center gap-3 border-b px-4" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }} data-testid="easy-session-context">
+        <div className="easy-session-context flex h-7 flex-shrink-0 items-center gap-3 border-b px-4" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }} data-testid="easy-session-context">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <SessionStatusChip
               connected={connectionStatus === 'connected'}
@@ -4220,49 +4220,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             </div>
             <div className="easy-session-summary" aria-label="简易对话摘要">
               <Sparkles className="easy-session-summary__icon" aria-hidden="true" />
-              <span className="easy-session-summary__label">简易对话</span>
               <small>{easyRoundCount} 轮</small>
-              <EasyLoadAllControls store={historyStore} loading={easyLoadingAll} onLoadAll={handleEasyLoadAll} expandAllSignal={easyExpandAllSignal} />
             </div>
-          </div>
-          <div className="flex flex-shrink-0 items-center gap-2">
-            <div className="easy-session-tools relative" ref={easyToolsRef}>
-              <button
-                type="button"
-                onClick={() => setEasyToolsOpen(value => !value)}
-                aria-controls="easy-session-tools-panel"
-                aria-expanded={easyToolsOpen}
-                className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                style={{ borderColor: 'var(--border-color)', color: easyToolsOpen ? 'var(--text-primary)' : 'var(--text-secondary)', background: easyToolsOpen ? 'var(--bg-active)' : undefined }}
-              >
-                <Wrench className="h-3.5 w-3.5" />
-                <span>工具</span>
-              </button>
-              {easyToolsOpen && (
-                <div ref={easyToolsPanelRef} id="easy-session-tools-panel" role="group" aria-label="当前会话工具" className="absolute right-0 top-9 z-50 rounded-xl p-1 shadow-2xl" style={{ background: 'var(--menu-bg)', border: '1px solid var(--border-color)' }} onKeyDown={(event) => {
-                  if (event.key !== 'Escape') return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  setEasyToolsOpen(false)
-                }} onClick={() => {
-                  setEasyToolsOpen(false)
-                }}>
-                  <div className="px-2 pb-2 pt-1 text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>当前会话工具</div>
-                  {renderAdvancedSessionActions('menu')}
-                </div>
-              )}
-            </div>
-            <HeaderActionButton
-              tone="red"
-              title="终止当前智能体正在执行的操作"
-              disabled={!sessionId}
-              aria-live="polite"
-              onClick={handleStopSession}
-              className={`session-stop-button ${stopFeedbackActive ? 'session-stop-button--active' : ''}`}
-            >
-              <span className="session-stop-button__square inline-block h-1.5 w-1.5 rounded-sm bg-current opacity-90" />
-              <span>{stopFeedbackActive ? '已触发' : '停止'}</span>
-            </HeaderActionButton>
           </div>
         </div>
       )}
