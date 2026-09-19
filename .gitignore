@@ -196,6 +196,8 @@ mobius/mobile/iosApp/*.xcodeproj/
 # local secrets & build artifacts (2026-09-09)
 mobius/backend/https-proxy-certs/*.key
 /app/core
+/app/mobius/core
+/app/**/core
 /download/*.apk
 /download/*.crt
 # secret-guard 消息加密主密钥 (本地 /data, 绝不入库)
