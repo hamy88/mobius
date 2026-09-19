@@ -6277,10 +6277,14 @@ body:has([data-page="easy-mode"]) .easy-sidebar-tools {
   min-height: 36px;
   padding: 4px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--border-color) 58%, transparent);
+  /* 侧栏可拖到 139px: 整行右对齐时超出部分从左侧(标签)裁掉, 保留三个按钮 */
+  overflow: hidden;
 }
 body:has([data-page="easy-mode"]) .easy-sidebar-tools__label {
   flex: 0 0 auto;
-  padding-right: 3px;
+  /* 标签贴左, 三个按钮靠右 */
+  margin-right: auto;
+  padding-right: 6px;
   color: var(--text-muted);
   font-size: 11px;
   white-space: nowrap;

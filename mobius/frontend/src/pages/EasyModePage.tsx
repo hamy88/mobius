@@ -688,7 +688,7 @@ export default function EasyModePage() {
         <ResizablePanel
           storageKey="mobius:ui:sidebar:easy-mode-recent"
           defaultWidth={268}
-          minWidth={232}
+          minWidth={139}
           maxWidth={380}
           side="left"
           className="easy-sidebar flex flex-col"
