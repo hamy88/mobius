@@ -71,7 +71,7 @@ class OtaDownloader(private val context: Context = AndroidContext.application) {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: -1L
             if (id < 0) return
-            when (intent.action) {
+            when (intent?.action) {
                 DownloadManager.ACTION_DOWNLOAD_COMPLETE -> {
                     val query = DownloadManager.Query().setFilterById(id)
                     val cursor: Cursor = runCatching {
