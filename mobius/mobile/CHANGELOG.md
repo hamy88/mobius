@@ -3,6 +3,31 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.1] - 2026-09-19
+
+### 修复
+- **OTA 客户端代码接入主流程**（Issue e5a536be / 分身 #70）：0.4.0 OTA Phase 1+2 的 27 个新文件（OtaCheckUseCase / OtaDialog / OtaRepository 三平台实现等）虽然代码落地了，但 ViewModel / MomoApp 完全没接入，导致：
+  - App 启动没有静默检查更新
+  - 用户无法手动检查新版本
+  - OtaDialog 从不渲染（用户从未看到升级弹窗）
+
+  本次接入：
+  - `MomoAppViewModel` 注入 `OtaCheckUseCase`（lazy init），新增 `triggerOtaCheck()` / `dismissOtaDialog()` / `downloadAndInstallOta(manifest)` 三个方法
+  - `UiState` 加 `otaCheckResult` / `otaCheckInProgress` / `otaLastCheckAt` 三个字段
+  - `MomoApp` 顶层 `LaunchedEffect(Unit) { delay(5000); vm.triggerOtaCheck() }` — App 启动 5s 后静默检查
+  - `MomoApp` 顶层条件渲染 `OtaDialog(state.otaCheckResult, ...)` — 有更新时弹窗
+  - `SettingsScreen` "通用"分组加"检查更新"行（点击触发 manual check；右侧显示"检查中…"/"刚刚"/"X 分钟前"/"未检查"）
+  - 新增 `MomoAppViewModelOtaTest.kt`（MockEngine 注入 OtaRepository，验证 triggerOtaCheck 流程）
+  - commit `1981550`（+356 行 / 3 文件）
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=24→25` / `versionName="0.4.0"→"0.4.1"`。
+- `extension.json` 0.4.1（如果有 extension 版本号字段）。
+
+### 已知限制
+- `downloadAndInstallOta()` 暂为占位（无完整 APK 下载 / 安装流程）；OtaDialog 当前只能在"有更新"态展示文案 + 按钮，后续版本接 OtaDownloader / OtaInstaller 走真实下载。
+- iOS / Desktop 端 OTA 客户端能力尚未接入（仅 Android 端）。
+
 ## [0.4.0] - 2026-09-19
 
 ### 新增
