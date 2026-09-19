@@ -6281,13 +6281,16 @@ body:has([data-page="easy-mode"]) .easy-sidebar-tools {
   overflow: hidden;
 }
 body:has([data-page="easy-mode"]) .easy-sidebar-tools__label {
-  flex: 0 0 auto;
-  /* 标签贴左, 三个按钮靠右 */
+  /* 标签贴左, 三个按钮靠右; 侧栏拖到极窄时收缩标签, 不挤掉右侧按钮 */
+  flex: 0 1 auto;
+  min-width: 0;
   margin-right: auto;
   padding-right: 6px;
+  overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 body:has([data-page="easy-mode"]) .easy-sidebar-tools button,
 body:has([data-page="easy-mode"]) .easy-sidebar-footer button {
