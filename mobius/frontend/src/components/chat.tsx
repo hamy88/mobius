@@ -4458,6 +4458,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 voiceBusy={voiceBusy}
                 messageSubmitting={messageSubmitting}
                 anyUploading={anyUploading}
+                hasReadyAttachments={attachments.some(attachment => attachment.status === 'done')}
                 hasPendingSend={!!pendingSendAt}
                 modelAvailable={modelAvailable}
                 onChange={handleChatInputChange}

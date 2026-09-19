@@ -6244,7 +6244,7 @@ body:has([data-page="easy-mode"]) .easy-sidebar-nav {
   color: var(--text-secondary);
   text-align: left;
   font-size: 12px;
-  font-weight: 520;
+  font-weight: 450;
   transition: background .14s ease, color .14s ease;
 }
 body:has([data-page="easy-mode"]) .easy-sidebar-nav > svg {
@@ -6288,7 +6288,9 @@ body:has([data-page="easy-mode"]) .easy-sidebar-tools__label {
   padding-right: 6px;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
+  /* 与 .easy-sidebar-nav 同步: 同为 12px/450, 见上方侧栏导航规则 */
+  font-size: 12px;
+  font-weight: 450;
   white-space: nowrap;
   text-overflow: ellipsis;
 }

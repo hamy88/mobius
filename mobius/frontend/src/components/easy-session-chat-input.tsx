@@ -14,6 +14,7 @@ type EasySessionChatInputProps = {
   voiceBusy: boolean
   messageSubmitting: boolean
   anyUploading: boolean
+  hasReadyAttachments: boolean
   hasPendingSend: boolean
   modelAvailable: boolean
   onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void
@@ -37,6 +38,7 @@ export function EasySessionChatInput({
   voiceBusy,
   messageSubmitting,
   anyUploading,
+  hasReadyAttachments,
   hasPendingSend,
   modelAvailable,
   onChange,
@@ -47,7 +49,7 @@ export function EasySessionChatInput({
   onToggleVoice,
   onSend,
 }: EasySessionChatInputProps) {
-  const disabled = (!input.trim() && !anyUploading) || anyUploading || hasPendingSend || messageSubmitting || voiceBusy || !modelAvailable
+  const disabled = (!input.trim() && !hasReadyAttachments) || anyUploading || hasPendingSend || messageSubmitting || voiceBusy || !modelAvailable
   const sendBg = disabled ? (theme !== 'light' ? '#374151' : '#e5e7eb') : (theme !== 'light' ? '#ffffff' : '#111827')
   const sendFg = disabled ? (theme !== 'light' ? '#6b7280' : '#9ca3af') : (theme !== 'light' ? '#111827' : '#ffffff')
   const border = theme !== 'light' ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)'
@@ -77,7 +79,9 @@ export function EasySessionChatInput({
           <div className="pointer-events-none absolute inset-x-3 top-3 z-10 grid min-w-0 grid-cols-2 gap-x-3 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
             <span className="col-span-2 min-w-0 truncate">发送指令：</span>
             <span className="min-w-0 truncate">· Shift+Enter 换行</span>
+            <span className="min-w-0 truncate">· Ctrl/⌘+V 粘贴文件/截图</span>
             <span className="min-w-0 truncate">· ↑键回溯</span>
+            <span className="min-w-0 truncate">· @引用文件/智能体</span>
           </div>
         )}
         <textarea
@@ -90,7 +94,7 @@ export function EasySessionChatInput({
           style={{ color: 'var(--text-primary)' }}
         />
       </div>
-      <div className="flex min-w-0 items-center justify-end gap-2 px-3 pb-3 pt-0 overflow-hidden">
+      <div className="absolute bottom-0 left-0 right-0 flex h-9 min-w-0 items-center justify-end gap-2 overflow-hidden px-3 pb-1">
         <AdvancedInteractionBtn
           onClick={onToggleVoice}
           disabled={messageSubmitting || voiceState === 'transcribing'}
