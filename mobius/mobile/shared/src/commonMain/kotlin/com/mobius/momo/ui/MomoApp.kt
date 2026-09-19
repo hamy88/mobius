@@ -199,8 +199,11 @@ import com.mobius.momo.viewmodel.ThemeMode
 import com.mobius.momo.viewmodel.ThemePalette
 import com.mobius.momo.viewmodel.UiState
 import com.mobius.momo.viewmodel.canSendComposerMessage
+import com.mobius.momo.viewmodel.OtaCheckUseCase
+import com.mobius.momo.viewmodel.ThresholdEvaluator
 import androidx.compose.foundation.rememberScrollState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.ExperimentalResourceApi
@@ -314,6 +317,11 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
     // 登录成功后处理"点击通知时还未登录"而暂存的 deepLink, 进入对应聊天。
     LaunchedEffect(authState.screen) {
         if (authState.screen != AppScreen.Login) viewModel.consumePendingDeepLink()
+    }
+    // 0.4.0 OTA：启动 5s 后静默检查更新（仅触发一次，UI 层用 state.otaCheckResult 决定是否弹窗）。
+    LaunchedEffect(Unit) {
+        delay(5_000L)
+        viewModel.triggerOtaCheck()
     }
     val systemDark = isSystemInDarkTheme()
     val dark = when (authState.themeMode) {
@@ -435,6 +443,66 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                     val state by viewModel.state.collectAsState()
                     if (authState.cloneSheetOpen) CloneSheet(state, theme, viewModel)
                     if (authState.presetSheetOpen) PresetSheet(state, theme, viewModel)
+                }
+                // 0.4.0 OTA 弹窗：4 档(Normal/Advisory/StrongAdvisory/HardBlock)按 otaCheckResult.level 分发,
+                // 仅 Show 态弹；NoUpdate / Invalid / NetworkError 由设置页提示,不弹窗。
+                val otaState by viewModel.state.collectAsState()
+                val otaShow = otaState.otaCheckResult as? OtaCheckUseCase.OtaCheckResult.Show
+                if (otaShow != null) {
+                    val otaColors = OtaColors(
+                        background = theme.bgPrimary,
+                        onBackground = theme.textPrimary,
+                        onBackgroundMuted = theme.textMuted,
+                        accent = theme.accentPrimary,
+                        danger = theme.danger,
+                        divider = theme.borderDefault,
+                    )
+                    val ctx = OtaDialogCopy.Context(
+                        localVersion = platformAppVersion(),
+                        remoteVersion = otaShow.manifest.version,
+                        minSupportedVersion = otaShow.minSupportedVersion,
+                        reasonDisplay = otaShow.reasonDisplay,
+                        advisoryId = otaShow.advisoryId,
+                        hardBlockBypassable = otaShow.hardBlockBypassable,
+                    )
+                    val copy = OtaDialogCopy.render(otaShow.level, ctx)
+                    when (otaShow.level) {
+                        ThresholdEvaluator.Level.Normal -> OtaNormalDialog(
+                            copy = copy,
+                            colors = otaColors,
+                            onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
+                            onLater = { viewModel.dismissOtaDialog() },
+                            onIgnore = {
+                                viewModel.markOtaVersionIgnored(otaShow.manifest.version)
+                                viewModel.dismissOtaDialog()
+                            },
+                            onDismiss = { viewModel.dismissOtaDialog() },
+                        )
+                        ThresholdEvaluator.Level.Advisory -> OtaAdvisoryDialog(
+                            copy = copy,
+                            colors = otaColors,
+                            onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
+                            onLater = { viewModel.dismissOtaDialog() },
+                            onDismiss = { viewModel.dismissOtaDialog() },
+                        )
+                        ThresholdEvaluator.Level.StrongAdvisory -> OtaStrongAdvisoryDialog(
+                            copy = copy,
+                            colors = otaColors,
+                            onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
+                            onLater = { viewModel.dismissOtaDialog() },
+                            onDismiss = { viewModel.dismissOtaDialog() },
+                        )
+                        ThresholdEvaluator.Level.HardBlock -> OtaHardBlockDialog(
+                            copy = copy,
+                            colors = otaColors,
+                            bypassable = otaShow.hardBlockBypassable,
+                            onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
+                            onContinue = { viewModel.dismissOtaDialog() },
+                            onDismiss = { viewModel.dismissOtaDialog() },
+                        )
+                        ThresholdEvaluator.Level.NoUpdate,
+                        ThresholdEvaluator.Level.Invalid -> Unit // 不弹窗
+                    }
                 }
             }
         }
@@ -1529,6 +1597,33 @@ private fun SettingsScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewMode
                                     style = momoTextStyle(MomoTypography.caption),
                                 )
                             }
+                        SettingsHairline(theme)
+                        // 0.4.0 OTA：手动触发检查。展示"检查中… / 上次: X 分钟前 / 未检查"三种态。
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .clickable {
+                                    if (!state.otaCheckInProgress) vm.triggerOtaCheck()
+                                }
+                                .padding(horizontal = MomoSpacing.lg),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("检查更新", color = theme.textPrimary, style = momoTextStyle(MomoTypography.body))
+                            Spacer(Modifier.weight(1f))
+                            when {
+                                state.otaCheckInProgress ->
+                                    Text("检查中…", color = theme.textMuted, style = momoTextStyle(MomoTypography.caption))
+                                state.otaLastCheckAt > 0L ->
+                                    Text(
+                                        "上次: ${formatRelativeTime(state.otaLastCheckAt)}",
+                                        color = theme.textMuted,
+                                        style = momoTextStyle(MomoTypography.caption),
+                                    )
+                                else ->
+                                    Text("未检查", color = theme.textMuted, style = momoTextStyle(MomoTypography.caption))
+                            }
+                        }
                         SettingSwitch("消息推送", state.pushEnabled, theme, showDivider = true, onClick = vm::togglePush)
                         SettingSwitch("自动播报", state.ttsEnabled, theme, showDivider = false, onClick = vm::toggleTts)
                     }
@@ -6867,3 +6962,29 @@ private fun demoSessions() = listOf(
     Session(sessionId = "demo-2", name = "分身 Mobius #2 - 汇总今日 Issue", description = "今日新增 3 个 Issue", agentStatus = "running", lastActive = "10:25"),
     Session(sessionId = "demo-3", name = "分身 Mobius #3 - 写测试用例", description = "API 错误：timeout", agentStatus = "failed", lastActive = "10:18", jobFailed = true),
 )
+
+/**
+ * 把 epoch millis 渲染成「刚刚 / X 分钟前 / X 小时前 / YYYY-MM-DD」。
+ * 仅供设置页"上次检查时间"显示, 用 nowEpochMillis() 取当前时间, 沿用项目统一的 epoch 基准。
+ */
+private fun formatRelativeTime(epochMillis: Long): String {
+    if (epochMillis <= 0L) return ""
+    val diffMs = (nowEpochMillis() - epochMillis).coerceAtLeast(0L)
+    val diffSec = diffMs / 1000L
+    return when {
+        diffSec < 60L -> "刚刚"
+        diffSec < 3600L -> "${diffSec / 60L} 分钟前"
+        diffSec < 86_400L -> "${diffSec / 3600L} 小时前"
+        else -> {
+            val days = diffSec / 86_400L
+            if (days < 7L) "${days} 天前"
+            else {
+                // 跨周显示具体日期 (yyyy-MM-dd), 避免「5 天前」永远不衰减的尴尬
+                val date = java.util.Date(epochMillis)
+                val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                fmt.timeZone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
+                fmt.format(date)
+            }
+        }
+    }
+}

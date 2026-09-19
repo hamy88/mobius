@@ -3,9 +3,11 @@ package com.mobius.momo.viewmodel
 import com.mobius.momo.data.FilePicker
 import com.mobius.momo.data.AssistantPromptAttachment
 import com.mobius.momo.data.AssistantPresetRequiresSessionDeleteException
+import com.mobius.momo.data.OtaManifest
 import com.mobius.momo.data.DoubaoTtsEngine
 import com.mobius.momo.data.MobiusApi
 import com.mobius.momo.data.NotificationGateway
+import com.mobius.momo.data.platformAppVersion
 import com.mobius.momo.data.PickedFile
 import com.mobius.momo.data.ReentrantLock
 import com.mobius.momo.data.ServerAddressRepository
@@ -290,6 +292,13 @@ data class UiState(
     val groupTypingAgents: Map<String, List<GroupTypingAgent>> = emptyMap(),
     // 聊天列表"左滑删除"引导 banner: 首次进入显示, 关闭后持久化不再打扰.
     val chatListHintDismissed: Boolean = false,
+    // ===== OTA(0.4.0 OTA Phase 1+2 接入) =====
+    /** 启动 5s 后静默检查 / 设置页"检查更新"按钮触发的最新结果。null=未触发或已 dismiss。 */
+    val otaCheckResult: OtaCheckUseCase.OtaCheckResult? = null,
+    /** OTA 检查进行中(防重复点击, 设置页按钮文案变"检查中…")。 */
+    val otaCheckInProgress: Boolean = false,
+    /** 最近一次 OTA 检查触发时间(epoch millis), 0=从未检查。设置页显示"上次: X 分钟前"。 */
+    val otaLastCheckAt: Long = 0L,
 )
 
 data class GroupTypingAgent(val sessionId: String, val name: String)
@@ -351,6 +360,7 @@ class MomoAppViewModel(
     private var contactsSearchJob: Job? = null
     private var toastJob: Job? = null
     private var snapshotPollJob: Job? = null
+    private var otaCheckJob: Job? = null
     // 群聊"覆盖层"：key=conversationId。SSE 收到的群消息(含小莫/分身回复)兜底缓存到这里 + 落盘,
     // 回到该群 / 重连时与 onHistory 合并显示——切群、重连都不丢回复。
     private val pendingRelayMessages = mutableMapOf<String, MutableList<ConversationMessage>>()
@@ -486,6 +496,65 @@ class MomoAppViewModel(
         }
     }
 
+    // ===== OTA(0.4.0 OTA Phase 1+2 接入) =====
+
+    /** OtaCheckUseCase 懒加载：构造需 storage + 本地版本号；首次访问时实例化。
+     *  测试通过 [triggerOtaCheck] 的 manifestProvider 参数注入 fake manifest, 不需要替换 useCase。 */
+    private val otaCheckUseCase: OtaCheckUseCase by lazy {
+        OtaCheckUseCase(
+            storage = storage,
+            localVersion = platformAppVersion(),
+        )
+    }
+
+    /**
+     * 触发一次 OTA 检查。结果回写到 [UiState.otaCheckResult](含 NoUpdate / Show / Invalid / NetworkError),
+     * 设置页"上次检查时间"也会更新。已在进行中时短路(避免重复点击)。
+     *
+     * [manifestProvider] 默认 null 表示走真实网络(生产路径);仅测试用 fake 注入避免依赖外网。
+     */
+    fun triggerOtaCheck(manifestProvider: (suspend () -> com.mobius.momo.data.OtaManifest?)? = null) {
+        if (_state.value.otaCheckInProgress) return
+        otaCheckJob?.cancel()
+        _state.update { it.copy(otaCheckInProgress = true, otaLastCheckAt = nowEpochMillis()) }
+        otaCheckJob = scope.launch {
+            val result = runCatching { otaCheckUseCase.run(manifestProvider) }
+                .getOrElse { OtaCheckUseCase.OtaCheckResult.NetworkError(it.message ?: "检查失败") }
+            _state.update {
+                // Show → 让 OtaDialog 弹出来;NoUpdate / Invalid / NetworkError → 不弹窗,
+                // 仅更新 lastCheckAt, 设置页提示文案切换到「已是最新 / 无法验证 / 检查失败」。
+                it.copy(
+                    otaCheckResult = result,
+                    otaCheckInProgress = false,
+                )
+            }
+            if (result is OtaCheckUseCase.OtaCheckResult.NetworkError) {
+                showToast("检查更新失败：${result.message}")
+            }
+        }
+    }
+
+    /** 用户关闭 OTA 弹窗：清掉结果(下次 check 仍可重新弹);"稍后"按钮也走这里。 */
+    fun dismissOtaDialog() {
+        _state.update { it.copy(otaCheckResult = null) }
+    }
+
+    /** 用户在 Normal 档弹窗点"忽略此版本"：持久化到 useCase(下次同版本检查直接 NoUpdate)。 */
+    fun markOtaVersionIgnored(version: String) {
+        if (version.isBlank()) return
+        runCatching { otaCheckUseCase.markIgnored(version) }
+    }
+
+    /**
+     * 用户在 OTA 弹窗点"立即更新": 本期(D7 之前)只弹 toast 占位, 真正下载/安装留给后续阶段
+     * ([OtaDownloader] / [OtaInstaller] 已实装, 缺少统一编排入口)。
+     * TODO(D7): 拉 asset → 校验签名 → 调平台 installer → 安装完成后 dismiss + toast。
+     */
+    fun downloadAndInstallOta(manifest: OtaManifest) {
+        val version = manifest.version.ifBlank { "新版本" }
+        showToast("已开始下载 v$version（占位）")
+    }
+
     fun dispose() {
         streamJob?.cancel()
         groupStreamJob?.cancel()
@@ -493,6 +562,7 @@ class MomoAppViewModel(
         streamUiFlushJob?.cancel()
         toastJob?.cancel()
         snapshotPollJob?.cancel()
+        otaCheckJob?.cancel()
         voiceTimeoutJob?.cancel()
         voiceCommitJob?.cancel()
         stopSpeaking()
