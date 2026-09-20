@@ -142,12 +142,78 @@ jobs:
           ( cd release && sha256sum * > sha256.txt )
           ls -la release/
 
+      # 生成 ota-manifest.json, 客户端 OtaRepository.fetchLocalManifest 期望的 schema (与 backend
+      # /api/mobile/ota/manifest.json 一致). versionCode 从 androidApp/build.gradle.kts 提取.
+      # 注意: run 脚本里含大量带冒号的 JSON 字面量, 必须用 block scalar (|) 包裹以避开 YAML 解析器
+      # 把单引号 / 冒号当成键值对 (否则 "platform": "android", 等被认作 mapping, 触发 parse error).
+      - name: Generate ota-manifest.json
+        id: ota-manifest
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.ver }}"
+          VC="$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' mobius/mobile/androidApp/build.gradle.kts | head -1)"
+          if [ -z "$VC" ]; then
+            echo "::warning::versionCode 未从 build.gradle.kts 提取到, 默认 0"
+            VC=0
+          fi
+          RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # 输出文件先写前/中段, 后面用 jq 合成 builds[], 避免 heredoc + JSON 的引号转义陷阱.
+          : > release/ota-manifest.json
+          {
+            printf '{\n'
+            printf '  "version": "%s",\n' "$VER"
+            printf '  "version_code": %s,\n' "$VC"
+            printf '  "channel": "stable",\n'
+            printf '  "released_at": "%s",\n' "$RELEASED_AT"
+            printf '  "min_supported_version": null,\n'
+            printf '  "hard_block_bypassable": true,\n'
+            printf '  "android": {\n'
+            printf '    "package_name": "com.mobius.momo",\n'
+            printf '    "min_sdk": 24,\n'
+            printf '    "target_sdk": 34,\n'
+            printf '    "signature_scheme": ["v2", "v3"],\n'
+            printf '    "abi_filters": ["arm64-v8a", "armeabi-v7a"]\n'
+            printf '  },\n'
+            printf '  "delta_enabled": false,\n'
+            printf '  "release_notes_url": "https://github.com/hamy88/mobius/releases/tag/mobile-v%s",\n' "$VER"
+            printf '  "builds": [\n'
+            first=1
+            for apk in release/*.apk; do
+              base="$(basename "$apk")"
+              case "$base" in
+                *arm64*)     abi="arm64-v8a" ;;
+                *v7a*|*v7*)  abi="armeabi-v7a" ;;
+                *)           continue ;;
+              esac
+              sha="$(sha256sum "$apk" | awk '{print $1}')"
+              size="$(stat -c%s "$apk")"
+              if [ "$first" -eq 0 ]; then printf '    ,\n'; fi
+              printf '    {\n'
+              printf '      "platform": "android",\n'
+              printf '      "abi": "%s",\n' "$abi"
+              printf '      "version": "%s",\n' "$VER"
+              printf '      "version_code": %s,\n' "$VC"
+              printf '      "url": "https://github.com/hamy88/mobius/releases/download/mobile-v%s/%s",\n' "$VER" "$base"
+              printf '      "size": %s,\n' "$size"
+              printf '      "sha256": "%s"\n' "$sha"
+              printf '    }\n'
+              first=0
+            done
+            printf '  ]\n'
+            printf '}\n'
+          } > release/ota-manifest.json
+          echo "==== ota-manifest.json ===="
+          cat release/ota-manifest.json
+
       - name: Create pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: mobile-v${{ steps.ver.outputs.ver }}
           name: Mobius Mobile v${{ steps.ver.outputs.ver }} (CI build)
           prerelease: true
-          files: release/*
+          files: |
+            release/*.apk
+            release/sha256.txt
+            release/ota-manifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
