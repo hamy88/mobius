@@ -250,7 +250,7 @@ function DiskIndicator() {
   )
 }
 
-function MemoryIndicator() {
+function MemoryIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT }: { visibleThresholdPercent?: number } = {}) {
   const [mem, setMem] = useState<MemInfo | null>(null)
 
   useEffect(() => {
@@ -263,7 +263,8 @@ function MemoryIndicator() {
   }, [])
 
   const pct = mem?.usedPercent
-  if (pct == null || pct < RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT) return null
+  // visibleThresholdPercent=0 → 常规模式常显 (用户要求可见); 默认 70 → 低占用隐藏降噪
+  if (pct == null || pct < visibleThresholdPercent) return null
 
   const danger = pct != null && pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
   const color = danger ? '#ef4444' : 'var(--text-muted)'
@@ -1245,7 +1246,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
             <div data-tour="top-system-status" className="mobius-topnav-status flex shrink-0 items-center gap-2">
               {/* 存储使用: 极简态保留 (磁盘告警对所有人都重要); 内存/版本仅专家态。 */}
               <DiskIndicator />
-              {!easyUI && <MemoryIndicator />}
+              {!easyUI && <MemoryIndicator visibleThresholdPercent={0} />}
               {!easyUI && <VersionIndicator />}
             </div>
           )}
