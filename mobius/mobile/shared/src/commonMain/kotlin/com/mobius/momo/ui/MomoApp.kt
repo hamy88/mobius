@@ -819,6 +819,32 @@ private fun ProfileScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewModel
                 }
             }
             item {
+                // 通用设置入口(挪自页面底部, 紧跟在统计三格之后, 分身列表之前)。
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = MomoSpacing.lg, vertical = MomoSpacing.sm)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(theme.bgSecondary)
+                        .clickable { vm.navigate(AppScreen.Settings) }
+                        .padding(horizontal = MomoSpacing.md, vertical = MomoSpacing.md),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(theme.accentPrimary.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("设", color = theme.accentPrimary, style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)))
+                    }
+                    Spacer(Modifier.width(MomoSpacing.md))
+                    Text("通用设置", color = theme.textPrimary, style = momoTextStyle(MomoTypography.body), modifier = Modifier.weight(1f))
+                    Text("›", color = theme.textMuted, style = momoTextStyle(MomoTypography.body))
+                }
+            }
+            item {
                 Text(
                     "我的小莫 / 分身",
                     color = theme.textMuted,
@@ -868,42 +894,6 @@ private fun ProfileScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewModel
                     }
                 }
             }
-            item {
-                Text(
-                    "设置",
-                    color = theme.textMuted,
-                    style = momoTextStyle(MomoTypography.sectionHeader),
-                    modifier = Modifier.padding(start = MomoSpacing.lg, top = MomoSpacing.xl, bottom = MomoSpacing.sm),
-                )
-            }
-            item {
-                // 方案A: 设置行卡片 + 彩色图标底 + 主题外观值。
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = MomoSpacing.lg)
-                        .height(58.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(theme.bgSecondary)
-                        .clickable { vm.navigate(AppScreen.Settings) }
-                        .padding(horizontal = MomoSpacing.md),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier
-                            .size(30.dp)
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(theme.accentPrimary.copy(alpha = 0.12f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("设", color = theme.accentPrimary, style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.SemiBold)))
-                    }
-                    Spacer(Modifier.width(MomoSpacing.md))
-                    Text("通用设置", color = theme.textPrimary, style = momoTextStyle(MomoTypography.body), modifier = Modifier.weight(1f))
-                    Text("›", color = theme.textMuted, style = momoTextStyle(MomoTypography.body))
-                }
-            }
-            item { Spacer(Modifier.height(MomoSpacing.xxxl)) }
         }
         }
     }
