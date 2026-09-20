@@ -141,6 +141,7 @@ const RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT = 70
 const VERSION_UPTIME_VISIBLE_MAX_MS = 2 * 60 * 60 * 1000
 
 type MemInfo = { usedPercent: number; usedMb: number; totalMb: number }
+type CpuInfo = { usedPercent: number; cores: number; loadavg1: number }
 type DiskInfo = {
   usedPercent: number
   usedGb: number
@@ -242,6 +243,43 @@ function DiskIndicator() {
           d="M5.25 4.5h13.5l1.5 8.25v4.5a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25v-4.5L5.25 4.5zM3.75 14.25h16.5" />
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
           d="M7.5 17.25h.01M10.5 17.25h.01" />
+      </svg>
+      <span className="text-[12px] tabular-nums font-medium">
+        {pct != null ? `${pct}%` : '--'}
+      </span>
+    </TopNavActionElement>
+  )
+}
+
+function CpuIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT }: { visibleThresholdPercent?: number } = {}) {
+  const [cpu, setCpu] = useState<CpuInfo | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const stop = pollRecursive(async (signal) => {
+      const d = await api('/api/health/cpu', { signal })
+      if (alive) setCpu(d)
+    }, 60 * 1000)
+    return () => { alive = false; stop() }
+  }, [])
+
+  const pct = cpu?.usedPercent
+  // 常规模式传 0 常显; 默认 70 → 低占用隐藏降噪 (与内存一致)
+  if (pct == null || pct < visibleThresholdPercent) return null
+
+  const danger = pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
+  const color = danger ? '#ef4444' : 'var(--text-muted)'
+
+  return (
+    <TopNavActionElement
+      as="div"
+      interactive={false}
+      className="select-none"
+      title={cpu ? `服务器 CPU 占用 ${pct}%（${cpu.cores} 核 · load ${cpu.loadavg1}）` : '服务器 CPU 占用'}
+      style={{ color }}>
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+          d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
       </svg>
       <span className="text-[12px] tabular-nums font-medium">
         {pct != null ? `${pct}%` : '--'}
@@ -1246,6 +1284,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
             <div data-tour="top-system-status" className="mobius-topnav-status flex shrink-0 items-center gap-2">
               {/* 存储使用: 极简态保留 (磁盘告警对所有人都重要); 内存/版本仅专家态。 */}
               <DiskIndicator />
+              {!easyUI && <CpuIndicator visibleThresholdPercent={0} />}
               {!easyUI && <MemoryIndicator visibleThresholdPercent={0} />}
               {!easyUI && <VersionIndicator />}
             </div>
