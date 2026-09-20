@@ -14,4 +14,7 @@ private class NoOpOtaRepository : OtaRepository {
 
     override suspend fun fetchManifestJson(repo: String, version: String): OtaManifest =
         error("iOS OTA 未启用（v1.1 Android only）")
+
+    override suspend fun fetchLocalManifest(baseUrl: String): OtaManifest? =
+        error("iOS OTA 未启用（v1.1 Android only）")
 }

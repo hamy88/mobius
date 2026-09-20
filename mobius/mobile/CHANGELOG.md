@@ -3,6 +3,32 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.2] - 2026-09-20
+
+### 修复
+- **OTA 数据链路断裂**（Issue e5a536be / 分身 #72）：0.4.1 客户端虽然接入了 `OtaRepository`，但两个根因导致 OTA 实际上从未生效：
+  - `fetchLatestRelease(repo)` 调 `https://api.github.com/repos/{repo}/releases/latest`，但 fork 仓库（`hamy88/mobius`）所有 release 都是 `prerelease: true`，GitHub `/releases/latest` 端点对纯 prerelease 仓库返回 **404**。`releases/latest` 端点只匹配 stable release。
+  - 即使修了端点，OTA 还需要从 release 拿 `ota-manifest.json` asset，但 GitHub release 上从未上传过该 asset、body 也是空的。
+
+  本次接入：
+  - `OtaRepository.{android,desktop}.kt` 把端点从 `/releases/latest` 改成 `/releases?per_page=10`，解析 JSON **数组**形式：过滤 `draft=false`，按 `published_at` 倒序取第一条（自然允许 prerelease）；统一抽出 commonMain 顶层 `parseLatestNonDraftRelease()` 函数，三平台共享解析逻辑。
+  - CI `build-android.yml` 新增 "Generate ota-manifest.json" step，从 `androidApp/build.gradle.kts` 读 `versionCode`，为每个 ABI APK 算 sha256 + size，生成 `ota-manifest.json` 并作为 release asset 一同上传到 GitHub。
+  - 客户端 `OtaRepository.fetchManifestJson(repo, version)` 已支持拉取 raw.githubusercontent 上的 `ota-manifest.json`。
+
+### 新增
+- **本服务器 OTA 渠道**（双源 OTA，本服务器优先 + GitHub 兜底）：fork / CI 自部署场景下，客户端可以从用户当前登录的 Mobius 服务器直接拉取 OTA manifest，比走 GitHub Releases 更可控、零外网依赖。
+  - 新增 `/api/mobile/ota/manifest.json`（GET）后端 endpoint：读 `mobius/mobile-builds/manifest.json`（sync-desktop-builds.js 维护的本地 APK 清单），按 `version` 字段取最新一组 android builds，按 ABI 标准名映射（arm64→arm64-v8a、v7a→armeabi-v7a），返回 OtaManifest schema。CORS `*` + `Cache-Control: no-cache`，保证即时拿到最新版本。
+  - `OtaRepository` 接口新增 `suspend fun fetchLocalManifest(baseUrl): OtaManifest?`（三平台实现：android / desktop 用 Ktor，ios 仍 NoOp）。本服务器任意 HTTP 错误 / 解析失败 → 返回 `null` 不抛错，让上层自动 fallback 到 GitHub。
+  - `OtaCheckUseCase` 构造时新增 `localBaseUrl: String` 参数，运行时 `fetchManifestDualChannel()` 流程：先 `repo.fetchLocalManifest(localBaseUrl)` → 失败/无新版本 → `repo.fetchLatestRelease(DEFAULT_OTA_REPO)` → 都失败 → `NetworkError`。
+  - `MomoAppViewModel` 把当前 `currentBaseUrl` 注入 useCase；切服时调 `refreshOtaUseCase()` 丢弃旧实例，下一次 trigger 按新地址重建（避免 OTA 仍命中旧服务器地址）。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=25→26` / `versionName="0.4.1"→"0.4.2"`。
+
+### 测试
+- `OtaRepositoryHttpTest.kt`：覆盖 `/releases?per_page=10` 数组端点（draft 过滤、prerelease 通过、解析 changelog）。
+- 新增 `OtaRepositoryLocalServerTest.kt`：覆盖 `fetchLocalManifest` 200 / 404 / 500 / 非法 JSON / 空 baseUrl 等；断言 baseUrl 尾斜杠被自动 trim；OtaCheckUseCase 双渠道逻辑（localBaseUrl 空跳过本服务器）。
+
 ## [0.4.1] - 2026-09-19
 
 ### 修复

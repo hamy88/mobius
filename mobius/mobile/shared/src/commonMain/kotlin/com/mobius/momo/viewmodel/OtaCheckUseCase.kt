@@ -18,11 +18,22 @@ import kotlinx.coroutines.withContext
  * - 静默期持久化到 SecureStorage（§10.5.4 跨冷启动不被 task killer 重置）。
  *
  * 本类不联 GitHub API（D6/D7 才接）；当前仅消费 [OtaManifest] 输入，便于先于网络调通 UX 与档位判定。
+ *
+ * ## 升级渠道优先级（v0.4.2 起）
+ *
+ * 1. **本服务器优先** —— 客户端用当前登录用户的 `serverBaseUrl` 拼
+ *    `{baseUrl}/api/mobile/ota/manifest.json`。本服务器失败/无新版本 → 进入下一渠道。
+ * 2. **GitHub Releases 兜底** —— `https://api.github.com/repos/{DEFAULT_OTA_REPO}/releases?per_page=10`，
+ *    过滤 `draft=false`，按 `published_at` 取最新一条。
+ * 3. **都失败** → 返回 [OtaCheckResult.NetworkError]，UI 不弹窗。
+ *
+ * 空 `localBaseUrl`（用户尚未配置服务器）→ 直接跳过本服务器 channel，走 GitHub。
  */
 class OtaCheckUseCase(
     private val storage: SecureStorage,
     private val repo: OtaRepository = createOtaRepository(),
     private val repoName: String = com.mobius.momo.data.DEFAULT_OTA_REPO,
+    private val localBaseUrl: String = "",
     private val localVersion: String,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val now: () -> Long = { nowEpochMillis() },
@@ -54,17 +65,16 @@ class OtaCheckUseCase(
     }
 
     /**
-     * 入口：拉 release → 解析 manifest → 比对版本 → 判定档位 → 返回 UX 层需要的最小信息。
+     * 入口：先本服务器后 GitHub 双渠道拉 manifest → 比对版本 → 判定档位 → 返回 UX 层需要的最小信息。
      *
      * 真实网络联调在 D6，本期 mock：[manifestProvider] 由 desktopTest 注入；默认 null 表示联 GitHub。
+     *
+     * [manifestProvider] 仍优先于网络（用于单元测试注入 fake manifest，不依赖外网）。
      */
     suspend fun run(manifestProvider: (suspend () -> OtaManifest?)? = null): OtaCheckResult =
         withContext(dispatcher) {
             val manifest = manifestProvider?.invoke()
-                ?: runCatching {
-                    val release = repo.fetchLatestRelease(repoName)
-                    release.manifest ?: return@runCatching null
-                }.getOrNull()
+                ?: fetchManifestDualChannel()
                 ?: return@withContext OtaCheckResult.NetworkError("manifest unavailable")
 
             // §5.5 强校验字段
@@ -100,6 +110,25 @@ class OtaCheckUseCase(
                 )
             }
         }
+
+    /**
+     * 双渠道拉取：先本服务器 (`serverBaseUrl`) 后 GitHub Releases (`DEFAULT_OTA_REPO`)。
+     *
+     * 返回首个解析成功的 [OtaManifest]；都失败返回 null（让上层映射为 [OtaCheckResult.NetworkError]）。
+     * 本服务器 channel 任何抛错由 [OtaRepository.fetchLocalManifest] 内部吞掉 → 返回 null → 自动 fallback。
+     */
+    private suspend fun fetchManifestDualChannel(): OtaManifest? {
+        if (localBaseUrl.isNotBlank()) {
+            val local = runCatching { repo.fetchLocalManifest(localBaseUrl) }.getOrNull()
+            if (local != null && local.version.isNotBlank() && local.versionCode > 0) {
+                return local
+            }
+        }
+        return runCatching {
+            val release = repo.fetchLatestRelease(repoName)
+            release.manifest
+        }.getOrNull()
+    }
 
     /** 用户点 [稍后]：刷新静默期到期时间戳。 */
     fun markDismissed(level: ThresholdEvaluator.Level) {

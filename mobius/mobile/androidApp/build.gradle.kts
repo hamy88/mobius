@@ -62,8 +62,8 @@ android {
         // 0.3.1: 登录界面 + 设置页"连接"区 SwipeToDismissBox 卡片列表 → ExposedDropdownMenuBox 下拉(UI 重构, ViewModel/Repository 不变)。
         // 0.4.0: OTA 客户端 Phase 1+2(D1-D8 数据模型/解析/校验 + D6 网络接入 + D7 CHANGELOG 渲染 +
         //       签名 scheme 跳级校验)。启动 5s 后静默检查, 4 档阈值(normal/minor/major/critical)。
-        versionCode = 25
-        versionName = "0.4.1"
+        versionCode = 26
+        versionName = "0.4.2"
         // 极光推送 AppKey / 渠道：JPush SDK 经 AndroidManifest meta-data(JPUSH_APPKEY) 读取。
         // 从 gradle.properties(或环境变量)读取；默认空串——未配置时 JPush 不注册，App 仍可正常构建运行。
         val jpushAppKey = providers.gradleProperty("MOMO_JPUSH_APPKEY")

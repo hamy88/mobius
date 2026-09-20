@@ -498,13 +498,30 @@ class MomoAppViewModel(
 
     // ===== OTA(0.4.0 OTA Phase 1+2 接入) =====
 
-    /** OtaCheckUseCase 懒加载：构造需 storage + 本地版本号；首次访问时实例化。
-     *  测试通过 [triggerOtaCheck] 的 manifestProvider 参数注入 fake manifest, 不需要替换 useCase。 */
-    private val otaCheckUseCase: OtaCheckUseCase by lazy {
-        OtaCheckUseCase(
+    /**
+     * 缓存 [OtaCheckUseCase] 实例（lazy 初始化）。
+     *
+     *  v0.4.2 起构造时把当前登录用户的 [currentBaseUrl] 作为 localBaseUrl 注入；
+     * 切服后调用 [refreshOtaUseCase] 丢弃旧实例, 下次访问按新地址重建。
+     *
+     *  未登录 / 未配置 → currentBaseUrl 已是 buildBaseUrl 默认值, useCase 仍按真实地址探测
+     *  本服务器 channel; 若 server 未启 OTA manifest endpoint, fetchLocalManifest 返回 null 自动 fallback 到 GitHub.
+     */
+    private var otaCheckUseCase: OtaCheckUseCase? = null
+
+    private fun getOtaCheckUseCase(): OtaCheckUseCase {
+        otaCheckUseCase?.let { return it }
+        return OtaCheckUseCase(
             storage = storage,
+            localBaseUrl = currentBaseUrl,
             localVersion = platformAppVersion(),
-        )
+        ).also { otaCheckUseCase = it }
+    }
+
+    /** 服务器地址变更后丢弃旧 useCase 实例, 下次 [getOtaCheckUseCase] 按新 currentBaseUrl 重建。
+     *  由 [applyServerBaseUrlInput] 在切服分支里调用. */
+    private fun refreshOtaUseCase() {
+        otaCheckUseCase = null
     }
 
     /**
@@ -518,7 +535,7 @@ class MomoAppViewModel(
         otaCheckJob?.cancel()
         _state.update { it.copy(otaCheckInProgress = true, otaLastCheckAt = nowEpochMillis()) }
         otaCheckJob = scope.launch {
-            val result = runCatching { otaCheckUseCase.run(manifestProvider) }
+            val result = runCatching { getOtaCheckUseCase().run(manifestProvider) }
                 .getOrElse { OtaCheckUseCase.OtaCheckResult.NetworkError(it.message ?: "检查失败") }
             _state.update {
                 // Show → 让 OtaDialog 弹出来;NoUpdate / Invalid / NetworkError → 不弹窗,
@@ -542,7 +559,7 @@ class MomoAppViewModel(
     /** 用户在 Normal 档弹窗点"忽略此版本"：持久化到 useCase(下次同版本检查直接 NoUpdate)。 */
     fun markOtaVersionIgnored(version: String) {
         if (version.isBlank()) return
-        runCatching { otaCheckUseCase.markIgnored(version) }
+        runCatching { getOtaCheckUseCase().markIgnored(version) }
     }
 
     /**
@@ -626,6 +643,9 @@ class MomoAppViewModel(
             storage.clear()
             storage.savePreference(SERVER_BASE_URL_PREFERENCE, normalized)
             clearStreamState()
+            // 服务器地址变更 → 丢弃旧 OTA useCase, 下次 trigger 按新 currentBaseUrl 重建
+            // (OtaCheckUseCase 构造时注入 localBaseUrl, 旧实例持有旧地址会一直命中旧服务器).
+            refreshOtaUseCase()
         }
         _state.update {
             it.copy(
