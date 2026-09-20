@@ -3,6 +3,7 @@ package com.mobius.momo.viewmodel
 import com.mobius.momo.data.FilePicker
 import com.mobius.momo.data.AssistantPromptAttachment
 import com.mobius.momo.data.AssistantPresetRequiresSessionDeleteException
+import com.mobius.momo.data.ChangelogItem
 import com.mobius.momo.data.OtaManifest
 import com.mobius.momo.data.DoubaoTtsEngine
 import com.mobius.momo.data.MobiusApi
@@ -299,6 +300,8 @@ data class UiState(
     val otaCheckInProgress: Boolean = false,
     /** 最近一次 OTA 检查触发时间(epoch millis), 0=从未检查。设置页显示"上次: X 分钟前"。 */
     val otaLastCheckAt: Long = 0L,
+    /** 0.4.3: 弹窗点"查看完整更新说明"时打开的全屏 modal 内容(完整 changelog_items)。null=关闭。 */
+    val otaChangelogSheet: List<ChangelogItem>? = null,
 )
 
 data class GroupTypingAgent(val sessionId: String, val name: String)
@@ -545,8 +548,12 @@ class MomoAppViewModel(
                     otaCheckInProgress = false,
                 )
             }
-            if (result is OtaCheckUseCase.OtaCheckResult.NetworkError) {
-                showToast("检查更新失败：${result.message}")
+            // 手动触发(设置页"检查更新")给瞬时反馈;启动 5s 后静默检查路径不调这里, 不打扰用户。
+            when (result) {
+                is OtaCheckUseCase.OtaCheckResult.NoUpdate -> showToast("已是最新版本")
+                is OtaCheckUseCase.OtaCheckResult.Invalid -> showToast("版本信息无效，请稍后重试")
+                is OtaCheckUseCase.OtaCheckResult.NetworkError -> showToast("检查更新失败：${result.message}")
+                is OtaCheckUseCase.OtaCheckResult.Show -> Unit
             }
         }
     }
@@ -560,6 +567,19 @@ class MomoAppViewModel(
     fun markOtaVersionIgnored(version: String) {
         if (version.isBlank()) return
         runCatching { getOtaCheckUseCase().markIgnored(version) }
+    }
+
+    /**
+     * 0.4.3: 在 OTA 弹窗点"查看完整更新说明"时调用,把完整 changelog 条目塞进 [UiState.otaChangelogSheet],
+     * UI 层用此状态渲染全屏 modal。关闭 modal 由 [dismissOtaChangelog] 清空。
+     */
+    fun showOtaChangelog(items: List<ChangelogItem>) {
+        _state.update { it.copy(otaChangelogSheet = items) }
+    }
+
+    /** 0.4.3: 关闭"完整更新说明"全屏 modal。 */
+    fun dismissOtaChangelog() {
+        _state.update { it.copy(otaChangelogSheet = null) }
     }
 
     /**

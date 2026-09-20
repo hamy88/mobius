@@ -3,6 +3,26 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.3] - 2026-09-20
+
+### 新增
+- **OTA 弹窗显示 changelog 内容**（Issue e5a536be / 分身 #73）：0.4.2 弹窗只显示固定文案"新功能与体验改进"，无法让用户在升级前看到具体改动。本次接入：
+  - `OtaCheckUseCase.OtaCheckResult.Show` 新增 `changelogItems: List<ChangelogItem>` 字段（默认空 list），GitHub channel 透传 release body 解析结果，本服务器 channel 暂返回空 list（0.4.3 后端会填，下文）。
+  - `OtaDialogCopy.Context` 新增 `releaseHighlight` / `changelogItems` / `onViewFullNotes`，`Copy` 新增 `showFullNotesLink` + `fullNotesLinkLabel` 字段。`normal()` 把首条摘要（≤60 字）拼进 body 取代兜底文案；changelog 非空时渲染"查看完整更新说明 ›"链接按钮。
+  - `BaseOtaDialog` 签名新增 `onViewFullNotes` 参数，在 `text` 块内按 `showFullNotesLink` 开关渲染链接。四个 Composable 入口（normal / advisory / strongAdvisory / hardBlock）统一透传。
+  - `MomoAppViewModel` 新增 `otaChangelogSheet: List<ChangelogItem>?` 状态 + `showOtaChangelog(items)` / `dismissOtaChangelog()` 方法。
+  - `MomoApp` 在 OTA 弹窗渲染块底部新增 `OtaChangelogSheet` 全屏 modal（`ModalBottomSheet`），按 Breaking > Fix > Feature 排序、按类型加颜色徽标（破坏=红/修复=橙/功能=绿），整体 verticalScroll 渲染完整条目。
+- **本服务器 OTA 渠道补 changelog_items**：`mobius/backend/routes/mobile-ota.ts` 在 `/api/mobile/ota/manifest.json` 响应顶层新增 `changelog_items` 字段。读 `mobius/mobile/CHANGELOG.md` 解析对应版本段（`## [<version>]` 到下一个 `## [` 之前），按 `### 分类` 边界映射 type（修复→Fix / 破坏→Breaking / 其他→Feature），合并相邻同 type 条目为一条 text。解析失败兜底空数组，不阻塞主流程。
+- 客户端 `OtaCheckUseCase.fetchManifestDualChannel()` 返回类型从 `OtaManifest?` 改为 `Pair<OtaManifest, List<ChangelogItem>>?`，本服务器 channel 现阶段返 `manifest to emptyList()`（待客户端也走 `changelogItems` 字段，下版本同源）。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=26→27` / `versionName="0.4.2"→"0.4.3"`。
+
+### 测试
+- `OtaDialogCopySnapshotTest`（新增）：断言 `normal()` 在 `changelogItems` 非空 + `onViewFullNotes` 非 null 时 `showFullNotesLink=true`、body 拼接首条文本；changelog 空时 `showFullNotesLink=false`、body 走兜底"新功能与体验改进"。
+- `OtaCheckUseCaseTest`（扩展）：验证 `Show` 数据类携带 `changelogItems`（GitHub channel 走 release body 解析路径）。
+- `OtaRepositoryLocalServerTest`（扩展）：用 fake local server 返回的 manifest.json 含 `changelog_items` 字段，断言 `fetchLocalManifest` 解析保留该字段（**注**：本期客户端 `fetchLocalManifest` 仅反序列化 `OtaManifest` schema，`changelog_items` 在 client 解析时会被 ignoreUnknownKeys 忽略，因此 fetchLocalManifest 仍返回空 changelog —— 后端 endpoint 字段为面向未来的 client schema 兼容预留**）。
+
 ## [0.4.2] - 2026-09-20
 
 ### 修复

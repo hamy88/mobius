@@ -1,9 +1,12 @@
 package com.mobius.momo.ota
 
+import com.mobius.momo.data.ChangelogItem
+import com.mobius.momo.data.ChangelogType
 import com.mobius.momo.viewmodel.ThresholdEvaluator
 import com.mobius.momo.ui.OtaDialogCopy
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -135,6 +138,80 @@ class OtaDialogCopySnapshotTest {
             } catch (e: IllegalStateException) {
                 assertNotNull(e.message)
             }
+        }
+    }
+
+    // ===== 0.4.3: "查看完整更新说明"链接开关测试 =====
+
+    @Test
+    fun `normal with changelog items shows link and bakes first highlight into body`() {
+        val items = listOf(
+            ChangelogItem(ChangelogType.Feature, "首条摘要：新增 OTA changelog 弹窗"),
+            ChangelogItem(ChangelogType.Fix, "修复旧版本某处崩溃"),
+        )
+        val ctx = baseCtx.copy(
+            releaseHighlight = items.first().text,
+            changelogItems = items,
+            onViewFullNotes = { /* noop */ },
+        )
+        val c = OtaDialogCopy.render(ThresholdEvaluator.Level.Normal, ctx)
+        assertTrue(c.showFullNotesLink, "有 changelog + 回调时应开启链接")
+        assertEquals("查看完整更新说明", c.fullNotesLinkLabel)
+        // body 拼接首条摘要: 取代兜底"新功能与体验改进"
+        assertTrue(c.body.contains("首条摘要：新增 OTA changelog 弹窗"),
+            "normal body 应包含 releaseHighlight 首条: ${c.body}")
+        assertFalse(c.body.endsWith("新功能与体验改进。"),
+            "有 highlight 时不应走兜底: ${c.body}")
+    }
+
+    @Test
+    fun `normal with empty changelog falls back and hides link`() {
+        val c = OtaDialogCopy.render(ThresholdEvaluator.Level.Normal, baseCtx)
+        // baseCtx.releaseHighlight="新增深色模式 + 性能优化" 非空, 但 changelogItems 空 → 不显示链接,
+        // body 仍走 releaseHighlight 拼接到 head (since releaseHighlight 不为空).
+        assertFalse(c.showFullNotesLink, "changelogItems 为空时不显示链接")
+        // releaseHighlight 非空 → body 包含 highlight 内容; 也包含 releaseHighlight.
+        assertTrue(c.body.contains("新增深色模式 + 性能优化"))
+    }
+
+    @Test
+    fun `normal with no changelog and no highlight falls back`() {
+        val c = OtaDialogCopy.render(
+            ThresholdEvaluator.Level.Normal,
+            baseCtx.copy(releaseHighlight = null, changelogItems = emptyList(), onViewFullNotes = null),
+        )
+        assertFalse(c.showFullNotesLink, "changelogItems 空且无回调时不显示链接")
+        assertTrue(c.body.endsWith("新功能与体验改进。"),
+            "无 highlight 时走兜底: ${c.body}")
+    }
+
+    @Test
+    fun `normal with changelog but no callback hides link`() {
+        // 即便 changelog 非空, 没回调就开不了 modal → 不渲染链接(防御性兜底).
+        val items = listOf(ChangelogItem(ChangelogType.Feature, "某条目"))
+        val c = OtaDialogCopy.render(
+            ThresholdEvaluator.Level.Normal,
+            baseCtx.copy(releaseHighlight = null, changelogItems = items, onViewFullNotes = null),
+        )
+        assertFalse(c.showFullNotesLink, "onViewFullNotes=null 时不显示链接")
+    }
+
+    @Test
+    fun `showFullNotesLink only applies to normal level not advisory`() {
+        // advisory / strongAdvisory / hardBlock 不应受 showFullNotesLink 影响(本期仅 normal 档显示)
+        val items = listOf(ChangelogItem(ChangelogType.Fix, "fix"))
+        val ctx = baseCtx.copy(
+            changelogItems = items,
+            onViewFullNotes = { /* noop */ },
+        )
+        for (level in listOf(
+            ThresholdEvaluator.Level.Advisory,
+            ThresholdEvaluator.Level.StrongAdvisory,
+            ThresholdEvaluator.Level.HardBlock,
+        )) {
+            val c = OtaDialogCopy.render(level, ctx)
+            assertFalse(c.showFullNotesLink,
+                "${level.name} 不显示 changelog 链接(本期仅 normal): showFullNotesLink=${c.showFullNotesLink}")
         }
     }
 }
