@@ -3,6 +3,32 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.4] - 2026-09-20
+
+### 新增
+- **OTA 下载全程进度 + 失败重试 + 后台通知**（Issue e5a536be / 分身 #78）：0.4.3 的 `downloadAndInstallOta()` 是个 toast 占位,`OtaDownloader` / `OtaInstaller` 写完了但 `ViewModel` / `UiState` / `Composable` 三层 0 订阅,实际下载 / 安装链路从未打通。本次接通：
+  - **平台层 expect/actual 框架**：`OtaDownloader` / `OtaInstaller` 提到 `commonMain` 顶层(`shared/src/commonMain/kotlin/com/mobius/momo/platform/ota/`)。`OtaDownloader` 暴露 `lastProgress: StateFlow<Map<Long, OtaDownloadProgress>>` / `completionEvents: SharedFlow<OtaCompletionEvent>` / `enqueue(asset)` / `cancel(id)` / `queryProgress(id)` / `localUri(id)` / `openDownloadId()` / `requestPostNotificationsIfNeeded()`；`OtaInstaller` 暴露 `install(apkPath, expectedPackageName, onResult)`。Android 走系统 `DownloadManager` + `PackageInstaller`(原逻辑完整保留); iOS / desktop 占位实现保证跨平台编译通过(返回 no-op + 失败回调,不下载 / 不安装)。新增 `expect fun currentDeviceAbi(): String`(Android 读 `Build.SUPPORTED_ABIS[0]`,其它平台返回空串)。
+  - **VM 层编排**：`UiState.otaDownload: OtaDownloadUi?`(null = 没在下载)记录 `version` / `assetSize` / `bytesDownloaded` / `fraction` / `phase`(Queued / Downloading / Verifying / Installing / Done / Failed) / `errorMessage` / `manifest`(供"重试"复用)。`init` 订阅 `otaDownloader.lastProgress` 与 `otaDownloader.completionEvents` 两个 flow,把 system 事件翻译进 `otaDownload` state;`downloadAndInstallOta(manifest)` 走"选 ABI → 拼 OtaAsset → enqueue → 关闭 4 档弹窗 → OtaDownloadDialog 接管"完整路径;新增 `retryOtaDownload()` / `dismissOtaDownloadUi()` / `cancelOtaDownload()` 三个用户动作;`install` 完成后 phase=Done 持续 3s 自动清空。
+  - **UI 层 OtaDownloadDialog**：`shared/src/commonMain/kotlin/com/mobius/momo/ui/OtaDialog.kt` 末尾新增 `OtaDownloadDialog` Composable,直接用 `AlertDialog`(不走 BaseOtaDialog 以支持 LinearProgressIndicator slot)。标题 `正在下载 vX.Y` / `下载失败 vX.Y`,正文显示阶段标签(`准备下载…` / `下载中…` / `校验中…` / `安装中…` / `已提交安装` / `下载失败`)+ 进度条(Material3 `LinearProgressIndicator`)+ `X.X MB / Y.Y MB (NN%)`。按钮按 phase 分支:Queued/Downloading → "后台下载"(关弹窗但下载继续)+ "取消下载";Verifying/Installing → 仅"取消下载";Failed → "重试"+"关闭";Done → "关闭"。
+  - **设置页下载中状态行**:`SettingsScreen` "检查更新"行下方在 `otaDownload != null && phase != Done` 时多一行小字展示 `v{ver} 下载中 NN%`,提供"点后台下载"后用户仍能在设置页感知进度的入口。
+  - **后台通知 + ABIs 选择**:`OtaDownloader` 通知文案 `Mobius v{abi} 正在下载`(替代原来的固定标题),`setNotificationVisibility(VISIBILITY_VISIBLE_NOTIFY_COMPLETED)` 系统在下载完成后自动切到"下载完成"通知;`OtaAbiSelector.pick()` 拆到 commonMain 顶层,纯函数逻辑方便 desktopTest 单测。
+
+### 修复
+- `downloadAndInstallOta` 占位 toast bug(D7 之前的占位): 现在真正入队下载并把进度反映到 UI,失败时给"重试"按钮。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=27→28` / `versionName="0.4.3"→"0.4.4"`。
+- `OtaDownloader` / `OtaInstaller` 文件位置从 `shared/src/androidMain/...` 移到 `shared/src/commonMain/...`(平台无关 API)+ `shared/src/{android,ios,desktop}Main/...`(平台实现)。Android 端所有 DownloadManager / PackageInstaller 逻辑(SDK ≥ 34 走 PackageInstaller.Session API、≤ 13 走 ACTION_INSTALL_PACKAGE 兼容回退、`REQUEST_INSTALL_PACKAGES` 预检、`FileProvider` 兜底、ACTION_INSTALL_COMMIT PendingIntent、SHA256 校验预留调用点)完整保留。
+
+### 保留
+- 0.4.3 OTA 弹窗显示 changelog(Normal 档首条摘要 + "查看完整更新说明"全屏 modal)。
+- 0.4.2 OTA 数据链路修复(本服务器 channel + GitHub 兜底 + 端点 /releases?per_page=10)。
+- 0.4.1 OTA 客户端代码接入主流程(`triggerOtaCheck` / `dismissOtaDialog` / `markOtaVersionIgnored` 等)。
+
+### 已知限制
+- iOS / desktop 仍为占位(`OtaDownloader` 返回 -1L;`OtaInstaller` 立即回调 `Failure(CODE_UNSUPPORTED)`);下载 / 安装只在 Android 真机生效。
+- "后台下载" / "取消下载"按钮与系统通知之间的 deepLink 跳转(点击通知回到 MomoApp 内 OTA 弹窗)未实现,系统通知点击行为由 Android 默认接管(`ACTION_NOTIFICATION_CLICKED` 暂未做 deepLink 解析,留作下版本)。
+
 ## [0.4.3] - 2026-09-20
 
 ### 新增

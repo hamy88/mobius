@@ -19,54 +19,40 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Android 端 OTA 下载封装（v1.1，方案 §3.4 + §6.2）。
+ * Android 端 OTA 下载封装（v1.2，0.4.4 暴露到 commonMain expect class 实现）。
  *
  * 设计要点：
- * - 走 Android 系统 DownloadManager（§3.4），前台 / 后台统一；Application 被杀仍可继续
- * - 不在系统下载 UI 中暴露（`setVisibleInDownloadsUi(false)`，§3.4）
- * - POST_NOTIFICATIONS 权限运行时申请（§6.2 Android 13+），由调用方在首次 enqueue 前调 [requestPostNotificationsIfNeeded]
+ * - 走 Android 系统 DownloadManager，前台 / 后台统一；Application 被杀仍可继续
+ * - 不在系统下载 UI 中暴露（`setVisibleInDownloadsUi(false)`）
+ * - POST_NOTIFICATIONS 权限运行时申请（Android 13+），由调用方在首次 enqueue 前调 [requestPostNotificationsIfNeeded]
  * - 进度通过 [queryProgress] 主动查询 + [completionEvents] Flow 被动接收完成 / 失败
- * - split-abi 选择：[selectAssetForDevice] 按 Build.SUPPORTED_ABIS[0] 优先 arm64-v8a，回退 armeabi-v7a
+ * - 系统通知文案：标题 "Mobius v{version} 正在下载"，下载完成后系统自动切到 "下载完成" 通知
  *
  * §6 安全红线：
  * - 仅 HTTPS（assertHttpsUrl）：拒绝 http://
  * - SHA256 校验在下载完成后由调用方自行处理（见 OtaInstaller.install）
  */
-class OtaDownloader(private val context: Context = AndroidContext.application) {
+actual class OtaDownloader actual constructor() {
 
-    /** 下载进度快照（暴露给 ViewModel / UI 渲染应用内进度条）。 */
-    data class DownloadProgress(
-        val downloadId: Long,
-        val bytesDownloaded: Long,
-        val totalBytes: Long,
-        val status: Status,
-        val reason: String? = null,
-    ) {
-        /** 0..1；尚未拿到 total 时返回 0。 */
-        val fraction: Float
-            get() = if (totalBytes <= 0L) 0f else (bytesDownloaded.toDouble() / totalBytes).toFloat().coerceIn(0f, 1f)
-
-        enum class Status { Pending, Running, Paused, Successful, Failed, Cancelled }
-    }
-
-    /** 下载完成 / 失败 事件流（cold subscriber；非持久化）。 */
-    sealed interface CompletionEvent {
-        val downloadId: Long
-        data class Success(override val downloadId: Long, val localUri: String) : CompletionEvent
-        data class Failure(override val downloadId: Long, val reason: String) : CompletionEvent
-    }
+    private val context: Context = AndroidContext.application
 
     private val downloadManager: DownloadManager =
         context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
             ?: error("DownloadManager unavailable")
 
-    private val _completionEvents = MutableSharedFlow<CompletionEvent>(extraBufferCapacity = 16)
-    val completionEvents: SharedFlow<CompletionEvent> = _completionEvents.asSharedFlow()
+    private val _completionEvents = MutableSharedFlow<OtaCompletionEvent>(extraBufferCapacity = 16)
+    actual val completionEvents: SharedFlow<OtaCompletionEvent> = _completionEvents.asSharedFlow()
 
-    private val _lastProgress = MutableStateFlow<Map<Long, DownloadProgress>>(emptyMap())
-    val lastProgress: StateFlow<Map<Long, DownloadProgress>> = _lastProgress.asStateFlow()
+    private val _lastProgress = MutableStateFlow<Map<Long, OtaDownloadProgress>>(emptyMap())
+    actual val lastProgress: StateFlow<Map<Long, OtaDownloadProgress>> = _lastProgress.asStateFlow()
 
     private val receiverRegistered = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // 当前活跃 downloadId（仅最近一个；客户端同一时刻只跑一个 OTA 下载）。
+    // 给系统通知点击 deepLink 回调(openDownloadId)使用, 避免遍历 map 拿到陈旧 id。
+    @Volatile
+    private var currentDownloadId: Long = -1L
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: -1L
@@ -77,28 +63,35 @@ class OtaDownloader(private val context: Context = AndroidContext.application) {
                     val cursor: Cursor = runCatching {
                         downloadManager.query(query)
                     }.getOrNull() ?: run {
-                        _completionEvents.tryEmit(CompletionEvent.Failure(id, "cursor 查询失败"))
+                        _completionEvents.tryEmit(OtaCompletionEvent.Failure(id, "cursor 查询失败"))
                         return
                     }
+                    // status 需要在 cursor.use 块外仍可见（清空 currentDownloadId 的判断），
+                    // 用 var 提到外层作用域，cursor 查询失败/为空时保持 -1。
+                    var status: Int = -1
                     cursor.use { c ->
                         if (!c.moveToFirst()) {
-                            _completionEvents.tryEmit(CompletionEvent.Failure(id, "cursor 为空"))
+                            _completionEvents.tryEmit(OtaCompletionEvent.Failure(id, "cursor 为空"))
                             return
                         }
                         val statusIdx = c.getColumnIndex(DownloadManager.COLUMN_STATUS)
                         val uriIdx = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
                         val reasonIdx = c.getColumnIndex(DownloadManager.COLUMN_REASON)
-                        val status = c.getInt(statusIdx)
+                        status = c.getInt(statusIdx)
                         val uri = if (uriIdx >= 0) c.getString(uriIdx) else null
                         when (status) {
                             DownloadManager.STATUS_SUCCESSFUL -> {
-                                _completionEvents.tryEmit(CompletionEvent.Success(id, uri.orEmpty()))
+                                _completionEvents.tryEmit(OtaCompletionEvent.Success(id, uri.orEmpty()))
                             }
                             else -> {
                                 val reasonText = if (reasonIdx >= 0) c.getString(reasonIdx) else null
-                                _completionEvents.tryEmit(CompletionEvent.Failure(id, "status=$status reason=$reasonText"))
+                                _completionEvents.tryEmit(OtaCompletionEvent.Failure(id, "status=$status reason=$reasonText"))
                             }
                         }
+                    }
+                    // 下载完成/失败后清空 currentDownloadId（cancel 路径不清，openDownloadId 还能返回 cancel 前的 id 供上层提示）。
+                    if (id == currentDownloadId && status != DownloadManager.STATUS_RUNNING) {
+                        currentDownloadId = -1L
                     }
                 }
                 DownloadManager.ACTION_NOTIFICATION_CLICKED -> Unit
@@ -107,19 +100,22 @@ class OtaDownloader(private val context: Context = AndroidContext.application) {
     }
 
     /** Android 13+ 首次下载前调用：运行时申请 POST_NOTIFICATIONS。 */
-    fun requestPostNotificationsIfNeeded() {
+    actual fun requestPostNotificationsIfNeeded() {
         AndroidContext.requestInitialNotificationPermissionIfNeeded()
     }
 
     /**
      * 入队下载。
-     * @return DownloadManager 分配的 downloadId；调用方需保留以便 [queryProgress] / [cancel]
+     *
+     * @return DownloadManager 分配的 downloadId；调用方需保留以便 [queryProgress] / [cancel] / [openDownloadId]
      */
-    fun enqueue(asset: OtaAsset): Long {
+    actual fun enqueue(asset: OtaAsset): Long {
         assertHttpsUrl(asset.browserDownloadUrl)
         registerReceiverIfNeeded()
+        // 0.4.4 通知文案：带版本号标题更直观；description 留给系统显示进度
+        val title = "Mobius v${asset.abi} 正在下载"
         val request = DownloadManager.Request(Uri.parse(asset.browserDownloadUrl))
-            .setTitle("Mobius ${asset.name}")
+            .setTitle(title)
             .setDescription("正在下载更新…")
             .setMimeType(asset.contentType)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -130,11 +126,13 @@ class OtaDownloader(private val context: Context = AndroidContext.application) {
                 android.os.Environment.DIRECTORY_DOWNLOADS,
                 "mobius-ota-${asset.name}",
             )
-        return downloadManager.enqueue(request)
+        val id = downloadManager.enqueue(request)
+        currentDownloadId = id
+        return id
     }
 
     /** 主动查询进度（应用内进度条用；不阻塞主线程）。 */
-    fun queryProgress(downloadId: Long): DownloadProgress? {
+    actual fun queryProgress(downloadId: Long): OtaDownloadProgress? {
         val query = DownloadManager.Query().setFilterById(downloadId)
         val cursor = runCatching { downloadManager.query(query) }.getOrNull() ?: return null
         return cursor.use { c ->
@@ -147,23 +145,39 @@ class OtaDownloader(private val context: Context = AndroidContext.application) {
                 if (idx >= 0) c.getString(idx) else null
             }.getOrNull()
             val mapped = when (status) {
-                DownloadManager.STATUS_PENDING -> DownloadProgress.Status.Pending
-                DownloadManager.STATUS_RUNNING -> DownloadProgress.Status.Running
-                DownloadManager.STATUS_PAUSED -> DownloadProgress.Status.Paused
-                DownloadManager.STATUS_SUCCESSFUL -> DownloadProgress.Status.Successful
-                DownloadManager.STATUS_FAILED -> DownloadProgress.Status.Failed
-                else -> DownloadProgress.Status.Running
+                DownloadManager.STATUS_PENDING -> OtaDownloadStatus.Pending
+                DownloadManager.STATUS_RUNNING -> OtaDownloadStatus.Running
+                DownloadManager.STATUS_PAUSED -> OtaDownloadStatus.Paused
+                DownloadManager.STATUS_SUCCESSFUL -> OtaDownloadStatus.Successful
+                DownloadManager.STATUS_FAILED -> OtaDownloadStatus.Failed
+                else -> OtaDownloadStatus.Running
             }
-            DownloadProgress(downloadId, bytes, total, mapped, reason).also { p ->
+            OtaDownloadProgress(downloadId, bytes, total, mapped, reason).also { p ->
                 _lastProgress.value = _lastProgress.value.toMutableMap().apply { put(downloadId, p) }
             }
         }
     }
 
     /** 取消下载。 */
-    fun cancel(downloadId: Long) {
+    actual fun cancel(downloadId: Long) {
         runCatching { downloadManager.remove(downloadId) }
+        // 不清 currentDownloadId：openDownloadId 仍可返回 cancel 前的 id 供上层判断
+        // "用户已取消过当前 OTA"。SUCCESSFUL/FAILED 事件回调时会清。
     }
+
+    /** 拿下载文件的本地 URI（file://...）。未完成 / 已删除 / 查询失败时返回 null。 */
+    actual fun localUri(downloadId: Long): String? {
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val cursor = runCatching { downloadManager.query(query) }.getOrNull() ?: return null
+        return cursor.use { c ->
+            if (!c.moveToFirst()) return@use null
+            val idx = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+            if (idx >= 0) c.getString(idx) else null
+        }
+    }
+
+    /** 返回当前 downloadId（系统通知点击 deepLink 回调使用）。当前活跃下载被取消/完成后置 -1。 */
+    actual fun openDownloadId(): Long? = currentDownloadId.takeIf { it > 0L }
 
     private fun registerReceiverIfNeeded() {
         if (receiverRegistered.compareAndSet(false, true)) {
@@ -191,15 +205,12 @@ class OtaDownloader(private val context: Context = AndroidContext.application) {
 
     companion object {
         /**
-         * split-abi 选择（§3.3）：按 Build.SUPPORTED_ABIS[0] 优先 arm64-v8a，回退 armeabi-v7a。
+         * split-abi 选择：按 Build.SUPPORTED_ABIS[0] 优先 arm64-v8a，回退 armeabi-v7a。
          * @return 与设备匹配的 ABI；列表中没有匹配则回退到 [preferred]，由调用方决定是否拒绝下载。
+         *
+         * 实际公共逻辑见 commonMain [OtaAbiSelector.pick]，这里只是 androidMain 直接可用的便捷入口。
          */
-        fun selectAbiForDevice(supportedAbis: Array<String>, preferred: String = "arm64-v8a"): String {
-            val order = listOf("arm64-v8a", "armeabi-v7a")
-            for (candidate in order) {
-                if (supportedAbis.any { it.equals(candidate, ignoreCase = true) }) return candidate
-            }
-            return preferred
-        }
+        fun selectAbiForDevice(supportedAbis: Array<String>, preferred: String = "arm64-v8a"): String =
+            OtaAbiSelector.pick(supportedAbis.toList(), preferred = preferred)
     }
 }
