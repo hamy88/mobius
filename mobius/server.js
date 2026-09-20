@@ -108,6 +108,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', require('./backend/routes/users'));
 app.use('/api/conversations', require('./backend/routes/conversations'));
 app.use('/api/assistant', assistantRoutes);
+// Mobius Mobile OTA 公开 endpoint: 翻译 mobile-builds/manifest.json → OtaManifest schema.
+// 客户端 Android App 优先访问本服务器 (CORS / no-cache), 失败 fallback 到 GitHub Releases.
+app.use('/api/mobile/ota', require('./backend/routes/mobile-ota'));
 // 用户个人维度偏好: GET/POST /api/profile/tour-first-login-seen (普通 auth, 跨设备生效).
 app.use('/api/profile', profileRoutes);
 app.use('/api/tasks', tasksRoutes);
