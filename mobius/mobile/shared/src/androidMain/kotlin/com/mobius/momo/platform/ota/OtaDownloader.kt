@@ -66,6 +66,9 @@ actual class OtaDownloader actual constructor() {
                         _completionEvents.tryEmit(OtaCompletionEvent.Failure(id, "cursor 查询失败"))
                         return
                     }
+                    // status 需要在 cursor.use 块外仍可见（清空 currentDownloadId 的判断），
+                    // 用 var 提到外层作用域，cursor 查询失败/为空时保持 -1。
+                    var status: Int = -1
                     cursor.use { c ->
                         if (!c.moveToFirst()) {
                             _completionEvents.tryEmit(OtaCompletionEvent.Failure(id, "cursor 为空"))
@@ -74,7 +77,7 @@ actual class OtaDownloader actual constructor() {
                         val statusIdx = c.getColumnIndex(DownloadManager.COLUMN_STATUS)
                         val uriIdx = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
                         val reasonIdx = c.getColumnIndex(DownloadManager.COLUMN_REASON)
-                        val status = c.getInt(statusIdx)
+                        status = c.getInt(statusIdx)
                         val uri = if (uriIdx >= 0) c.getString(uriIdx) else null
                         when (status) {
                             DownloadManager.STATUS_SUCCESSFUL -> {
