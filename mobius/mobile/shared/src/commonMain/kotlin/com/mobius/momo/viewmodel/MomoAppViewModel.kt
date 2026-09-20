@@ -545,8 +545,12 @@ class MomoAppViewModel(
                     otaCheckInProgress = false,
                 )
             }
-            if (result is OtaCheckUseCase.OtaCheckResult.NetworkError) {
-                showToast("检查更新失败：${result.message}")
+            // 手动触发(设置页"检查更新")给瞬时反馈;启动 5s 后静默检查路径不调这里, 不打扰用户。
+            when (result) {
+                is OtaCheckUseCase.OtaCheckResult.NoUpdate -> showToast("已是最新版本")
+                is OtaCheckUseCase.OtaCheckResult.Invalid -> showToast("版本信息无效，请稍后重试")
+                is OtaCheckUseCase.OtaCheckResult.NetworkError -> showToast("检查更新失败：${result.message}")
+                is OtaCheckUseCase.OtaCheckResult.Show -> Unit
             }
         }
     }
