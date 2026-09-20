@@ -1,0 +1,92 @@
+name: Release Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: "Create a draft release"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "apps-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apps-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish unified desktop and mobile release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve and validate release tag
+        id: release
+        shell: bash
+        run: |
+          CONFIG_TAG=$(python3 -c "import json; print(json.load(open('mobius/apps-release.json'))['releaseTag'])")
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="$CONFIG_TAG"
+          fi
+          if [ "$TAG" != "$CONFIG_TAG" ]; then
+            echo "Tag $TAG does not match mobius/apps-release.json ($CONFIG_TAG)" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify all release assets
+        run: |
+          python3 scripts/prepare-apps-release.py \
+            --config mobius/apps-release.json \
+            --output release-assets
+          ls -lh release-assets
+
+      - name: Create or update unified GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          TITLE=$(python3 -c "import json; print(json.load(open('mobius/apps-release.json'))['title'])")
+          mapfile -t ASSETS < <(find release-assets -maxdepth 1 -type f ! -name release-notes.md -print | sort)
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" -R "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file release-assets/release-notes.md --latest
+          else
+            DRAFT_FLAG=""
+            if [ "${{ github.event.inputs.draft }}" = "true" ]; then DRAFT_FLAG="--draft"; fi
+            gh release create "$TAG" "${ASSETS[@]}" \
+              -R "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes-file release-assets/release-notes.md \
+              --latest $DRAFT_FLAG
+          fi
+
+      - name: Notify Mobius servers
+        if: ${{ github.event.inputs.draft != 'true' }}
+        shell: bash
+        run: |
+          WEBHOOK_URL="${{ secrets.DESKTOP_WEBHOOK_URL }}"
+          WEBHOOK_TOKEN="${{ secrets.DESKTOP_WEBHOOK_TOKEN }}"
+          if [ -z "$WEBHOOK_URL" ] || [ -z "$WEBHOOK_TOKEN" ]; then
+            echo "Webhook secrets are not configured; periodic sync will pick up the release."
+            exit 0
+          fi
+          TAG="${{ steps.release.outputs.tag }}"
+          curl --fail-with-body --retry 3 --retry-delay 10 \
+            -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Token: $WEBHOOK_TOKEN" \
+            -d "{\"tag\":\"$TAG\"}" \
+            --connect-timeout 10 --max-time 300
