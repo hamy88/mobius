@@ -1,7 +1,7 @@
 {
-  "version": "0.4.3",
+  "version": "0.4.4",
   "platform": "android",
-  "generatedAt": "2026-09-20T01:30:00Z",
+  "generatedAt": "2026-09-20T03:25:00Z",
   "builds": [
     {
       "platform": "android",
@@ -134,6 +134,28 @@
       "versionCode": 21,
       "sha256": "fe82130a816b3cfb6feeac7ecd6e5e25a8914ff36d82fccb1ded23f3584763e0",
       "source": "github-release mobile-v0.2.0 (CI build, debug-signed)"
+    },
+    {
+      "platform": "android",
+      "arch": "arm64",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.4-android-arm64.apk",
+      "size": 5152876,
+      "version": "0.4.4",
+      "versionCode": 28,
+      "sha256": "f0882f838ba77b1f08a8d7574c574a6dd4a1c13bc35c962c159b71f8649b30ab",
+      "source": "github-actions run 35485734013 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 08b37410; OTA Phase 4 — OtaDownloadDialog 应用内下载进度条 + 系统通知 deepLink + expect/actual OtaDownloader/OtaInstaller + currentDeviceAbi + 重试/取消 UI + versionCode 27→28 / versionName 0.4.3→0.4.4)"
+    },
+    {
+      "platform": "android",
+      "arch": "armeabi-v7a",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.4-android-armeabi-v7a.apk",
+      "size": 5160844,
+      "version": "0.4.4",
+      "versionCode": 28,
+      "sha256": "3a9ca002f609f5360775f49ed8fb1e514fb31f1edc4a8adecfa8b22f0d1cdf60",
+      "source": "github-actions run 35485734013 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 08b37410; OTA Phase 4 — OtaDownloadDialog 应用内下载进度条 + 系统通知 deepLink + expect/actual OtaDownloader/OtaInstaller + currentDeviceAbi + 重试/取消 UI + versionCode 27→28 / versionName 0.4.3→0.4.4)"
     }
   ]
 }

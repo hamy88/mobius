@@ -3923,7 +3923,7 @@ function manifestToRows(manifest: DesktopManifest): DesktopDownloadRow[] {
 // Android APK 走本服务器同源静态目录 /mobile-builds/ (源目录 mobius/mobile-builds/,
 // 由 GitHub Actions build-all-formats 构建后下载回填), 登录用户直接下载;
 // 公网分发可另走 GitHub Release (mobile-v<version> pre-release, 匿名可下载)。
-const MOBILE_VERSION = '0.4.3'
+const MOBILE_VERSION = '0.4.4'
 // 同源下载前缀 (Express 静态服务直接指向 mobius/mobile-builds/)。
 const MOBILE_CDN_BASE = '/mobile-builds'
 // iOS 走 TestFlight 公开邀请链接: build 上传后在 App Store Connect → TestFlight 开启"公开链接",
@@ -3935,16 +3935,16 @@ const MOBILE_BUILDS: Array<{ label: string; sub: string; file: string; size: num
     label: 'Android',
     sub: 'arm64-v8a · 大多数现代手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-arm64.apk`,
-    // size/sha256 由 0.4.3 CI 产物落盘后回填(见 mobius/mobile-builds/manifest.json + sha256-0.4.3.txt)。
+    // size/sha256 由 0.4.4 CI 产物落盘后回填(见 mobius/mobile-builds/manifest.json + sha256-0.4.4.txt)。
     size: 5152876,
-    sha256: '2c7eee59e88068b0968520f432853728b4f733b08b3736779f15bd8a8f504620',
+    sha256: 'f0882f838ba77b1f08a8d7574c574a6dd4a1c13bc35c962c159b71f8649b30ab',
   },
   {
     label: 'Android',
     sub: 'armeabi-v7a · 老旧手机',
     file: `mobius-mobile-${MOBILE_VERSION}-android-armeabi-v7a.apk`,
     size: 5160844,
-    sha256: '0bdab2eab9219baf09c2901d98f47c6eef2857de33291075ffc90c7ec90d9962',
+    sha256: '3a9ca002f609f5360775f49ed8fb1e514fb31f1edc4a8adecfa8b22f0d1cdf60',
   },
   {
     label: 'iOS',
