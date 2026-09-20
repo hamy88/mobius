@@ -180,4 +180,44 @@ class OtaRepositoryLocalServerTest {
         )
         assertEquals(ThresholdEvaluator.Level.Normal, show.level)
     }
+
+    // ===== 0.4.3: 本服务器 manifest.json 含 changelog_items 字段 =====
+    //
+    // 后端 mobile-ota.ts 已在顶层补 changelog_items 数组(读 CHANGELOG.md 解析);
+    // 客户端 OtaManifest schema 当前不消费该字段(下一版本再加 changelogItems 字段透传);
+    // 本测试验证 ignoreUnknownKeys 解析路径不会因多余字段抛错, 解析后 OtaManifest 仍可用.
+
+    @Test
+    fun `fetchLocalManifest tolerates changelog_items field at top level`() = runBlocking<Unit> {
+        val manifestJson = """
+            {
+              "version": "0.4.3",
+              "version_code": 27,
+              "channel": "stable",
+              "released_at": "2026-09-20T10:00:00Z",
+              "changelog_items": [
+                { "type": "Feature", "text": "OTA 弹窗显示 changelog" },
+                { "type": "Fix", "text": "某处崩溃修复" }
+              ],
+              "android": { "package_name": "com.mobius.momo", "min_sdk": 24, "target_sdk": 34 },
+              "builds": [
+                {
+                  "platform": "android", "abi": "arm64-v8a",
+                  "version": "0.4.3", "version_code": 27,
+                  "url": "/mobile-builds/mobius-mobile-0.4.3-android-arm64.apk",
+                  "size": 5136500, "sha256": "abc123"
+                }
+              ]
+            }
+        """.trimIndent()
+        val client = createMockOtaClient { request ->
+            respond(manifestJson, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val repo = createOtaRepositoryWithClient(client)
+        val manifest = repo.fetchLocalManifest("https://example.com")
+        assertNotNull(manifest, "含 changelog_items 的 manifest 应正常解析(ignoreUnknownKeys)")
+        assertEquals("0.4.3", manifest.version)
+        assertEquals(27, manifest.versionCode)
+        assertEquals(1, manifest.builds.size)
+    }
 }

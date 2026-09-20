@@ -1,5 +1,6 @@
 package com.mobius.momo.viewmodel
 
+import com.mobius.momo.data.ChangelogItem
 import com.mobius.momo.data.OtaManifest
 import com.mobius.momo.data.OtaRepository
 import com.mobius.momo.data.SecureStorage
@@ -57,6 +58,8 @@ class OtaCheckUseCase(
             val reasonDisplay: String?,
             val advisoryId: String?,
             val hardBlockBypassable: Boolean,
+            /** 与 [manifest] 同源 release 的 changelog 条目列表（来自 GitHub body 解析或本服务器 manifest）。 */
+            val changelogItems: List<ChangelogItem> = emptyList(),
         ) : OtaCheckResult
         /** 元数据解析失败 / manifest 缺关键字段。 */
         data object Invalid : OtaCheckResult
@@ -73,9 +76,14 @@ class OtaCheckUseCase(
      */
     suspend fun run(manifestProvider: (suspend () -> OtaManifest?)? = null): OtaCheckResult =
         withContext(dispatcher) {
-            val manifest = manifestProvider?.invoke()
-                ?: fetchManifestDualChannel()
-                ?: return@withContext OtaCheckResult.NetworkError("manifest unavailable")
+            // 测试注入 provider 默认不携带 changelog, 给空 list; 真实网络分支由 fetchManifestDualChannel 返回 (manifest, items).
+            val (manifest, changelogItems) = if (manifestProvider != null) {
+                val m = manifestProvider.invoke()
+                if (m == null) return@withContext OtaCheckResult.NetworkError("manifest unavailable")
+                m to emptyList()
+            } else {
+                fetchManifestDualChannel() ?: return@withContext OtaCheckResult.NetworkError("manifest unavailable")
+            }
 
             // §5.5 强校验字段
             if (manifest.version.isBlank() || manifest.versionCode <= 0) {
@@ -107,6 +115,7 @@ class OtaCheckUseCase(
                     reasonDisplay = result.reasonDisplay,
                     advisoryId = result.advisoryId,
                     hardBlockBypassable = result.hardBlockBypassable,
+                    changelogItems = changelogItems,
                 )
             }
         }
@@ -114,20 +123,29 @@ class OtaCheckUseCase(
     /**
      * 双渠道拉取：先本服务器 (`serverBaseUrl`) 后 GitHub Releases (`DEFAULT_OTA_REPO`)。
      *
-     * 返回首个解析成功的 [OtaManifest]；都失败返回 null（让上层映射为 [OtaCheckResult.NetworkError]）。
-     * 本服务器 channel 任何抛错由 [OtaRepository.fetchLocalManifest] 内部吞掉 → 返回 null → 自动 fallback。
+     * 返回首个解析成功的 (manifest, changelogItems) 元组；都失败返回 null（让上层映射为
+     * [OtaCheckResult.NetworkError]）。本服务器 channel 任何抛错由 [OtaRepository.fetchLocalManifest]
+     * 内部吞掉 → 返回 null → 自动 fallback。GitHub channel 的 changelogItems 来自 release body 解析
+     * （[com.mobius.momo.data.ChangelogParser]）；本服务器 channel 暂未携带 changelog_items 字段,
+     * 返回空 list (UI 仅显示首条摘要时降级为兜底文案)。
      */
-    private suspend fun fetchManifestDualChannel(): OtaManifest? {
+    private suspend fun fetchManifestDualChannel(): Pair<OtaManifest, List<ChangelogItem>>? {
         if (localBaseUrl.isNotBlank()) {
             val local = runCatching { repo.fetchLocalManifest(localBaseUrl) }.getOrNull()
             if (local != null && local.version.isNotBlank() && local.versionCode > 0) {
-                return local
+                return local to emptyList<ChangelogItem>()
             }
         }
-        return runCatching {
+        val releaseResult: Result<Pair<OtaManifest, List<ChangelogItem>>> = runCatching {
             val release = repo.fetchLatestRelease(repoName)
-            release.manifest
-        }.getOrNull()
+            val manifest: OtaManifest = release.manifest
+                ?: throw IllegalStateException("release manifest is null")
+            if (manifest.version.isBlank() || manifest.versionCode <= 0) {
+                throw IllegalStateException("release manifest missing version/version_code")
+            }
+            manifest to (release.changelogItems ?: emptyList())
+        }
+        return releaseResult.getOrNull()
     }
 
     /** 用户点 [稍后]：刷新静默期到期时间戳。 */

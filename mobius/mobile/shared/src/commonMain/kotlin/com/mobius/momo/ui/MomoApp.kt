@@ -170,6 +170,8 @@ import com.mobius.momo.data.TtsPlaybackMode
 import com.mobius.momo.data.TTS_SYSTEM_VOICE_ID
 import com.mobius.momo.data.RECOMMENDED_MOBIUS_BASE_URL
 import com.mobius.momo.data.ServerEntry
+import com.mobius.momo.data.ChangelogItem
+import com.mobius.momo.data.ChangelogType
 import com.mobius.momo.data.Voice
 import com.mobius.momo.domain.ChatMessage
 import com.mobius.momo.data.formatBackendTime
@@ -457,6 +459,8 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                         danger = theme.danger,
                         divider = theme.borderDefault,
                     )
+                    // 0.4.3: 把 changelogItems + 首条摘要 + 回调透传给 Context; Normal 档会据此
+                    // 渲染首条摘要 + "查看完整更新说明"链接(点击 → viewModel.showOtaChangelog 打开 modal)。
                     val ctx = OtaDialogCopy.Context(
                         localVersion = platformAppVersion(),
                         remoteVersion = otaShow.manifest.version,
@@ -464,6 +468,9 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                         reasonDisplay = otaShow.reasonDisplay,
                         advisoryId = otaShow.advisoryId,
                         hardBlockBypassable = otaShow.hardBlockBypassable,
+                        releaseHighlight = otaShow.changelogItems.firstOrNull()?.text,
+                        changelogItems = otaShow.changelogItems,
+                        onViewFullNotes = { viewModel.showOtaChangelog(otaShow.changelogItems) },
                     )
                     val copy = OtaDialogCopy.render(otaShow.level, ctx)
                     when (otaShow.level) {
@@ -477,6 +484,7 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                                 viewModel.dismissOtaDialog()
                             },
                             onDismiss = { viewModel.dismissOtaDialog() },
+                            onViewFullNotes = ctx.onViewFullNotes,
                         )
                         ThresholdEvaluator.Level.Advisory -> OtaAdvisoryDialog(
                             copy = copy,
@@ -484,6 +492,7 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                             onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
                             onLater = { viewModel.dismissOtaDialog() },
                             onDismiss = { viewModel.dismissOtaDialog() },
+                            onViewFullNotes = ctx.onViewFullNotes,
                         )
                         ThresholdEvaluator.Level.StrongAdvisory -> OtaStrongAdvisoryDialog(
                             copy = copy,
@@ -491,6 +500,7 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                             onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
                             onLater = { viewModel.dismissOtaDialog() },
                             onDismiss = { viewModel.dismissOtaDialog() },
+                            onViewFullNotes = ctx.onViewFullNotes,
                         )
                         ThresholdEvaluator.Level.HardBlock -> OtaHardBlockDialog(
                             copy = copy,
@@ -499,10 +509,19 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                             onUpdate = { viewModel.downloadAndInstallOta(otaShow.manifest) },
                             onContinue = { viewModel.dismissOtaDialog() },
                             onDismiss = { viewModel.dismissOtaDialog() },
+                            onViewFullNotes = ctx.onViewFullNotes,
                         )
                         ThresholdEvaluator.Level.NoUpdate,
                         ThresholdEvaluator.Level.Invalid -> Unit // 不弹窗
                     }
+                }
+                // 0.4.3: 完整更新说明 modal — state.otaChangelogSheet 非空时打开,渲染 changelog_items。
+                otaState.otaChangelogSheet?.let { items ->
+                    OtaChangelogSheet(
+                        items = items,
+                        theme = theme,
+                        onDismiss = { viewModel.dismissOtaChangelog() },
+                    )
                 }
             }
         }
@@ -6976,5 +6995,96 @@ private fun formatRelativeTime(epochMillis: Long): String {
                 fmt.format(date)
             }
         }
+    }
+}
+
+/**
+ * 0.4.3 OTA 弹窗"查看完整更新说明"全屏 modal。
+ *
+ * 渲染 [items] 中的全部 changelog 条目, 按类型分组(Breaking > Fix > Feature),
+ * 头部按类型加颜色徽标(破坏=红, 修复=橙, 功能=绿), 整体在 verticalScroll 里渲染避免长列表被截断。
+ */
+@Composable
+private fun OtaChangelogSheet(
+    items: List<ChangelogItem>,
+    theme: MomoTheme,
+    onDismiss: () -> Unit,
+) {
+    val sorted = items.sortedWith(
+        compareBy(
+            // Breaking=0, Fix=1, Feature=2 → 倒序排前面
+            { it.type.ordinal },
+        ),
+    )
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = theme.bgSecondary,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = MomoSpacing.xl)
+                .padding(bottom = MomoSpacing.xl),
+        ) {
+            Text(
+                "更新说明",
+                color = theme.textPrimary,
+                style = momoTextStyle(MomoTypography.headline.copy(fontWeight = FontWeight.Bold)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = MomoSpacing.sm),
+            )
+            if (sorted.isEmpty()) {
+                Text(
+                    "暂无更新说明",
+                    color = theme.textMuted,
+                    style = momoTextStyle(MomoTypography.body),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = MomoSpacing.lg),
+                )
+            } else {
+                sorted.forEach { item ->
+                    OtaChangelogRow(item = item, theme = theme)
+                    Spacer(Modifier.height(MomoSpacing.sm))
+                }
+            }
+            Spacer(Modifier.height(MomoSpacing.md))
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text("关闭", color = theme.accentPrimary, style = momoTextStyle(MomoTypography.body))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OtaChangelogRow(item: ChangelogItem, theme: MomoTheme) {
+    val (badgeText, badgeColor) = when (item.type) {
+        ChangelogType.Breaking -> "破坏" to theme.danger
+        ChangelogType.Fix -> "修复" to theme.accentSecondary
+        ChangelogType.Feature -> "新功能" to theme.success
+    }
+    Row(verticalAlignment = Alignment.Top) {
+        Box(
+            modifier = Modifier
+                .background(color = badgeColor.copy(alpha = 0.18f), shape = RoundedCornerShape(MomoCorners.chip))
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+        ) {
+            Text(
+                badgeText,
+                color = badgeColor,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Spacer(Modifier.width(MomoSpacing.sm))
+        Text(
+            item.text,
+            color = theme.textPrimary,
+            style = momoTextStyle(MomoTypography.body),
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }

@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mobius.momo.data.ChangelogItem
 import com.mobius.momo.viewmodel.ThresholdEvaluator
 import kotlinx.serialization.Serializable
 
@@ -47,7 +48,12 @@ object OtaDialogCopy {
         val reasonDisplay: String? = null,
         val advisoryId: String? = null,
         val hardBlockBypassable: Boolean = true,
+        /** Normal 档首条摘要文本（≤60 字）。为空时 normal() 兜底"新功能与体验改进"。 */
         val releaseHighlight: String? = null,
+        /** 完整 changelog 条目列表（用于"查看完整更新说明"链接）。空 → 不渲染链接。 */
+        val changelogItems: List<ChangelogItem> = emptyList(),
+        /** 点击"查看完整更新说明"时触发；UI 层打开全屏 modal 渲染 [changelogItems]。 */
+        val onViewFullNotes: (() -> Unit)? = null,
     )
 
     /** 单条文案渲染结果。 */
@@ -61,6 +67,9 @@ object OtaDialogCopy {
         val primaryLabel: String,
         val secondaryLabel: String? = null,
         val tertiaryLabel: String? = null,
+        // 0.4.3 新增: "查看完整更新说明" 链接开关 + 标签文案
+        val showFullNotesLink: Boolean = false,
+        val fullNotesLinkLabel: String = "查看完整更新说明",
     )
 
     /** 主入口：按档位 + bypassable 渲染对应文案。 */
@@ -77,13 +86,15 @@ object OtaDialogCopy {
     private fun normal(ctx: Context): Copy = Copy(
         title = "新版本可用",
         body = "v${ctx.remoteVersion} 已发布（v${ctx.localVersion} → v${ctx.remoteVersion}）。" +
-            (ctx.releaseHighlight?.take(60)?.let { it } ?: "新功能与体验改进。"),
+            (ctx.releaseHighlight?.take(60)?.takeIf { it.isNotBlank() } ?: "新功能与体验改进。"),
         infoBoxLines = emptyList(),
         infoBoxExpandedByDefault = false,
         infoBoxDismissible = true,
         primaryLabel = "立即更新",
         secondaryLabel = "稍后",
         tertiaryLabel = "忽略此版本",
+        // 0.4.3: 有 changelog + 有回调才渲染"查看完整更新说明"链接；UI 层打开 modal 渲染完整内容
+        showFullNotesLink = ctx.changelogItems.isNotEmpty() && ctx.onViewFullNotes != null,
     )
 
     private fun advisory(ctx: Context): Copy = Copy(
@@ -175,11 +186,13 @@ fun OtaNormalDialog(
     onLater: () -> Unit,
     onIgnore: () -> Unit,
     onDismiss: () -> Unit,
+    onViewFullNotes: (() -> Unit)? = null,
 ) {
     BaseOtaDialog(
         copy = copy,
         colors = colors,
         onDismiss = onDismiss,
+        onViewFullNotes = onViewFullNotes,
         buttons = {
             TextButton(onClick = onIgnore) {
                 Text(copy.tertiaryLabel ?: "忽略此版本", color = colors.onBackgroundMuted)
@@ -202,11 +215,13 @@ fun OtaAdvisoryDialog(
     onUpdate: () -> Unit,
     onLater: () -> Unit,
     onDismiss: () -> Unit,
+    onViewFullNotes: (() -> Unit)? = null,
 ) {
     BaseOtaDialog(
         copy = copy,
         colors = colors,
         onDismiss = onDismiss,
+        onViewFullNotes = onViewFullNotes,
         buttons = {
             TextButton(onClick = onLater) {
                 Text(copy.secondaryLabel ?: "稍后", color = colors.onBackgroundMuted)
@@ -226,8 +241,9 @@ fun OtaStrongAdvisoryDialog(
     onUpdate: () -> Unit,
     onLater: () -> Unit,
     onDismiss: () -> Unit,
+    onViewFullNotes: (() -> Unit)? = null,
 ) {
-    OtaAdvisoryDialog(copy, colors, onUpdate, onLater, onDismiss)
+    OtaAdvisoryDialog(copy, colors, onUpdate, onLater, onDismiss, onViewFullNotes)
 }
 
 /** 通用：hard_block 档（按 bypassable 切两套）。 */
@@ -239,12 +255,14 @@ fun OtaHardBlockDialog(
     onUpdate: () -> Unit,
     onContinue: () -> Unit,
     onDismiss: () -> Unit,
+    onViewFullNotes: (() -> Unit)? = null,
 ) {
     if (bypassable) {
         BaseOtaDialog(
             copy = copy,
             colors = colors,
             onDismiss = onDismiss,
+            onViewFullNotes = onViewFullNotes,
             buttons = {
                 TextButton(onClick = onContinue) {
                     Text(copy.secondaryLabel ?: "继续使用（受限）", color = colors.danger)
@@ -260,6 +278,7 @@ fun OtaHardBlockDialog(
             copy = copy,
             colors = colors,
             onDismiss = onDismiss,
+            onViewFullNotes = onViewFullNotes,
             buttons = {
                 TextButton(onClick = onUpdate) {
                     Text(copy.primaryLabel, color = colors.accent, fontWeight = FontWeight.Bold)
@@ -277,6 +296,7 @@ private fun BaseOtaDialog(
     colors: OtaColors,
     onDismiss: () -> Unit,
     buttons: @Composable () -> Unit,
+    onViewFullNotes: (() -> Unit)? = null,
 ) {
     var infoExpanded by rememberSaveable(copy.title) {
         mutableStateOf(copy.infoBoxExpandedByDefault)
@@ -311,6 +331,20 @@ private fun BaseOtaDialog(
                         onToggle = { if (copy.infoBoxDismissible) infoExpanded = !infoExpanded },
                         colors = colors,
                     )
+                }
+                // 0.4.3: "查看完整更新说明"链接 — 仅当 showFullNotesLink=true 且回调非空时渲染
+                if (copy.showFullNotesLink && onViewFullNotes != null) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(
+                        onClick = onViewFullNotes,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            copy.fullNotesLinkLabel,
+                            color = colors.accent,
+                            fontSize = 14.sp,
+                        )
+                    }
                 }
             }
         },
