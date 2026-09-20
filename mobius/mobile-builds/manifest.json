@@ -1,8 +1,30 @@
 {
-  "version": "0.4.2",
+  "version": "0.4.3",
   "platform": "android",
-  "generatedAt": "2026-09-20T00:30:00Z",
+  "generatedAt": "2026-09-20T01:30:00Z",
   "builds": [
+    {
+      "platform": "android",
+      "arch": "arm64",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.3-android-arm64.apk",
+      "size": 5152876,
+      "version": "0.4.3",
+      "versionCode": 27,
+      "sha256": "2c7eee59e88068b0968520f432853728b4f733b08b3736779f15bd8a8f504620",
+      "source": "github-actions run 35481234298 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit e2abfdc; OTA Phase 3 — dialog displays changelog summary + 查看完整更新说明 modal + ProfileScreen 通用设置挪位 + manual triggerOtaCheck toast 反馈)"
+    },
+    {
+      "platform": "android",
+      "arch": "armeabi-v7a",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.3-android-armeabi-v7a.apk",
+      "size": 5160844,
+      "version": "0.4.3",
+      "versionCode": 27,
+      "sha256": "0bdab2eab9219baf09c2901d98f47c6eef2857de33291075ffc90c7ec90d9962",
+      "source": "github-actions run 35481234298 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit e2abfdc; OTA Phase 3 — dialog displays changelog summary + 查看完整更新说明 modal + ProfileScreen 通用设置挪位 + manual triggerOtaCheck toast 反馈)"
+    },
     {
       "platform": "android",
       "arch": "arm64",
