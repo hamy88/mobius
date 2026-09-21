@@ -95,7 +95,10 @@ import {
 
 const router = express.Router();
 const GIT_SOURCES_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-type GitSourceCacheEntry = { expiresAt: number; scannedAt: string; source: any };
+// dirty (未提交计数) 变化快 — agent 随时在改文件, 24h 缓存会让"N 个未提交"长期失真
+// (甚至仓库已删仍显示)。dirty 数据单独用短 TTL, 过期即重查; 其余慢变信息仍走 24h。
+const GIT_DIRTY_CACHE_TTL_MS = 5 * 60 * 1000;
+type GitSourceCacheEntry = { expiresAt: number; scannedAt: string; dirtyStaleAt?: number; source: any };
 const gitSourceCache = new Map<string, GitSourceCacheEntry>();
 const remotePathCache = new Map<string, { expiresAt: number; path: string }>();
 
@@ -2674,7 +2677,12 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
     const inventory = Array.isArray(project.aimux_remote_inventory) ? project.aimux_remote_inventory : [];
     const remember = (key: string, source: any): any => {
       const expiresAt = Date.now() + GIT_SOURCES_CACHE_TTL_MS;
-      const entry = { expiresAt, scannedAt: new Date().toISOString(), source: { ...source, cache_expires_at: expiresAt } };
+      const entry: GitSourceCacheEntry = {
+        expiresAt,
+        scannedAt: new Date().toISOString(),
+        dirtyStaleAt: Date.now() + GIT_DIRTY_CACHE_TTL_MS,
+        source: { ...source, cache_expires_at: expiresAt },
+      };
       gitSourceCache.set(key, entry);
       cacheEntries.push(entry);
       queriedSourceCount += 1;
@@ -2684,6 +2692,8 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
       if (forceRefresh) return null;
       const entry = gitSourceCache.get(key);
       if (!entry || entry.expiresAt <= Date.now()) return null;
+      // dirty 短 TTL: 未提交计数过期 → 当 miss 重查, 避免"仓库已删仍显示 N 个未提交"
+      if (entry.source?.dirty && typeof entry.dirtyStaleAt === 'number' && entry.dirtyStaleAt <= Date.now()) return null;
       cacheEntries.push(entry);
       return { ...entry.source, cache_expires_at: entry.expiresAt };
     };
