@@ -3053,7 +3053,13 @@ export function AssistantChat() {
   ) => {
     if (!sessionId) return
     const previous = jsonlEntriesRef.current[sessionId] || []
-    const nextEntries = mode === 'replace' ? entries : previous.concat(entries)
+    let nextEntries = mode === 'replace' ? entries.slice() : previous.concat(entries)
+    // 缓冲上限 (卡死修复): responses 派生自全量 entries, 无限增长会让每次 append 的
+    // 重算成本线性上升; 截掉最老的, 早期回复仍可从 snapshot 拉取。
+    const MAX_JSONL_BUFFER = 3000
+    if (nextEntries.length > MAX_JSONL_BUFFER) {
+      nextEntries = nextEntries.slice(nextEntries.length - MAX_JSONL_BUFFER)
+    }
     jsonlEntriesRef.current = {
       ...jsonlEntriesRef.current,
       [sessionId]: nextEntries,
@@ -3098,6 +3104,40 @@ export function AssistantChat() {
       setStreamSessionId('')
     }
 
+    // ── 流式 append 批量节流 (浏览器卡死修复) ──
+    // jsonl_entry 在流式回复期间每秒可达几十条; 每条直接 applyJsonlEntries 会触发
+    // mergeJsonlEntriesIntoSnapshot 全量重算 responses + 重建 messages 数组 →
+    // ConversationMessage memo 全部失效 → 长会话 O(n²) 渲染, 主线程被占满.
+    // 这里把 entry 攒进 buffer, 250ms 批量应用 (每秒 ≤4 次 setState), 视觉无感.
+    let pendingAppendEntries: any[] = []
+    let pendingStatusPatch: any = null
+    let pendingTurnComplete = false
+    let flushTimer: number | null = null
+    const flushPendingEntries = () => {
+      flushTimer = null
+      if (pendingAppendEntries.length === 0 && !pendingTurnComplete) return
+      const batch = pendingAppendEntries
+      const patch = pendingStatusPatch || {}
+      pendingAppendEntries = []
+      pendingStatusPatch = null
+      const wasTurnComplete = pendingTurnComplete
+      pendingTurnComplete = false
+      if (batch.length > 0) {
+        applyJsonlEntries(sid, batch, 'append', {}, patch)
+      } else if (Object.keys(patch).length > 0) {
+        // 只有状态变化也落地 (如 typing 结束)
+        applyJsonlEntries(sid, [], 'append', {}, patch)
+      }
+      if (wasTurnComplete) {
+        window.setTimeout(() => { void refreshSnapshot(sid) }, 300)
+        refreshProjects()
+      }
+    }
+    const scheduleFlush = () => {
+      if (flushTimer != null) return
+      flushTimer = window.setTimeout(flushPendingEntries, 250)
+    }
+
     const handleStreamMessage = (event: MessageEvent) => {
       if (source !== eventSourceRef.current) return
       try {
@@ -3121,16 +3161,14 @@ export function AssistantChat() {
           }
         } else if (msg.event === 'jsonl_entry') {
           if (typeof msg.entry === 'undefined') return
-          const statusPatch = isTurnCompleteEntry(msg.entry)
-            ? { working: false, agent_status: 'idle' as const }
-            : (isAssistantActivityEntry(msg.entry)
-                ? { working: true, agent_status: 'running' as const }
-                : {})
-          applyJsonlEntries(sid, [msg.entry], 'append', {}, statusPatch)
           if (isTurnCompleteEntry(msg.entry)) {
-            window.setTimeout(() => { void refreshSnapshot(sid) }, 300)
-            refreshProjects()
+            pendingStatusPatch = { working: false, agent_status: 'idle' as const }
+            pendingTurnComplete = true
+          } else if (isAssistantActivityEntry(msg.entry)) {
+            pendingStatusPatch = { working: true, agent_status: 'running' as const }
           }
+          pendingAppendEntries.push(msg.entry)
+          scheduleFlush()
         } else if (msg.event === 'typing' && msg.active === false) {
           setSessions(prev => prev.map(snapshot => (
             snapshot.session.session_id === sid
@@ -3158,6 +3196,12 @@ export function AssistantChat() {
       } else {
         try { source.close() } catch {}
       }
+      if (flushTimer != null) {
+        window.clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      // 断流前把已到账的 entry 冲进去, 不丢尾巴
+      try { flushPendingEntries() } catch {}
       setStreamSessionId('')
     }
   }, [applyJsonlEntries, currentSessionId, open, refreshProjects, refreshSnapshot, voicePlaybackEnabled])
@@ -4026,16 +4070,32 @@ export function AssistantChat() {
                         || ((snapshot.responses || []).length === 0 && visibleMessages.length > 0)
                       return (
                         <div key={snapshot.session.session_id} className="contents">
-                          {visibleMessages.map(message => (
-                            <ConversationMessage
-                              key={message.render_id}
-                              message={message}
-                              onSpeak={speakText}
-                              voicePlaybackMode={voicePlaybackMode}
-                              activeVoiceMessageId={activeVoiceMessageId}
-                              voicePlaybackState={voicePlaybackState}
-                            />
-                          ))}
+                          {/* 渲染上限 (卡死修复): 超长会话全量渲染会把 DOM 与 React diff 拖垮,
+                              气泡场景只保留最近 N 条; 完整历史走会话详情页 */}
+                          {(() => {
+                            const MAX_RENDER_MESSAGES = 400
+                            const hiddenCount = Math.max(0, visibleMessages.length - MAX_RENDER_MESSAGES)
+                            const shownMessages = hiddenCount > 0 ? visibleMessages.slice(-MAX_RENDER_MESSAGES) : visibleMessages
+                            return (
+                              <>
+                                {hiddenCount > 0 && (
+                                  <div className="assistant-session-placeholder" style={{ padding: '.4rem 0' }}>
+                                    已折叠更早的 {hiddenCount} 条消息
+                                  </div>
+                                )}
+                                {shownMessages.map(message => (
+                                  <ConversationMessage
+                                    key={message.render_id}
+                                    message={message}
+                                    onSpeak={speakText}
+                                    voicePlaybackMode={voicePlaybackMode}
+                                    activeVoiceMessageId={activeVoiceMessageId}
+                                    voicePlaybackState={voicePlaybackState}
+                                  />
+                                ))}
+                              </>
+                            )
+                          })()}
                           {showPending && !hasVisiblePendingTurn ? (
                             <PendingMessage failed={snapshot.status?.failed} />
                           ) : null}
