@@ -7,6 +7,7 @@ import { AlertTriangle, Archive, BookOpen, Check, ChevronsLeft, ChevronsRight, C
 import { api, useStore } from '../store'
 import { formatCstRelative } from '../utils/time-format'
 import { AssistantPresetModal } from './assistant-preset-modal'
+import { MessageContentWithAttachments } from './message-attachments'
 import { draftClear, draftLoad, draftSave } from '../services/input-drafts'
 import {
   hasVoiceCommand,
@@ -1378,7 +1379,9 @@ const ConversationMessage = memo(function ConversationMessage({
         )}
       </div>
       {isUser ? (
-        <div className="assistant-session-message__content">{visibleContent}</div>
+        <div className="assistant-session-message__content">
+          <MessageContentWithAttachments content={visibleContent} />
+        </div>
       ) : (
         <AssistantMarkdown content={visibleContent} />
       )}
