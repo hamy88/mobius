@@ -1179,7 +1179,16 @@ function mergeJsonlEntriesIntoSnapshot(
 function needsPolling(snapshot: AssistantSnapshot) {
   if (snapshot.status?.failed) return false
   if (snapshot.status?.working) return true
-  return (snapshot.responses || []).length === 0
+  // 刚建的会话还没有回复 → 轮询等结果。但无限期等会把"已完成却无文本回复"
+  // (全程工具调用/被终止) 的会话永远显示成"运行中" — 加 5 分钟无活动熔断。
+  if ((snapshot.responses || []).length === 0) {
+    const lastActiveMs = snapshot.session?.last_active ? Date.parse(snapshot.session.last_active) : NaN
+    const createdMs = snapshot.session?.created_at ? Date.parse(snapshot.session.created_at) : NaN
+    const reference = Number.isFinite(lastActiveMs) ? lastActiveMs : createdMs
+    if (Number.isFinite(reference) && Date.now() - reference > 5 * 60 * 1000) return false
+    return true
+  }
+  return false
 }
 
 function sessionPageUrl(userId?: string, snapshot?: AssistantSnapshot | null) {
