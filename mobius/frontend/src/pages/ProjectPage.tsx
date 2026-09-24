@@ -5,9 +5,10 @@ import { useStore, api } from '../store'
 import { TopNav } from '../components/shell'
 import {
   NewIssueModal, ConfirmModal,
-  NewProjectModal, DeleteProjectModal, PathPickerModal,
+  DeleteProjectModal, PathPickerModal,
   NewResearchModal, RenameResearchModal,
 } from '../components/modals'
+import { NewProjectModal } from '../components/new-project-modal'
 import {
   Boxes,
   Brain,

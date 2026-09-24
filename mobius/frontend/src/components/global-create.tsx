@@ -1,16 +1,15 @@
 // =====================================================================
-// 全局「+」统一新建菜单 — 4 类创建单页弹窗 (Project / Issue / Session / Research Agent)
+// 全局「+」统一新建菜单 — 单页弹窗创建 (Project / Issue / Session)
 //
 // 设计目标 (需求任务1):
-//   - 顶栏 [+] 下拉 4 入口; 每类创建均为**单页弹窗**, 无分步跳转.
+//   - 顶栏 [+] 下拉入口; 每类创建均为**单页弹窗**, 无分步跳转.
 //   - Skill / Memory 用**二级浮层 (popover)** 选择, 不新开页面.
-//   - Session / Research Agent 弹窗内置附件上传 (拖拽 / Ctrl+V 粘贴 / 按钮).
+//   - Session 弹窗内置附件上传 (拖拽 / Ctrl+V 粘贴 / 按钮).
 //   - 表单记忆持久化 (localStorage 草稿, 关闭后回填).
-//   - 动态数据刷新: 中途新建的 project/issue/research 可被下拉重新读到.
-//   - Research Agent: 前置 research_enabled 校验 + 主 Skill 关联锁定 / 冲突互斥禁用.
+//   - 动态数据刷新: 中途新建的 project/issue 可被下拉重新读到.
 //   - 创建成功 → 标准模式保留次级确认弹窗；简易模式可由页面接管为 Toast.
 //
-// 不改动 modals.tsx 现有组件 (页面内创建流程零风险), 仅复用其底层 export.
+// 新建项目统一走 NewProjectModal (见 new-project-modal.tsx, 含压缩包导入).
 // =====================================================================
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -23,16 +22,8 @@ import { fetchGlobalDefaultModel, resolveDefaultModelKey } from '../services/glo
 import { ErrBanner } from './error-banner'
 import { PcTaskModeSection } from './pc-task-mode-section'
 import { formatDefaultSessionName } from '../services/session-naming'
-import { lazyWithRetry } from '../services/handle-stale-chunk'
 
-// 路径选择弹窗只在点"浏览"时出现, 按需加载: 静态 import 会把整个 modals 模块(连同 markdown
-// 渲染栈)拖进引用本模块的页面 —— 简易模式欢迎页的配置条就引用本模块.
-// The path picker only appears after clicking "browse" and loads on demand; a static import
-// would drag the whole modals module (plus the markdown stack) into every page that imports
-// this file, including the easy-mode welcome config bar.
-const PathPickerModal = lazyWithRetry(() => import('./modals').then(module => ({ default: module.PathPickerModal })))
 import { ToggleSwitch } from './toggle-switch'
-import { ProjectMemberInvite, type MemberInput } from './project-member-invite'
 import { SessionModelPicker } from './session-model-picker'
 import { ExpandableTextarea } from './expandable-textarea'
 import { type Attachment, newAttId, formatFileSize, uploadAttachmentFile, appendAttachmentsToDesc } from './attachments'
@@ -43,23 +34,22 @@ import {
   type SessionMentionSelection,
 } from './session-mention-picker'
 import {
-  Plus, ChevronDown, FolderPlus, CircleDot, MessagesSquare, FlaskConical,
+  Plus, ChevronDown, FolderPlus, CircleDot, MessagesSquare,
   X, Eye, Sparkles, RefreshCw, Paperclip, Image as ImageIcon, Trash2,
-  CheckCircle2, ExternalLink, Lock, Ban, Search, Dices, FolderOpen, Upload,
+  CheckCircle2, ExternalLink, Lock, Ban, Search,
 } from 'lucide-react'
 // 「新建快捷会话」表单已独立成文件 (含 取消/预览/创建 三键与传统菜单第 2 步预览的衔接)
 import { CreateSessionForm } from './quick-create-session'
+// 新建项目已统一到 NewProjectModal (独立文件, 含压缩包导入)
+import { NewProjectModal } from './new-project-modal'
 
 // ---------------------------------------------------------------------
 // 类型 & 常量
 // ---------------------------------------------------------------------
 export type CreateKind = 'project' | 'issue' | 'session' | 'research'
 
+
 type Visibility = 'private' | 'team' | 'public' | 'allowlist'
-const VISIBILITY_OPTIONS: { value: Visibility; label: string; desc: string }[] = [
-  { value: 'private', label: '私有', desc: '仅项目成员可见' },
-  { value: 'public', label: '公开', desc: '所有登录用户可见' },
-]
 
 // Issue 可见性: inherit 跟随项目, 其余档位不能比父项目更宽 (反向放大禁止)
 type IssueVisibility = 'inherit' | Visibility
@@ -70,47 +60,6 @@ const ISSUE_VISIBILITY_OPTIONS: { value: IssueVisibility; label: string; desc: s
   { value: 'public', label: '项目可见者', desc: '所有能看到项目的登录用户都可见' },
   { value: 'allowlist', label: '指定用户', desc: '仅允许名单中的用户可见' },
 ]
-
-// 项目类型预设: 顶栏单页新建项目, 用下拉选择类型, 选定后下方字段联动
-type ProjectKind = 'default' | 'research' | 'extension'
-const PROJECT_KIND_PRESETS: Array<{
-  kind: ProjectKind
-  label: string
-  desc: string
-  note: string
-}> = [
-  {
-    kind: 'default',
-    label: '经典项目',
-    desc: '导入或新建项目，后续可转研究',
-    note: '默认不开研究',
-  },
-  {
-    kind: 'research',
-    label: '研究项目',
-    desc: '多智能体长周期开放研究',
-    note: '自动启用研究',
-  },
-  {
-    kind: 'extension',
-    label: '拓展项目',
-    desc: '有前端 + 后端的莫比乌斯拓展',
-    note: '仅管理员可创建',
-  },
-]
-
-// 项目随机绑定路径生成器 (对齐 modals.tsx 行为)
-const RANDOM_PROJECT_ADJECTIVES = ['bright', 'calm', 'clever', 'cozy', 'fresh', 'gentle', 'lively', 'lovely', 'lucky', 'merry', 'neat', 'quiet', 'rapid', 'smart', 'sunny', 'tidy', 'warm', 'wise']
-const RANDOM_PROJECT_NOUNS = ['bird', 'brook', 'cloud', 'field', 'forest', 'garden', 'harbor', 'lake', 'leaf', 'meadow', 'moon', 'mountain', 'river', 'seed', 'snake', 'spark', 'star', 'stone', 'sun', 'tree', 'valley', 'wave', 'wind']
-function randomProjectSlug() {
-  const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)] || arr[0]
-  return `${pick(RANDOM_PROJECT_ADJECTIVES)}_${pick(RANDOM_PROJECT_NOUNS)}`
-}
-function randomProjectBindPath(workDir?: string | null) {
-  const root = (workDir || '').trim().replace(/\/+$/, '')
-  if (!root) return ''
-  return `${root}/${randomProjectSlug()}`.replace(/\/{2,}/g, '/')
-}
 
 type SessionLanguage = 'zh' | 'en'
 const LANGUAGE_CHOICES: { key: SessionLanguage; title: string }[] = [
@@ -803,281 +752,6 @@ export function Footer({ loading, submitText, onClose, onSubmit, disabled, previ
 }
 
 // =====================================================================
-// 表单 1: 创建 Project (单页 + 项目类型下拉，含 ZIP 导入入口)
-// =====================================================================
-export function CreateProjectForm({ onClose, onDone }: { onClose: () => void; onDone: (entity: any, detailUrl?: string) => void }) {
-  const { theme, user } = useStore()
-  const dark = theme !== 'light'
-  const canCreateExtension = user?.role === 'admin' || user?.role === 'developer'
-  const DRAFT_KEY = 'gc:new-project'
-  const d = draftLoad<any>(DRAFT_KEY) || {}
-  const initialKind: ProjectKind = (
-    d.projectKind === 'research'
-    || (d.projectKind === 'extension' && canCreateExtension)
-  ) ? d.projectKind : 'default'
-  const [projectKind, setProjectKind] = useState<ProjectKind>(initialKind)
-  const [name, setName] = useState(d.name || '')
-  const [desc, setDesc] = useState(d.desc || '')
-  const [bindPath, setBindPath] = useState(d.bindPath || randomProjectBindPath(user?.work_dir))
-  const [bindPathManual, setBindPathManual] = useState(!!d.bindPathManual)
-  const [researchEnabled, setResearchEnabled] = useState(projectKind === 'research' || !!d.researchEnabled)
-  const [defaultUseWorktree, setDefaultUseWorktree] = useState(!!d.defaultUseWorktree)
-  const [visibility, setVisibility] = useState<Visibility>(d.visibility || 'private')
-  const [inviteMembers, setInviteMembers] = useState<MemberInput[]>(
-    Array.isArray(d.inviteMembers) ? d.inviteMembers.filter((m: any) => m && m.user_id) : []
-  )
-  const [extensionName, setExtensionName] = useState(d.extensionName || '')
-  // 读者写权限 (对齐 NewProjectModal): owner/admin 永远可写, 此开关只对"非 owner 读者"生效. 默认 false (安全默认).
-  const [canPostIssue, setCanPostIssue] = useState(!!d.canPostIssue)
-  const [canRunSession, setCanRunSession] = useState(!!d.canRunSession)
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [permissionOpen, setPermissionOpen] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [err, setErr] = useState('')
-  const [archiveFile, setArchiveFile] = useState<File | null>(null)
-  const archiveInputRef = useRef<HTMLInputElement>(null)
-
-  // 切换项目类型时联动 research / worktree / extensionName, 但不动 name/desc 等输入
-  const chooseKind = (kind: ProjectKind) => {
-    if (kind === 'extension' && !canCreateExtension) return
-    setProjectKind(kind)
-    setErr('')
-    if (kind === 'default') {
-      setResearchEnabled(false); setDefaultUseWorktree(false); setExtensionName('')
-    } else if (kind === 'research') {
-      setResearchEnabled(true); setDefaultUseWorktree(false); setExtensionName('')
-    }
-  }
-
-  useEffect(() => {
-    draftSave(DRAFT_KEY, { projectKind, name, desc, bindPath, bindPathManual, researchEnabled, defaultUseWorktree, visibility, inviteMembers, extensionName, canPostIssue, canRunSession }, { minChars: 0 })
-  }, [projectKind, name, desc, bindPath, bindPathManual, researchEnabled, defaultUseWorktree, visibility, inviteMembers, extensionName, canPostIssue, canRunSession])
-
-  // 自动随机路径未填则补上 (extension / ZIP 导入不使用普通绑定路径字段)
-  useEffect(() => {
-    if (projectKind === 'extension') return
-    if (bindPath.trim() || !user?.work_dir) return
-    setBindPath(randomProjectBindPath(user.work_dir))
-    setBindPathManual(false)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectKind])
-
-  const refreshRandomBindPath = () => {
-    const next = randomProjectBindPath(user?.work_dir)
-    if (!next) { setErr('当前用户尚未配置工作目录，无法生成随机绑定路径'); return }
-    setBindPath(next); setBindPathManual(false); setErr('')
-  }
-
-  const submit = async () => {
-    // 项目名: 留空时若上传了压缩包, 用压缩包文件名推断
-    const inferredName = archiveFile ? archiveFile.name.replace(/\.(zip|tar\.gz|tgz|tar\.bz2|tar\.xz|tar|gz|bz2|xz)$/i, '').replace(/[._\s]+$/, '').trim() : ''
-    const finalName = name.trim() || inferredName
-    if (projectKind === 'extension') {
-      if (!canCreateExtension) { setErr('只有管理员或开发者可以创建莫比乌斯拓展项目'); return }
-      if (!extensionName.trim()) { setErr('请输入拓展标识名'); return }
-      if (!/^[a-z][a-z0-9-]{0,31}$/.test(extensionName.trim())) { setErr('拓展标识名: 小写字母开头, 含小写字母/数字/连字符, 1-32 字符'); return }
-    } else {
-      if (!finalName) { setErr('请输入项目名称, 或上传压缩包以自动命名'); return }
-      if (!bindPath.trim()) { setErr('请选择项目绑定路径'); return }
-    }
-    setLoading(true); setErr('')
-    try {
-      const body: any = { name: projectKind === 'extension' ? name.trim() : finalName, description: desc, visibility }
-      if (projectKind === 'extension') {
-        body.kind = 'extension'
-        body.extensionName = extensionName.trim()
-      } else {
-        body.bindPath = bindPath
-        body.bindPathManual = bindPathManual
-        body.defaultUseWorktree = researchEnabled ? false : defaultUseWorktree
-        body.researchEnabled = projectKind === 'research' ? true : researchEnabled
-        body.can_post_issue = canPostIssue
-        body.can_run_session = canRunSession
-        // 首批项目组成员 (带角色; 排除创建者本人, 他自动成为项目负责人).
-        body.members = inviteMembers.filter((m: MemberInput) => m.user_id && m.user_id !== user?.id)
-      }
-      const p = await api('/api/projects', { method: 'POST', body: JSON.stringify(body) })
-      if (p?.error) { setErr(p.error); return }
-      // 上传了压缩包: 解压到新项目目录 (新建=空目录, 零冲突, 自动 git init)
-      if (archiveFile && p?.id) {
-        try {
-          const fd = new FormData(); fd.append('file', archiveFile, archiveFile.name)
-          await api(`/api/projects/${p.id}/import-zip`, { method: 'POST', body: fd })
-        } catch (e: any) {
-          draftClear(DRAFT_KEY)
-          setErr(`项目「${finalName}」已创建, 但代码导入失败: ${e?.message || '未知错误'}。可关闭后进入该项目, 用「项目文件」的「上传 ZIP」重传。`)
-          return
-        }
-      }
-      draftClear(DRAFT_KEY)
-      onDone({ ...p, name: projectKind === 'extension' ? name.trim() : finalName }, p?.id && p?.created_by ? `/u/${p.created_by}/p/${p.id}` : undefined)
-    } catch (e: any) { setErr(e?.message || '创建失败') } finally { setLoading(false) }
-  }
-
-  const visibilityOption = VISIBILITY_OPTIONS.find(o => o.value === visibility) || VISIBILITY_OPTIONS[0]
-
-  const permissionSettingsModal = permissionOpen ? (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => setPermissionOpen(false)} />
-      <div className="relative w-[440px] max-w-[calc(100vw-32px)] rounded-2xl p-5 shadow-2xl"
-        onClick={e => e.stopPropagation()} style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
-        <h4 className="text-[length:var(--fs-2xl)] font-semibold mb-1" style={{ color: dark ? '#f1f5f9' : '#1e293b' }}>修改项目权限</h4>
-        <p className="mb-4 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>添加项目成员（谁能看到 / 使用本项目，由成员列表决定）。</p>
-        {projectKind !== 'extension' && (
-          <ProjectMemberInvite
-            value={inviteMembers}
-            onChange={setInviteMembers}
-            currentUserId={user?.id}
-          />
-        )}
-        <div className="mt-5 flex justify-end">
-          <button type="button" onClick={() => setPermissionOpen(false)} className="h-9 px-5 rounded-xl text-[length:var(--fs-lg)] btn-primary transition-colors">完成</button>
-        </div>
-      </div>
-    </div>
-  ) : null
-
-  return (
-    <CreateModalShell title={projectKind === 'extension' ? '新建拓展项目' : projectKind === 'research' ? '新建研究项目' : '新建项目'} onClose={onClose} dark={dark} width={600}
-      footer={<Footer loading={loading} submitText="创建" onClose={onClose} onSubmit={submit} />}>
-      {/* 项目类型: 下拉菜单, 选定后下方字段自动联动 */}
-      <div>
-        <SectionLabel hint="选定后下方字段自动联动">项目类型</SectionLabel>
-        <DropdownSelect
-          value={projectKind}
-          onChange={v => chooseKind(v as ProjectKind)}
-          dark={dark}
-          options={PROJECT_KIND_PRESETS.map(opt => {
-            const disabled = opt.kind === 'extension' && !canCreateExtension
-            return {
-              value: opt.kind,
-              label: opt.label,
-              description: `${opt.desc} · ${disabled ? '仅管理员或开发者' : opt.note}`,
-              disabled,
-              badge: opt.kind === 'research'
-                ? { text: '自动', color: '#10b981', bg: 'rgba(16,185,129,0.15)' }
-                : opt.kind === 'extension'
-                ? { text: '需授权', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' }
-                : undefined,
-            }
-          })}
-        />
-        <p className="mt-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>{PROJECT_KIND_PRESETS.find(p => p.kind === projectKind)?.desc}</p>
-      </div>
-      <div>
-        <SectionLabel hint={archiveFile ? '留空则用压缩包文件名' : undefined}>项目名称</SectionLabel>
-        <TextInput value={name} onChange={v => { setName(v); setErr('') }} placeholder="例如：强化学习最新进展调研（选了压缩包可留空）" autoFocus dark={dark} />
-      </div>
-      {projectKind === 'extension' ? (
-        <div>
-          <SectionLabel hint="小写字母开头, 1-32 字符">拓展标识名</SectionLabel>
-          <TextInput value={extensionName} onChange={v => { setExtensionName(v.toLowerCase().replace(/[^a-z0-9-]/g, '')); setErr('') }} placeholder="例如：my-awesome-ext" dark={dark} />
-          <p className="mt-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>创建后在 mobius/extension/ 下生成拓展骨架，可在主页直接打开</p>
-        </div>
-      ) : (
-        <>
-          <div>
-            <SectionLabel hint="选填">项目描述</SectionLabel>
-            <ExpandableTextarea value={desc} onValueChange={setDesc} placeholder="一句话描述这个项目" overlayTitle="编辑项目描述"
-              className="w-full h-20 px-3 py-2 rounded-xl text-[length:var(--fs-lg)] placeholder:!text-[var(--placeholder-color)] focus:outline-none focus:border-blue-500/40 resize-none"
-              style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: dark ? '#f1f5f9' : '#1e293b' }} />
-          </div>
-          <div>
-            <SectionLabel hint="agent 的工作目录">绑定路径</SectionLabel>
-            <div className="flex gap-2">
-              <TextInput value={bindPath} onChange={v => { setBindPath(v); setBindPathManual(true); setErr('') }} placeholder="点击右侧选择，或手动输入绝对路径" dark={dark} />
-              <button type="button" onClick={() => setPickerOpen(true)} title="选择路径"
-                className="h-10 px-3 rounded-xl border flex items-center gap-1 text-[length:var(--fs-md)] shrink-0 hover:bg-[var(--bg-card-hover)]"
-                style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
-                <FolderOpen className="w-3.5 h-3.5" />
-              </button>
-              <button type="button" onClick={refreshRandomBindPath} title="换一个随机路径"
-                className="h-10 w-10 shrink-0 rounded-xl border flex items-center justify-center hover:bg-[var(--bg-card-hover)]"
-                style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
-                <Dices className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-          <div>
-            <SectionLabel hint="选填, 创建时自动解压到项目目录">代码压缩包</SectionLabel>
-            <input
-              ref={archiveInputRef}
-              type="file"
-              accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tar.xz"
-              className="hidden"
-              onChange={e => { setArchiveFile(e.target.files?.[0] || null); setErr('') }}
-            />
-            <button type="button" onClick={() => archiveInputRef.current?.click()}
-              className="flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors hover:bg-[var(--bg-card-hover)]"
-              style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)' }}>
-              <Upload className="w-4 h-4 flex-shrink-0 text-blue-400" strokeWidth={1.75} />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[length:var(--fs-md)] font-medium" style={{ color: archiveFile ? (dark ? '#cbd5e1' : '#334155') : 'var(--text-muted)' }}>
-                  {archiveFile ? archiveFile.name : '点击选择压缩包(可不上传)'}
-                </span>
-                <span className="mt-0.5 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
-                  {archiveFile ? `${formatFileSize(archiveFile.size)} · 创建时自动解压 + git init` : '留空创建空项目; 上传则解压代码并自动 git init'}
-                </span>
-              </span>
-              {archiveFile && (
-                <span role="button" tabIndex={0}
-                  onClick={e => { e.stopPropagation(); setArchiveFile(null); if (archiveInputRef.current) archiveInputRef.current.value = '' }}
-                  className="flex-shrink-0 text-[length:var(--fs-sm)]" style={{ color: '#60a5fa' }}>移除</span>
-              )}
-            </button>
-          </div>
-          {/* 项目成员: 单行按钮触发二级 modal 添加成员 (纯成员制, 谁能看到/使用本项目由成员列表决定) */}
-          <div>
-            <SectionLabel hint="谁能看到 / 使用本项目，由成员列表决定">项目成员</SectionLabel>
-            <button type="button" onClick={() => setPermissionOpen(true)}
-              className="flex w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors hover:bg-[var(--bg-card-hover)]"
-              style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)' }}>
-              <Eye className="w-4 h-4 flex-shrink-0 text-blue-400" strokeWidth={1.75} />
-              <span className="min-w-0 flex-1">
-                <span className="block text-[length:var(--fs-md)] font-medium" style={{ color: dark ? '#cbd5e1' : '#334155' }}>设置项目成员</span>
-                <span className="mt-0.5 block truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{inviteMembers.length ? `已选 ${inviteMembers.length} 位成员` : '点击添加项目成员（负责人 / 管理员 / 成员 / 访客）'}</span>
-              </span>
-              <span className="flex-shrink-0 text-[length:var(--fs-sm)]" style={{ color: '#60a5fa' }}>设置</span>
-            </button>
-          </div>
-          {projectKind === 'default' && (
-            <ToggleSwitch
-              checked={researchEnabled}
-              onChange={enabled => { setResearchEnabled(enabled); if (enabled) setDefaultUseWorktree(false) }}
-              className="flex items-start gap-3 text-[length:var(--fs-lg)]"
-              style={{ color: dark ? '#cbd5e1' : '#334155' }}>
-              <span><span className="font-medium">启用研究系统</span><span className="block text-[length:var(--fs-sm)] mt-0.5" style={{ color: 'var(--text-muted)' }}>开启后可在本项目中创建研究智能体团队</span></span>
-            </ToggleSwitch>
-          )}
-          {projectKind === 'research' && (
-            <div className="rounded-xl px-3 py-2 text-[length:var(--fs-sm)] flex items-center gap-2" style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)', color: '#10b981' }}>
-              <FlaskConical className="w-3.5 h-3.5" /> 研究项目已自动启用研究系统并禁用 git worktree
-            </div>
-          )}
-          {!researchEnabled && (
-            <ToggleSwitch
-              checked={defaultUseWorktree}
-              onChange={setDefaultUseWorktree}
-              className="flex items-center gap-3 text-[length:var(--fs-lg)]"
-              style={{ color: dark ? '#cbd5e1' : '#334155' }}>
-              默认使用 git worktree（新建任务时在绑定路径下开独立工作区）
-            </ToggleSwitch>
-          )}
-        </>
-      )}
-      {err && <ErrBanner>{err}</ErrBanner>}
-      {pickerOpen && (
-        <Suspense fallback={null}>
-          <PathPickerModal initialPath={user?.work_dir} onClose={() => setPickerOpen(false)}
-            onPick={(_abs, rel, manual) => { setBindPath(rel || _abs); setBindPathManual(!!manual); setPickerOpen(false) }} />
-        </Suspense>
-      )}
-      {permissionSettingsModal}
-    </CreateModalShell>
-  )
-}
-
-// =====================================================================
 // 表单 2: 创建 Issue (单页: 目标项目 + 标题 + 描述 + 可见性 + worktree + 规划)
 // 替代旧 TargetPicker(选项目) → NewIssueModal(填字段) 两步流程.
 // =====================================================================
@@ -1571,7 +1245,6 @@ const MENU_ITEMS: { kind: CreateKind; label: string; icon: any }[] = [
   { kind: 'project', label: '新建项目', icon: FolderPlus },
   { kind: 'issue', label: '新建任务', icon: CircleDot },
   { kind: 'session', label: '新建快捷会话', icon: MessagesSquare },
-  { kind: 'research', label: '新建研究智能体', icon: FlaskConical },
 ]
 
 export function GlobalCreateMenu({ open, onOpenChange, onPick, inProject, currentProject }: {
@@ -1629,7 +1302,7 @@ export function GlobalCreateMenu({ open, onOpenChange, onPick, inProject, curren
   )
 }
 
-// 根调度: 4 类创建均走自定义单页表单 (CreateProjectForm / CreateIssueForm / CreateSessionForm / CreateResearchForm).
+// 根调度: project 走 NewProjectModal; 其余走自定义单页表单 (CreateIssueForm / CreateSessionForm / CreateResearchForm).
 // session: 标准模式由表单显示“查看 / 再创建一个 / 关闭”；简易模式由页面显示 Toast.
 // research agent 创建成功 → 经 onNavigate 在 SPA 内直接进入该 Session.
 // project / issue 创建成功 → 仍走次级确认弹窗, 「跳转详情」新开浏览器 Tab.
@@ -1671,7 +1344,14 @@ export function GlobalCreateRoot({ kind, ctx, onClose, onNavigate, initialPrompt
     setSuccess({ entity, detailUrl, name: entity?.name || entity?.title || '' })
   }
 
-  if (kind === 'project') return <CreateProjectForm onClose={onClose} onDone={handleDone} />
+  // project 统一走 NewProjectModal (原 CreateProjectForm 已并入该组件并独立成文件)
+  // Projects now always go through NewProjectModal, the single create-project implementation
+  if (kind === 'project') return (
+    <NewProjectModal
+      onClose={onClose}
+      onCreated={(p: any) => handleDone(p, p?.id && p?.created_by ? `/u/${p.created_by}/p/${p.id}` : undefined)}
+    />
+  )
   if (kind === 'issue') return <CreateIssueForm onClose={onClose} onDone={handleDone} defaultProjectId={ctx.projectId} />
   if (kind === 'session') return <CreateSessionForm onClose={onClose} onDone={handleDone} onNavigate={onNavigate} defaultProjectId={ctx.projectId} defaultIssueId={ctx.issueId} initialPrompt={initialPrompt} successMode={sessionSuccessMode === 'toast' ? 'external' : 'dialog'} />
   if (kind === 'research') return <CreateResearchForm onClose={onClose} onDone={handleDone} defaultProjectId={ctx.projectId} />
