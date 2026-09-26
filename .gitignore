@@ -1,9 +1,28 @@
+# =============================================================================
+# Mobius 仓库忽略规则
+#
+# 维护须知:
+#   1. 例外规则 (!...) 必须写在它要反忽略的规则之后 — git 以「最后一条命中的
+#      规则」为准;
+#   2. 父目录被忽略时无法直接反忽略其下的文件, 必须先反忽略目录再反忽略文件;
+#   3. 不带中间斜杠的模式匹配任意层级 (build/ 命中任何目录下的 build/),
+#      带中间斜杠的模式相对本文件所在目录锚定;
+#   4. 已被上层通配覆盖的路径不要再单列 — 重复规则只会让文件难读。
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
 # Dependencies
+# -----------------------------------------------------------------------------
 node_modules/
-# 这条不能合并到上面 (上面 node_modules/ 只匹配目录, 这是指向 frontend deps 的 symlink — 实际 v1.9 已替换为真目录, 保留兜底)
+# 这条不能合并到上面 (上面 node_modules/ 只匹配目录, 这是指向 frontend deps 的 symlink
+# — 实际 v1.9 已替换为真目录, 保留兜底)
 mobius/frontend/node_modules
 
+
+# -----------------------------------------------------------------------------
 # Build outputs
+# -----------------------------------------------------------------------------
 dist/
 build/
 # 例外: mobius/desktop/build/ 是桌面端构建期资源 (应用图标 icon.png/icon.ico +
@@ -19,84 +38,66 @@ _next/
 out/
 coverage/
 htmlcov/
-mobius/frontend/dist/
-mobius/frontend/.vite/
 .vite/
+site/
+outputs/
 
-# Runtime data (主 sqlite + WAL, hub runtime snapshot)
+
+# -----------------------------------------------------------------------------
+# Frontend build artifacts (构建脚本生成的品牌资源, 不入仓)
+# -----------------------------------------------------------------------------
+mobius/public/index.html
+mobius/public/fonts
+mobius/public/designer-eye/
+mobius/server_tmp_version.js
+mobius/.build/other-versions/
+mobius/.build/public.next
+
+
+# -----------------------------------------------------------------------------
+# Runtime data (主 sqlite + WAL, hub runtime snapshot, 用户工作区与上传)
+# -----------------------------------------------------------------------------
 data/*.db
 data/*.db-shm
 data/*.db-wal
 data/*.json
 data/turn-summaries/
 data/momo-mobile/
-
-# Local runtime data (运行期状态、DB、hub 快照, 不提交)
 local_data/
-
-# 用户工作区 (系统运行期生成的用户文件, 每台机不同)
 workspace/
-
-# 用户上传文件 (skill/memory imports, 运行期产物)
 mobius/uploads/
-
-# Runtime task flags (每个 session 的 running.flag 等运行期标记, 非源码)
-.imac/
-.mobius/
-
-accepted_setting.log
-
-# 用户数据 (skill 文件树 + memory 文件树, 含个人 SKILL.md / MEMORY 内容)
+projects/
+.deploy_data/
 protected_data/
 
+
+# -----------------------------------------------------------------------------
+# Runtime flags & local tool state (每个 session 的 running.flag 等运行期标记, 非源码)
+# -----------------------------------------------------------------------------
+.imac
+.mobius
+.agent
+.agents
+.claude/
+.cursor
+.worktrees/
+skills
+skills-lock.json
+downloads
+
+
+# -----------------------------------------------------------------------------
 # Logs
+# -----------------------------------------------------------------------------
 logs/
 *-logs/
 *.log
 
-# OS
-.DS_Store
 
-# Secrets
+# -----------------------------------------------------------------------------
+# Secrets (运行期秘钥 — 只本地存, 绝不提交)
+# -----------------------------------------------------------------------------
 .env
-.trash
-mobius/public/index.html
-mobius/public/assets
-mobius/public/fonts
-mobius/public/designer-eye/
-mobius/server_tmp_version.js
-mobius/.build/other-versions/
-outputs/
-__pycache__
-*.py[cod]
-mobius/.venv-aimux/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.cache/
-tmp/
-temp/
-*.tmp
-*.temp
-*.bak
-*.orig
-*.swp
-*.swo
-*~
-.agent
-.cursor
-.imac
-.mobius
-
-assets
-!mobius/backend/assets/
-!mobius/backend/assets/desktop-page-actions.js
-
-# Local external checkouts / machine-specific helpers
-/jsoncrack
-/jsoncrack-start.sh
-
-# 运行期秘钥 (claude/codex 登录态、代理配置) — 只本地存, 绝不提交
 deploy/secrets/*
 !deploy/secrets/.gitkeep
 
@@ -106,18 +107,52 @@ deploy/minimal/codex/config.toml
 !deploy/minimal/codex/.gitkeep
 !deploy/minimal/codex/config.toml.example
 
-# Claude Code 工具状态 (个人本地)
-.claude/scheduled_tasks.lock
-.claude/
-.imac/session_inputs
-.mobius/session_inputs
-mobius/.build/public.next
+
+# -----------------------------------------------------------------------------
+# Caches & local envs (Python / 工具链缓存与虚拟环境)
+# -----------------------------------------------------------------------------
+__pycache__
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+.tmp*
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+.trash
+.venv-docs/
+.python-portable
+mobius/.venv-aimux/
+
+
+# -----------------------------------------------------------------------------
+# OS
+# -----------------------------------------------------------------------------
+.DS_Store
+
+
+# -----------------------------------------------------------------------------
+# Machine-specific paths (本机专用目录 / 外部 checkout, 换台机不存在)
+# -----------------------------------------------------------------------------
+/jsoncrack
+/jsoncrack-start.sh
 deploy/host-data
-projects/
-.deploy_data/
 host-data/
 host_data/
-docs/superpowers
+/assess_appearance/
+
+
+# -----------------------------------------------------------------------------
+# Docs (仅教程与对外文档入仓)
+# -----------------------------------------------------------------------------
 docs/*
 !docs/tutorial
 !docs/index.md
@@ -126,10 +161,20 @@ docs/*
 !docs/jsonl_card_parse.md
 !docs/upload-page-media-to-cdn.md
 
-# mkdocs 本地构建产物 + 文档 venv
-site/
-.venv-docs/
-/assess_appearance/
+
+# -----------------------------------------------------------------------------
+# Backend (tsserver 偶发自动 emit 的 .js — 我们的运行时是 tsx, 直接跑 .ts, 这些产物会遮蔽源码)
+# -----------------------------------------------------------------------------
+mobius/db.js
+mobius/backend/types/*.js
+mobius/backend/repositories/*.js
+mobius/backend/services/*.js
+
+
+# -----------------------------------------------------------------------------
+# Extension (拓展源码大部分不入仓, 仅 5 个内置拓展保留)
+# -----------------------------------------------------------------------------
+mobius/extension
 
 # 演示视频: 仅本地保留, 不入仓 (体积大, clone 后从 NAS / OSS / 本地缓存取回即可)
 mobius/extension/mobius-home/frontend/assets/videos/*.mp4
@@ -146,38 +191,31 @@ mobius/extension/mobius-home/frontend/assets/v1/*.gif
 mobius/extension/mobius-home/frontend/assets/v1/*.mp4
 **/*.gif.local
 
-# IDE tsserver 偶发自动 emit 的 .js (我们的运行时是 tsx, 直接跑 .ts, 这些产物会遮蔽源码)
-mobius/db.js
-mobius/backend/types/*.js
-mobius/backend/repositories/*.js
-mobius/backend/services/*.js
-image*.png
+# 通用 assets 目录 (backend 下两个例外紧随其后)
+assets
+!mobius/backend/assets/
+!mobius/backend/assets/desktop-page-actions.js
 
-# Ignore extension
-mobius/extension
+
+# -----------------------------------------------------------------------------
+# Build bundles (各端打包产物, 体积大不入仓)
+# -----------------------------------------------------------------------------
 mobius/public/desktop-builds/
 mobius/desktop-builds/
 mobius/public/mobile-builds/
 mobius/mobile-builds/
 mobius/frontend/public/mobile-builds/
 mobius/tui-builds/
-.worktrees/
-.python-portable
-.agents
-skills
-downloads
-skills-lock.json
-logo.png
 
-# 移动端 (momo-mobile 镜像, 真源在 /home/tianyi/momo-mobile + GitLab/GitHub 同步)
+
+# -----------------------------------------------------------------------------
+# Mobile (momo-mobile 镜像, 真源在 /home/tianyi/momo-mobile + GitLab/GitHub 同步)
 # 构建产物与本地环境不入仓; frontend/dist 由 momo-mobile 侧提交(扩展发布需要), 这里同样保留
-mobius/mobile/.gradle/
+# -----------------------------------------------------------------------------
 mobius/mobile/.kotlin/
-mobius/mobile/**/build/
 mobius/mobile/data/
 mobius/mobile/local.properties
 mobius/mobile/webPreview/
-mobius/mobile/node_modules/
 mobius/mobile/apple-credentials.sh
 mobius/mobile/android-credentials*.sh
 mobius/mobile/*.jks
@@ -185,7 +223,14 @@ mobius/mobile/*.keystore
 mobius/mobile/keystore/
 mobius/mobile/keystore.properties
 mobius/mobile/backend/jpush_config.json
-mobius/mobile/.env
 mobius/mobile/.env.*
 mobius/mobile/iosApp/Frameworks/
 mobius/mobile/iosApp/*.xcodeproj/
+
+
+# -----------------------------------------------------------------------------
+# Misc (零散文件: 本地图片素材与打包产物)
+# -----------------------------------------------------------------------------
+image*.png
+logo.png
+*.tgz

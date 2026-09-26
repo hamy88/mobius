@@ -2,6 +2,7 @@
 
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { FileCode2, Loader2, AlertTriangle, ExternalLink, Save, Search, X, Sun, Moon, FolderOpen, Download, Copy, ClipboardPaste, Pencil, FolderTree, FilePlus2, FolderPlus, RefreshCw, Eye, EyeOff, WrapText, Plus, Check } from 'lucide-react'
+import type { EditorView } from '@codemirror/view'
 import { api } from '../../store'
 import { ResizablePanel } from '../resizable-panel'
 import { RemoteComputeMemoryModal } from '../memories'
@@ -49,6 +50,10 @@ type CodeConversationPaneProps = {
   vscodeWebUrl?: string
   // 当前会话 id: 用于后端把该会话绑定的 aimux bridge 设备 (元素1) 注入远程文件源 (元素2)。
   sessionId?: string
+  // variant='page' (默认): 整页代码对话 v2 的左+中两栏, 编辑器列宽度可拖.
+  // variant='sidebar': 嵌入窄容器 (简易模式右侧文件栏). 宽度记忆与 page 模式分开,
+  // 编辑器列改 flex-1 占满剩余宽度 (拖拽由外层侧栏承担), 文件树范围收窄一档.
+  variant?: 'page' | 'sidebar'
 }
 
 type FileSource = 'hub' | 'local' | 'remote'
@@ -139,6 +144,23 @@ type FileContent = {
   binary: boolean
 }
 
+// ★ 多 Tab 编辑: 每个打开的文件一个 Tab, 各自独立保留 内容/未保存(dirty)/保存进度/WYSIWYG 态.
+// key = entry.abs_path (同一数据源下唯一; 切换数据源时全部关闭, 不存在跨源同 key).
+type EditorTab = {
+  key: string
+  entry: Entry
+  fileData: FileContent | null
+  loading: boolean
+  error: string
+  // doc = 该 Tab 编辑器当前内容; dirty = doc 与磁盘 content 不一致. 保存成功复位 dirty.
+  doc: string
+  dirty: boolean
+  saving: boolean
+  saveError: string
+  saveOk: boolean
+  mdPreview: boolean
+}
+
 // 中栏 (含头部工具栏) 的两套固定配色 — 与对应 CodeMirror 主题背景严格匹配, 独立于全局主题.
 // dark 取 oneDark 背景的前景色族; light 取白底深字. 这样头部工具栏与编辑区视觉一体.
 const main_text_color_dark = '#c9c9c9'
@@ -160,7 +182,8 @@ function loadCodeWordWrap(): boolean {
   try { return localStorage.getItem(CODE_WORD_WRAP_STORAGE_KEY) === '1' } catch { return false }
 }
 
-export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessionId }: CodeConversationPaneProps) {
+export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessionId, variant = 'page' }: CodeConversationPaneProps) {
+  const compact = variant === 'sidebar'
   const desktop = getDesktopBridge()
   const isDesktop = !!desktop?.isDesktop
   const [source, setSourceState] = useState<FileSource>(() => loadFileSource(projectId))
@@ -210,19 +233,32 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     setShowFileFilter(visible => !visible)
   }, [showFileFilter])
 
-  // ----- 代码浏览/编辑状态 -----
-  const [selected, setSelected] = useState<Entry | null>(null)
-  const [fileData, setFileData] = useState<FileContent | null>(null)
-  const [fileLoading, setFileLoading] = useState(false)
-  const [fileError, setFileError] = useState('')
-  // 编辑: doc = 编辑器当前内容; dirty = doc 与磁盘 content 不一致. 保存成功复位 dirty.
-  const [doc, setDoc] = useState('')
-  const [dirty, setDirty] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState('')
-  const [saveOk, setSaveOk] = useState(false)
-  // ★ Markdown 编辑模式 (仅 .md 文件): 源码编辑 (CodeMirror) <-> 富文本 WYSIWYG 编辑; 切换文件时复位为源码.
-  const [mdPreview, setMdPreview] = useState(false)
+  // ----- 代码浏览/编辑状态 (多 Tab) -----
+  const [tabs, setTabs] = useState<EditorTab[]>([])
+  const [activeKey, setActiveKey] = useState('')
+  // tabs 镜像: 异步流程 (保存/重命名前自动保存) 里读最新 doc, 不受闭包过期影响.
+  const tabsRef = useRef<EditorTab[]>([])
+  tabsRef.current = tabs
+  // 双击/连点同一文件时 React 尚未重渲染, 用该集合挡住重复开 Tab.
+  const openingRef = useRef<Set<string>>(new Set())
+  // 每个 Tab 的 CodeMirror 实例 (Tab 保活 => 撤销栈/滚动保留); Tab 切回可见时 requestMeasure.
+  const editorViewsRef = useRef<Map<string, EditorView>>(new Map())
+
+  // 局部更新某个 Tab 的字段 (函数式 patch 可读旧值).
+  const patchTab = useCallback((key: string, patch: Partial<EditorTab> | ((tab: EditorTab) => Partial<EditorTab>)) => {
+    setTabs(prev => prev.map(t => t.key === key ? { ...t, ...(typeof patch === 'function' ? patch(t) : patch) } : t))
+  }, [])
+
+  // 当前激活 Tab (派生); selected/fileData/dirty 等别名保持旧渲染代码可读.
+  const activeTab = useMemo(() => tabs.find(t => t.key === activeKey) || null, [tabs, activeKey])
+  const selected: Entry | null = activeTab?.entry || null
+  const fileData: FileContent | null = activeTab?.fileData || null
+  const dirty = !!activeTab?.dirty
+  const saving = !!activeTab?.saving
+  const saveError = activeTab?.saveError || ''
+  const saveOk = !!activeTab?.saveOk
+  const mdPreview = !!activeTab?.mdPreview
+  const anyDirty = tabs.some(t => t.dirty)
 
   // ----- 右键菜单 / 文件操作状态 (设计文档 §9) -----
   // writable: 数据源是否可写 (hub 用 bind_path_writable; local 默认 true, 写权限由主进程 W_OK 兜底)。
@@ -311,9 +347,9 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
       return
     }
     if (next === remoteRoot) { setRemoteRootEditing(false); setRemoteRootError(''); return }
-    // 换目录会重建文件树并丢弃当前编辑, 有未保存修改时先确认
-    // Changing the dir rebuilds the tree and drops the open editor, so confirm unsaved edits first
-    if (dirty && selected && !window.confirm(`「${selected.name}」有未保存的修改，更改远程目录将丢弃。确定更改？`)) return
+    // 换目录会重建文件树并关闭全部 Tab, 有未保存修改时先确认
+    // Changing the dir rebuilds the tree and closes all tabs, so confirm unsaved edits first
+    if (anyDirty && !window.confirm(`有 ${tabs.filter(t => t.dirty).length} 个文件存在未保存的修改，更改远程目录将丢弃。确定更改？`)) return
     setRemoteRoot(next)
     try {
       if (next) localStorage.setItem(remoteRootStorageKey(projectId, remoteName), next)
@@ -321,7 +357,7 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     } catch { /* 静默 */ }
     setRemoteRootEditing(false)
     setRemoteRootError('')
-  }, [dirty, projectId, remoteName, remoteRoot, remoteRootDraft, selected])
+  }, [anyDirty, tabs, projectId, remoteName, remoteRoot, remoteRootDraft])
 
   const loadDir = useCallback(async (relPath: string) => {
     setDirs(prev => ({ ...prev, [relPath]: { ...prev[relPath], loading: true, error: undefined } }))
@@ -365,16 +401,11 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     return () => { cancelled = true }
   }, [desktop, isDesktop, projectId])
 
+  // 关闭全部 Tab (切换数据源/项目时调用; 调用方负责先确认未保存修改).
   const clearEditorState = useCallback(() => {
-    setSelected(null)
-    setFileData(null)
-    setFileLoading(false)
-    setFileError('')
-    setDoc('')
-    setDirty(false)
-    setSaving(false)
-    setSaveError('')
-    setSaveOk(false)
+    setTabs([])
+    setActiveKey('')
+    editorViewsRef.current.clear()
   }, [])
 
   useEffect(() => {
@@ -413,9 +444,9 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     const nextSource: FileSource = next === LOCATION_HUB ? 'hub' : (next === LOCATION_LOCAL ? 'local' : 'remote')
     if (nextSource === 'local' && !isDesktop) return
     if (nextSource === source && (nextSource !== 'remote' || next === remoteName)) return
-    if (dirty && selected) {
+    if (anyDirty) {
       const action = nextSource === source ? '切换远程机器' : '切换文件来源'
-      if (!window.confirm(`「${selected.name}」有未保存的修改，${action}将丢弃。确定切换？`)) return
+      if (!window.confirm(`有 ${tabs.filter(t => t.dirty).length} 个文件存在未保存的修改，${action}将丢弃。确定切换？`)) return
     }
     if (nextSource !== source) {
       setSourceState(nextSource)
@@ -425,7 +456,7 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
       setRemoteName(next)
       try { localStorage.setItem(remoteMachineStorageKey(projectId), next) } catch { /* 静默 */ }
     }
-  }, [dirty, isDesktop, projectId, remoteName, selected, source])
+  }, [anyDirty, tabs, isDesktop, projectId, remoteName, source])
 
   const chooseLocalPath = useCallback(async () => {
     if (!desktop?.pickDirectory || !desktop.confirmProjectPath) return
@@ -453,19 +484,30 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
 
   const onSelectFile = useCallback(async (entry: Entry) => {
     if (entry.type !== 'file') return
-    // 切换前若有未保存改动, 提示确认 (避免静默丢失编辑).
-    if (dirty && selected && selected.abs_path !== entry.abs_path) {
-      if (!window.confirm(`「${selected.name}」有未保存的修改，切换文件将丢弃。确定切换？`)) return
+    const key = entry.abs_path
+    // 已打开的文件 → 仅激活对应 Tab (内容/未保存修改都留在各自 Tab 里, 不再需要切换确认)
+    if (tabsRef.current.some(t => t.key === key) || openingRef.current.has(key)) {
+      setActiveKey(key)
+      return
     }
-    setSelected(entry)
-    setFileError('')
-    setFileLoading(true)
-    setFileData(null)
-    setDirty(false)
-    setDoc('')
-    setSaveError('')
-    setSaveOk(false)
-    setMdPreview(false)
+    openingRef.current.add(key)
+    const tab: EditorTab = {
+      key,
+      entry,
+      fileData: null,
+      loading: true,
+      error: '',
+      doc: '',
+      dirty: false,
+      saving: false,
+      saveError: '',
+      saveOk: false,
+      mdPreview: false,
+    }
+    // ✨ 同步写 ref + state: 双击/连点在同一渲染周期内也不会开出重复 Tab
+    tabsRef.current = [...tabsRef.current, tab]
+    setTabs(tabsRef.current)
+    setActiveKey(key)
     try {
       const root = source === 'local' ? localBindPath : bindPath
       const rel = source === 'remote' ? (entry.rel_path || '/') : relPathUnderBind(entry.abs_path, root)
@@ -475,24 +517,38 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
           ? await api(`/api/projects/${projectId}/remote-file?remote=${encodeURIComponent(remoteName)}&path=${encodeURIComponent(rel)}${remoteRootParam}${sessionId ? `&session=${encodeURIComponent(sessionId)}` : ''}`)
           : await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(rel)}`)
       if (source === 'local' && !data?.ok) throw new Error(data?.error || '读取本地文件失败')
-      setFileData(data as FileContent)
-      setDoc((data as FileContent).content || '')
+      // Tab 可能已在读取期间被关闭: patchTab 对不存在的 key 是 no-op
+      patchTab(key, { loading: false, fileData: data as FileContent, doc: (data as FileContent).content || '' })
     } catch (e: any) {
-      setFileError(e?.message || '读取文件失败')
+      patchTab(key, { loading: false, error: e?.message || '读取文件失败' })
     } finally {
-      setFileLoading(false)
+      openingRef.current.delete(key)
     }
-  }, [desktop, projectId, bindPath, localBindPath, remoteName, remoteRootParam, source, dirty, selected, sessionId])
+  }, [desktop, projectId, bindPath, localBindPath, remoteName, remoteRootParam, source, sessionId, patchTab])
 
-  // 保存: 写回磁盘, 复位 dirty. 返回是否保存成功 (供重命名前确认使用)。
-  const save = useCallback(async (): Promise<boolean> => {
-    if (!selected || !fileData || !dirty || saving) return false
-    setSaving(true)
-    setSaveError('')
-    setSaveOk(false)
+  // 关闭 Tab: 有未保存修改先确认; 关闭的是当前 Tab 时激活右侧相邻 (无则左侧) Tab.
+  const closeTab = useCallback((key: string) => {
+    const list = tabsRef.current
+    const tab = list.find(t => t.key === key)
+    if (!tab) return
+    if (tab.dirty && !window.confirm(`「${tab.entry.name}」有未保存的修改，关闭将丢弃。确定关闭？`)) return
+    editorViewsRef.current.delete(key)
+    const idx = list.findIndex(t => t.key === key)
+    const rest = list.filter(t => t.key !== key)
+    tabsRef.current = rest
+    setTabs(rest)
+    if (activeKey === key) setActiveKey(rest[Math.min(idx, rest.length - 1)]?.key || '')
+  }, [activeKey])
+
+  // 保存指定 Tab: 写回磁盘, 复位该 Tab dirty. 返回是否成功 (供 Ctrl+S 与 重命名/移动前自动保存共用).
+  const saveTabByKey = useCallback(async (key: string): Promise<boolean> => {
+    const tab = tabsRef.current.find(t => t.key === key)
+    if (!tab || !tab.fileData || !tab.dirty || tab.saving) return false
+    const { entry, doc } = tab
+    patchTab(key, { saving: true, saveError: '', saveOk: false })
     try {
       const root = source === 'local' ? localBindPath : bindPath
-      const rel = source === 'remote' ? (selected.rel_path || fileData.path || '/') : relPathUnderBind(selected.abs_path, root)
+      const rel = source === 'remote' ? (entry.rel_path || tab.fileData.path || '/') : relPathUnderBind(entry.abs_path, root)
       if (source === 'local') {
         const result = await desktop?.writeProjectLocalFile?.(projectId, rel, doc)
         if (!result?.ok) throw new Error(result?.error || '保存本地文件失败')
@@ -507,18 +563,65 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
           body: JSON.stringify({ path: rel, content: doc }),
         })
       }
-      setDirty(false)
-      setSaveOk(true)
-      setFileData(fd => fd ? { ...fd, content: doc, size: new Blob([doc]).size } : fd)
-      window.setTimeout(() => setSaveOk(false), 1500)
+      // ✨ 保存成功: 复位 dirty, 磁盘基准内容更新为刚写入的 doc
+      patchTab(key, t => ({
+        saving: false,
+        dirty: false,
+        saveOk: true,
+        saveError: '',
+        fileData: t.fileData ? { ...t.fileData, content: doc, size: new Blob([doc]).size } : t.fileData,
+      }))
+      window.setTimeout(() => patchTab(key, t => (t.saveOk ? { saveOk: false } : {})), 1500)
       return true
     } catch (e: any) {
-      setSaveError(e?.message || '保存失败')
+      patchTab(key, { saving: false, saveError: e?.message || '保存失败' })
       return false
-    } finally {
-      setSaving(false)
     }
-  }, [desktop, selected, fileData, dirty, saving, projectId, bindPath, localBindPath, remoteName, remoteRoot, source, doc, sessionId])
+  }, [desktop, projectId, bindPath, localBindPath, remoteName, remoteRoot, source, sessionId, patchTab])
+
+  // 保存当前激活 Tab (Ctrl+S / 工具栏保存按钮).
+  const save = useCallback((): Promise<boolean> => saveTabByKey(activeKey), [activeKey, saveTabByKey])
+
+  // Tab 从 hidden 切回可见时让 CodeMirror 重新测量 (display:none 期间测得高度为 0, 不刷新会空白/错位).
+  useEffect(() => {
+    editorViewsRef.current.get(activeKey)?.requestMeasure()
+  }, [activeKey])
+
+  /*
+   * 重命名/移动节点后迁移受影响的编辑 Tab: 按 abs_path 前缀把 Tab 的 entry/fileData
+   * 路径与 key 迁到新位置, activeKey 与 CodeMirror 实例表同步换 key (编辑器不重建).
+   */
+  const remapTabsForNodeMove = useCallback((nodeOldAbs: string, nodeNewAbs: string, oldRel: string, newRel: string, newName: string) => {
+    const remapAbs = (abs: string): string | null => {
+      if (abs === nodeOldAbs) return nodeNewAbs
+      if (abs.startsWith(nodeOldAbs + '/') || abs.startsWith(nodeOldAbs + '\\')) return nodeNewAbs + abs.slice(nodeOldAbs.length)
+      return null
+    }
+    const remapRel = (rel: string): string => {
+      if (rel === oldRel) return newRel
+      if (rel.startsWith(oldRel + '/')) return newRel + rel.slice(oldRel.length)
+      return rel
+    }
+    setTabs(prev => prev.map(tab => {
+      const nextAbs = remapAbs(tab.entry.abs_path)
+      if (!nextAbs) return tab
+      const isSelf = tab.entry.abs_path === nodeOldAbs
+      return {
+        ...tab,
+        key: nextAbs,
+        entry: { ...tab.entry, name: isSelf ? newName : tab.entry.name, abs_path: nextAbs },
+        fileData: tab.fileData
+          ? { ...tab.fileData, name: isSelf ? newName : tab.fileData.name, path: remapRel(tab.fileData.path), abs_path: nextAbs }
+          : tab.fileData,
+      }
+    }))
+    setActiveKey(cur => remapAbs(cur) || cur)
+    // editorViewsRef 的 key 同步迁移 (value 是同一 EditorView 实例)
+    for (const [k, view] of Array.from(editorViewsRef.current.entries())) {
+      const nk = remapAbs(k)
+      if (nk) { editorViewsRef.current.delete(k); editorViewsRef.current.set(nk, view) }
+    }
+  }, [])
 
   // Ctrl/Cmd+S 拦截: 触发保存, 阻止浏览器默认另存对话框.
   useEffect(() => {
@@ -539,19 +642,13 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     if (url) window.open(url, '_blank', 'noopener,noreferrer')
   }
 
-  // 离开页面 (关闭/路由切换) 时若有未保存改动, 浏览器原生提示.
+  // 离开页面 (关闭/路由切换) 时任一 Tab 有未保存改动, 浏览器原生提示.
   useEffect(() => {
-    if (!dirty) return
+    if (!anyDirty) return
     const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [dirty])
-
-  const onChange = useCallback((val: string) => {
-    setDoc(val)
-    setDirty(val !== (fileData?.content || ''))
-    setSaveOk(false)
-  }, [fileData])
+  }, [anyDirty])
 
   // ===== 右键菜单数据源 (统一 hub REST / local IPC, 设计文档 §10) =====
   const fileSource = useMemo<ProjectFileSource>(() => {
@@ -685,9 +782,9 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     const newName = newNameRaw.trim()
     if (!isNameValidClient(newName)) { setRename(r => (r ? { ...r, error: '名称不合法' } : r)); return }
     if (newName === target.entry.name) { setRename(null); return }
-    // 重命名当前编辑文件且有未保存改动: 先保存; 保存失败则中止 (设计文档 §18.3)。
-    if (dirty && selected && selected.abs_path === target.entry.abs_path) {
-      const saved = await save()
+    // 重命名节点本身或其子树内有未保存修改的 Tab: 先逐个保存; 任一失败则中止 (设计文档 §18.3)。
+    for (const tab of tabsRef.current.filter(t => t.dirty && isUnderNodeAbs(t.entry.abs_path, target.entry.abs_path))) {
+      const saved = await saveTabByKey(tab.key)
       if (!saved) {
         setRename(r => (r ? { ...r, submitting: false, error: '保存未完成，已取消重命名' } : r))
         showToast('保存未完成，已取消重命名', 'error')
@@ -708,7 +805,7 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
       if (code === 'NOT_FOUND') refreshDir(target.parentRelPath)
     }
   }
-  // 重命名成功后同步状态: 刷新父目录; 目录迁移 expanded/dirs 缓存; 当前编辑文件更新路径 (保留撤销栈)。
+  // 重命名成功后同步状态: 刷新父目录; 目录迁移 expanded/dirs 缓存; 受影响 Tab 迁移路径 (编辑器不重建, 保留撤销栈)。
   async function applyRename(target: FileTreeTarget, res: { path: string; name: string }) {
     const oldRel = target.relPath
     const newRel = res.path
@@ -726,31 +823,15 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
         return next
       })
     }
-    // 当前编辑文件是被重命名节点本身, 或位于被重命名目录子树内 -> 迁移编辑器路径 (CodeMirror 文档不重建, 保留撤销栈)。
-    if (selected) {
-      const oldAbs = target.entry.abs_path
-      const under = selected.abs_path === oldAbs
-        || selected.abs_path.startsWith(oldAbs + '/')
-        || selected.abs_path.startsWith(oldAbs + '\\')
-      if (under) {
-        const sepIdx = Math.max(oldAbs.lastIndexOf('/'), oldAbs.lastIndexOf('\\'))
-        const nodeNewAbs = sepIdx >= 0 ? oldAbs.slice(0, sepIdx + 1) + res.name : res.name
-        const suffix = selected.abs_path.slice(oldAbs.length) // '' (节点自身) 或 '/子路径'
-        const newSelAbs = nodeNewAbs + suffix
-        const isSelf = suffix === '' || suffix === '/'
-        setSelected(s => (s ? { ...s, name: isSelf ? res.name : s.name, abs_path: newSelAbs } : s))
-        setFileData(fd => {
-          if (!fd) return fd
-          const underRel = fd.path === oldRel || fd.path.startsWith(oldRel + '/')
-          const newFdRel = underRel ? (fd.path === oldRel ? newRel : newRel + fd.path.slice(oldRel.length)) : fd.path
-          return { ...fd, name: isSelf ? res.name : fd.name, path: newFdRel, abs_path: newSelAbs }
-        })
-      }
-    }
+    // 被重命名节点本身或其子树内的 Tab -> 迁移 entry/fileData 路径与 Tab key
+    const oldAbs = target.entry.abs_path
+    const sepIdx = Math.max(oldAbs.lastIndexOf('/'), oldAbs.lastIndexOf('\\'))
+    const nodeNewAbs = sepIdx >= 0 ? oldAbs.slice(0, sepIdx + 1) + res.name : res.name
+    remapTabsForNodeMove(oldAbs, nodeNewAbs, oldRel, newRel, res.name)
   }
 
-  // 移动成功后同步状态: 刷新新旧父目录; 目录迁移 expanded/dirs 缓存; 当前编辑文件若在被移动
-  // 子树内, 用 root + newRel 计算新绝对路径 (跨目录移动, 不同于 rename 的同父目录假设)。
+  // 移动成功后同步状态: 刷新新旧父目录; 目录迁移 expanded/dirs 缓存; 受影响 Tab 用 root + newRel
+  // 计算新绝对路径 (跨目录移动, 不同于 rename 的同父目录假设)。
   async function applyMove(target: FileTreeTarget, res: { path: string; name: string }) {
     const oldRel = target.relPath
     const newRel = res.path
@@ -772,26 +853,8 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
         return next
       })
     }
-    if (selected) {
-      const oldAbs = target.entry.abs_path
-      const under = selected.abs_path === oldAbs
-        || selected.abs_path.startsWith(oldAbs + '/')
-        || selected.abs_path.startsWith(oldAbs + '\\')
-      if (under) {
-        const root = (source === 'local' ? localBindPath : bindPath).replace(/\/+$/, '')
-        const newNodeAbs = root + newRel
-        const suffix = selected.abs_path.slice(oldAbs.length).replace(/\\/g, '/')
-        const newSelAbs = newNodeAbs + suffix
-        const isSelf = suffix === '' || suffix === '/'
-        setSelected(s => (s ? { ...s, name: isSelf ? res.name : s.name, abs_path: newSelAbs } : s))
-        setFileData(fd => {
-          if (!fd) return fd
-          const underRel = fd.path === oldRel || fd.path.startsWith(oldRel + '/')
-          const newFdRel = underRel ? (fd.path === oldRel ? newRel : newRel + fd.path.slice(oldRel.length)) : fd.path
-          return { ...fd, name: isSelf ? res.name : fd.name, path: newFdRel, abs_path: newSelAbs }
-        })
-      }
-    }
+    const root = (source === 'local' ? localBindPath : bindPath).replace(/\/+$/, '')
+    remapTabsForNodeMove(target.entry.abs_path, root + newRel, oldRel, newRel, res.name)
   }
 
   // 拖拽移动: 客户端前置校验 -> 必要时先保存当前编辑文件 -> fileSource.moveEntry -> applyMove。
@@ -805,14 +868,10 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     }
     if (dirnameRel(srcRel) === targetDir) { showToast(`「${srcName}」已在该目录中`); return }
     if (movingRels.has(srcRel)) return
-    // 移动当前编辑文件或其祖先目录前, 若有未保存改动先保存 (路径将变化, 避免写回旧路径)。
-    if (dirty && selected) {
-      const oldAbs = source0.entry.abs_path
-      const under = selected.abs_path === oldAbs || selected.abs_path.startsWith(oldAbs + '/') || selected.abs_path.startsWith(oldAbs + '\\')
-      if (under) {
-        const saved = await save()
-        if (!saved) { showToast('保存未完成，已取消移动', 'error'); return }
-      }
+    // 移动节点本身或其祖先目录前, 子树内 Tab 若有未保存改动先逐个保存 (路径将变化, 避免写回旧路径)。
+    for (const tab of tabsRef.current.filter(t => t.dirty && isUnderNodeAbs(t.entry.abs_path, source0.entry.abs_path))) {
+      const saved = await saveTabByKey(tab.key)
+      if (!saved) { showToast('保存未完成，已取消移动', 'error'); return }
     }
     setMovingRels(prev => new Set(prev).add(srcRel))
     try {
@@ -918,10 +977,10 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
     <div className="contents">
       {/* ===== 左: 文件浏览器 ===== */}
       <ResizablePanel
-        storageKey={`mobius:ui:split:cc-files:${projectId}`}
-        defaultWidth={filesDefaultWidth}
-        minWidth={160}
-        maxWidth={360}
+        storageKey={`mobius:ui:${compact ? 'easy-files-tree' : 'split:cc-files'}:${projectId}`}
+        defaultWidth={compact ? 190 : filesDefaultWidth}
+        minWidth={compact ? 140 : 160}
+        maxWidth={compact ? 300 : 360}
         side="left"
         className="border-r flex flex-col"
         style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}>
@@ -1113,24 +1172,77 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
       </ResizablePanel>
 
       {/* ===== 中: 代码编辑器 (明暗独立于全局主题, 用 cc 固定配色).
-            width 可拖拽 (ResizablePanel side=left, 手柄贴右缘 = 与右栏 ChatArea 的分界)
-            → 用户可在此调整代码区与对话区(右栏)的相对宽度. ===== */}
+            page: width 可拖拽 (ResizablePanel side=left, 手柄贴右缘 = 与右栏 ChatArea 的分界)
+                  → 用户可在此调整代码区与对话区(右栏)的相对宽度.
+            sidebar: fill 模式占满侧栏剩余宽度 (宽度调整由外层侧栏面板承担),
+                     宽度记忆与 page 模式分开, 互不污染. ===== */}
       <ResizablePanel
-        storageKey={`mobius:ui:split:cc-editor:${projectId}`}
-        defaultWidth={codeEditorDefaultWidth}
-        minWidth={codeEditorMinWidth}
-        maxWidth={codeEditorMaxWidth}
+        fill={compact}
+        storageKey={`mobius:ui:${compact ? 'easy-files-editor' : 'split:cc-editor'}:${projectId}`}
+        defaultWidth={compact ? 0 : codeEditorDefaultWidth}
+        minWidth={compact ? 0 : codeEditorMinWidth}
+        maxWidth={compact ? 0 : codeEditorMaxWidth}
         side="left"
         className="flex flex-col"
         style={{ background: cc.bg, color: cc.fg }}
       >
+        {/* ★ 多 Tab 标签栏: 每个打开的文件一个 Tab; 点击切换, 中键或 × 关闭, 圆点 = 未保存 */}
+        {tabs.length > 0 && (
+          <div
+            role="tablist"
+            aria-label="打开的文件"
+            className="flex h-8 flex-shrink-0 items-stretch overflow-x-auto border-b"
+            style={{ borderColor: cc.border, background: skin === 'dark' ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }}
+          >
+            {tabs.map(tab => {
+              const isActive = tab.key === activeKey
+              return (
+                <div
+                  key={tab.key}
+                  role="tab"
+                  aria-selected={isActive}
+                  title={tab.entry.abs_path}
+                  onClick={() => setActiveKey(tab.key)}
+                  onAuxClick={e => { if (e.button === 1) { e.preventDefault(); closeTab(tab.key) } }}
+                  className={`group relative flex min-w-0 max-w-[220px] flex-shrink-0 cursor-pointer select-none items-center gap-1.5 border-r pl-2.5 pr-1.5 transition-colors ${cc.hover}`}
+                  style={{
+                    borderColor: cc.border,
+                    background: isActive ? cc.bg : undefined,
+                    color: isActive ? cc.fg : cc.muted,
+                    boxShadow: isActive ? 'inset 0 2px 0 0 #3b82f6' : undefined,
+                  }}
+                >
+                  <span className="flex-shrink-0 text-[length:var(--fs-lg)]">{fileIcon(tab.entry.name, 'file')}</span>
+                  <span className="truncate text-[length:var(--fs-md)]">{tab.entry.name}</span>
+                  {tab.dirty && (
+                    <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full group-hover:opacity-0" style={{ background: cc.accent }} title="已修改未保存" />
+                  )}
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); closeTab(tab.key) }}
+                    title="关闭标签页"
+                    aria-label={`关闭 ${tab.entry.name}`}
+                    className={`inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded transition-opacity ${cc.hover} ${tab.dirty ? 'opacity-0 group-hover:opacity-100' : 'opacity-60 hover:opacity-100'}`}
+                    style={{ color: isActive ? cc.fg : cc.muted }}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
         {/* 头部工具栏 */}
         <div className="flex h-8 flex-shrink-0 items-center gap-1.5 border-b px-2.5" style={{ borderColor: cc.border }}>
           {selected ? (
             <>
-              {dirty && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: cc.accent }} title="已修改未保存" />}
-              <span className="flex-shrink-0 text-[length:var(--fs-lg)]">{fileIcon(selected.name, 'file')}</span>
-              <span className="truncate text-[length:var(--fs-md)] font-medium" style={{ color: cc.fg }} title={selected.abs_path}>{selected.name}</span>
+              {/* 文件名已上移到 Tab 标签栏; 这里显示所在目录作定位提示 (根目录文件省略) */}
+              {fileData && dirnameRel(fileData.path || '/') !== '/' && (
+                <span className="truncate font-mono text-[length:var(--fs-xs)]" style={{ color: cc.muted }} title={selected.abs_path}>
+                  {dirnameRel(fileData.path)}
+                </span>
+              )}
               {fileData && (
                 <span className="flex-shrink-0 text-[length:var(--fs-xs)]" style={{ color: cc.muted }}>
                   {formatSize(fileData.size)}{fileData.truncated ? ' · 截断' : ''}
@@ -1149,7 +1261,7 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
               )}
               {/* ★ Markdown 编辑模式切换: 源码编辑 <-> 富文本(WYSIWYG)编辑 (仅 .md 文件, 右上角) */}
               {mdFile && (
-                <button type="button" onClick={() => setMdPreview(v => !v)}
+                <button type="button" onClick={() => activeKey && patchTab(activeKey, t => ({ mdPreview: !t.mdPreview }))}
                   title={mdPreview ? '切换为源码编辑' : '切换为 Markdown 富文本编辑'}
                   className={`inline-flex h-6 items-center gap-1 rounded px-1.5 text-[length:var(--fs-sm)] transition-colors ${cc.hover}`}
                   style={{ color: mdPreview ? cc.accent : cc.muted }}>
@@ -1185,59 +1297,69 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
           )}
         </div>
 
-        {/* 编辑器/占位区 */}
+        {/* 编辑器/占位区: 每个打开的 Tab 一份内容常驻挂载 (仅激活 Tab 可见) — 切换 Tab 保留撤销栈与滚动位置 */}
         <div className="relative flex-1 min-h-0 overflow-hidden" style={{ background: cc.bg }}>
-          {!selected ? (
+          {tabs.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
               <FileCode2 className="w-8 h-8" />
               <div className="text-[length:var(--fs-lg)]" style={{ color: cc.fg }}>从左侧选择一个文件</div>
-              <div className="text-[length:var(--fs-sm)]">语法高亮 + 可编辑，Ctrl+S 保存</div>
+              <div className="text-[length:var(--fs-sm)]">语法高亮 + 可编辑，Ctrl+S 保存 · 可同时打开多个文件</div>
             </div>
-          ) : fileLoading ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2" style={{ color: cc.muted }}>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <div className="text-[length:var(--fs-md)]">正在读取文件…</div>
-            </div>
-          ) : fileError ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
-              <AlertTriangle className="w-6 h-6 text-amber-400" />
-              <div className="text-[length:var(--fs-md)] text-red-400">{fileError}</div>
-            </div>
-          ) : fileData?.binary ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
-              <AlertTriangle className="w-6 h-6 text-amber-400" />
-              <div className="text-[length:var(--fs-lg)]" style={{ color: cc.fg }}>二进制文件，不提供预览</div>
-              <div className="text-[length:var(--fs-sm)]">{formatSize(fileData.size)}</div>
-            </div>
-          ) : fileData?.truncated ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
-              <AlertTriangle className="w-6 h-6 text-amber-400" />
-              <div className="text-[length:var(--fs-lg)]" style={{ color: cc.fg }}>文件过大（&gt; 1.5MB），已截断不提供编辑</div>
-              <div className="text-[length:var(--fs-sm)]">如需编辑请在 VSCode 中打开</div>
-            </div>
-          ) : fileData ? (
-            mdFile && mdPreview ? (
-              <MarkdownWysiwygEditor value={doc} skin={skin} onChange={onChange} />
-            ) : (
-              <Suspense
-                fallback={(
+          ) : tabs.map(tab => {
+            const isActive = tab.key === activeKey
+            const tabMd = /\.(md|markdown)$/i.test(tab.entry.name) && !!tab.fileData && !tab.fileData.binary && !tab.fileData.truncated
+            const onDocChange = (val: string) => patchTab(tab.key, t => ({ doc: val, dirty: val !== (t.fileData?.content || ''), saveOk: false }))
+            return (
+              <div key={tab.key} className={isActive ? 'absolute inset-0' : 'hidden'}>
+                {tab.loading ? (
                   <div className="flex h-full flex-col items-center justify-center gap-2" style={{ color: cc.muted }}>
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <div className="text-[length:var(--fs-md)]">代码编辑器按需加载中…</div>
+                    <div className="text-[length:var(--fs-md)]">正在读取文件…</div>
                   </div>
-                )}
-              >
-                <LazyCodeMirrorEditor
-                  fileName={selected?.name || ''}
-                  value={doc}
-                  skin={skin}
-                  onChange={onChange}
-                  wrap={wordWrap}
-                  onToggleWrap={toggleWordWrap}
-                />
-              </Suspense>
+                ) : tab.error ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
+                    <AlertTriangle className="w-6 h-6 text-amber-400" />
+                    <div className="text-[length:var(--fs-md)] text-red-400">{tab.error}</div>
+                  </div>
+                ) : tab.fileData?.binary ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
+                    <AlertTriangle className="w-6 h-6 text-amber-400" />
+                    <div className="text-[length:var(--fs-lg)]" style={{ color: cc.fg }}>二进制文件，不提供预览</div>
+                    <div className="text-[length:var(--fs-sm)]">{formatSize(tab.fileData.size)}</div>
+                  </div>
+                ) : tab.fileData?.truncated ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: cc.muted }}>
+                    <AlertTriangle className="w-6 h-6 text-amber-400" />
+                    <div className="text-[length:var(--fs-lg)]" style={{ color: cc.fg }}>文件过大（&gt; 1.5MB），已截断不提供编辑</div>
+                    <div className="text-[length:var(--fs-sm)]">如需编辑请在 VSCode 中打开</div>
+                  </div>
+                ) : tab.fileData ? (
+                  tabMd && tab.mdPreview ? (
+                    <MarkdownWysiwygEditor value={tab.doc} skin={skin} onChange={onDocChange} />
+                  ) : (
+                    <Suspense
+                      fallback={(
+                        <div className="flex h-full flex-col items-center justify-center gap-2" style={{ color: cc.muted }}>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          <div className="text-[length:var(--fs-md)]">代码编辑器按需加载中…</div>
+                        </div>
+                      )}
+                    >
+                      <LazyCodeMirrorEditor
+                        fileName={tab.entry.name}
+                        value={tab.doc}
+                        skin={skin}
+                        onChange={onDocChange}
+                        wrap={wordWrap}
+                        onToggleWrap={toggleWordWrap}
+                        onEditorReady={view => { editorViewsRef.current.set(tab.key, view) }}
+                      />
+                    </Suspense>
+                  )
+                ) : null}
+              </div>
             )
-          ) : null}
+          })}
         </div>
       </ResizablePanel>
 
@@ -1436,6 +1558,11 @@ function FilteredFileTree({ dirs, expanded, onToggleDir, onSelectFile, selectedA
       {hits.length > 200 && <div className="text-[length:var(--fs-xs)] py-1 text-center" style={{ color: 'var(--text-muted)' }}>仅显示前 200 个，请细化过滤…</div>}
     </div>
   )
+}
+
+// abs 是否位于节点本身或其子树内 (兼容 / 与 \ 两种分隔符).
+function isUnderNodeAbs(abs: string, nodeAbs: string): boolean {
+  return abs === nodeAbs || abs.startsWith(nodeAbs + '/') || abs.startsWith(nodeAbs + '\\')
 }
 
 // abs_path 是绝对路径, 后端 resolveProjectPath 以 bind_path 为根做 path.resolve.

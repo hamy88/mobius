@@ -81,11 +81,10 @@ function launchDriver(steps: DriveStep[], onDestroyed?: () => void) {
   if (!steps.length) return false
 
   let currentDriver: Driver | null = null
-  const prefersReducedMotion = typeof window !== 'undefined'
-    && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  // 特效全量播放: 引导动画/平滑滚动不再跟随系统「减少动效」降级 (小莫悬浮球是唯一例外, 见 index.css).
   currentDriver = driver({
-    animate: !prefersReducedMotion,
-    smoothScroll: !prefersReducedMotion,
+    animate: true,
+    smoothScroll: true,
     allowClose: true,
     allowKeyboardControl: true,
     overlayColor: '#020617',

@@ -900,12 +900,6 @@ body::after {
   min-width: 0 !important;
 }
 
-/* 尊重用户的「减少动效」偏好 */
-@media (prefers-reduced-motion: reduce) {
-  .mobius-bg-flow body::before,
-  .mobius-bg-flow body::after { animation: none; }
-}
-
 /* 状态文字走马灯高光：文案和布局保持不动，仅让高光沿文字横向扫过。 */
 @keyframes mobius-status-marquee {
   0% { background-position: 180% 50%; }
@@ -946,14 +940,6 @@ body::after {
   animation: none;
   font-weight: 600;
   letter-spacing: 0.01em;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mobius-status-marquee {
-    animation: none;
-    color: var(--mobius-status-color);
-    -webkit-text-fill-color: var(--mobius-status-color);
-  }
 }
 
 /* ===== ChatGPT 风格主按钮: 主题反色 (暗色 → 白底黑字, 亮色 → 黑底白字) ===== */
@@ -1480,6 +1466,7 @@ button {
   from { opacity: 0; transform: translate(-50%, 4px) scale(.88); }
   to   { opacity: 1; transform: translate(-50%, -6px) scale(1); }
 }
+/* 小莫悬浮球是唯一保留「减少动效」降级的特效 (常驻且晃眼); 其余特效一律全量播放, 不跟随系统设置. */
 @media (prefers-reduced-motion: reduce) {
   .assistant-fab__completion-badge { animation: none; }
 }
@@ -4612,6 +4599,8 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
   48% { transform: scale(1.16); opacity: 1; }
 }
 
+/* 小莫悬浮球体系 (悬浮球/头像/思考动画) 是唯一保留「减少动效」降级的特效;
+   其余特效 (含终止按钮、声明按钮的反馈闪烁) 一律全量播放, 不跟随系统设置. */
 @media (prefers-reduced-motion: reduce) {
   .assistant-fab::before,
   .assistant-fab--speaking,
@@ -4625,17 +4614,7 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
   .mo-avatar__particle,
   .assistant-thinking-orbit__ring,
   .assistant-thinking-orbit__core,
-  .assistant-thinking-dots span,
-  .session-stop-button--active,
-  .session-stop-button--active .session-stop-button__square,
-  .session-stop-button__shock,
-  .session-stop-button__ring,
-  .session-stop-toast,
-  .session-stop-toast__icon,
-  .announce-pc-button--active,
-  .announce-pc-button--active .announce-pc-button__icon,
-  .announce-pc-button__shock,
-  .announce-pc-button__ring {
+  .assistant-thinking-dots span {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
   }
@@ -4982,13 +4961,6 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
   padding: 1px 0 1px 24px;
   border-left: 2px solid color-mix(in srgb, var(--text-muted) 24%, transparent);
 }
-@media (prefers-reduced-motion: reduce) {
-  .easy-round-group__thread,
-  .easy-step-group__icon,
-  .easy-step-group__collapse {
-    transition: none;
-  }
-}
 .jsonl-entry-card--easy-opener {
   width: fit-content;
   max-width: min(78%, 760px);
@@ -5066,12 +5038,6 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
 .round-group-trigger:focus-visible {
   outline: 2px solid var(--round-header-accent);
   outline-offset: 2px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .round-group-trigger {
-    transition: none;
-  }
 }
 
 /* jsonl 卡片右上角图标按钮的共享基底 (复制 / 模式切换等共用同一套尺寸与样式). */
@@ -5570,10 +5536,6 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
 .agent-conversation-overlay__connector {
   animation: agent-overlay-connector-flow 4.2s linear infinite;
 }
-@media (prefers-reduced-motion: reduce) {
-  .agent-conversation-overlay__connector { animation: none; }
-}
-
 /* Expanded content in dense shared cards follows the same variable contract. */
 .jsonl-entry-card[data-density="dense"],
 .jsonl-entry-card[data-density="dense"] *,
@@ -6098,9 +6060,6 @@ body.mobius-resizing .mobius-resizable-handle {
 @keyframes easy-project-menu-in {
   from { opacity: 0; transform: translateY(6px) scale(.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .easy-input-project-menu { animation: none; }
 }
 .mobius-chat-body.mobius-chat-body--easy .mobius-chat-input.mobius-chat-input--with-actions {
   width: 100% !important;
@@ -7064,12 +7023,6 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
   0%, 100% { opacity: 0; transform: scale(0.5); }
   50%      { opacity: 1; transform: scale(1.3); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .aimux-link-indicator .aimux-packet-right,
-  .aimux-link-indicator .aimux-packet-left,
-  .aimux-link-indicator .aimux-spark { animation: none; opacity: 0.8; }
-}
-
 /* ======================================================================
    aimux 工作模式切换下拉菜单 (AimuxLinkIndicator 点击弹出) + 选中反馈
    ====================================================================== */
@@ -7184,12 +7137,6 @@ body:has([data-page="easy-mode"]) [data-testid="assistant-bubble"] { display: no
 @keyframes aimux-switch-progress {
   0%   { left: -40%; }
   100% { left: 100%; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .aimux-mode-menu { animation: none; }
-  .aimux-link-indicator--firing { animation: none; }
-  .aimux-switch-progress__bar { animation: none; }
 }
 
 /* ===== 桌面端旧版 project-path overlay 兜底 (2026-07-13) =====

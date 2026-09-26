@@ -1,16 +1,18 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
 import { MARKDOWN_COMPONENTS } from './markdown-components'
-import { Bot, Bookmark, Wrench, MoreHorizontal, History, Copy, Check, Replace, Archive, Maximize2, Minimize2, X, ZoomIn, FileDiff, Terminal, GitCompare, Loader2, Mic, RefreshCw, SendHorizontal, Zap, Square, Plus, Paperclip, ExternalLink, Server, FolderOpen, FolderPlus, ChevronDown, ChevronRight, FileText, Search, Clock, Sparkles, Download } from 'lucide-react'
+import { Bot, Bookmark, Wrench, MoreHorizontal, History, Copy, Check, Replace, Archive, Maximize2, Minimize2, X, ZoomIn, FileDiff, Terminal, GitCompare, Loader2, Mic, RefreshCw, SendHorizontal, Zap, Square, Plus, Paperclip, ExternalLink, Server, FolderOpen, FolderPlus, ChevronDown, ChevronRight, FileText, Search, Clock, Sparkles, Download, FolderTree } from 'lucide-react'
 import { useStore, api, HIDDEN_FOLDER_NAME } from '../store'
 import { timeAgo } from './shell'
 import { AgentStatusDot } from './AgentStatusDot'
 import { SessionWelcomeCards, SessionStartModal, SessionSkillMemoryEditor, SessionSkillMemoryModal, type SessionSearchHit } from './session-welcome'
 import { NewSessionModal } from './modals'
 import { OpenInVSCodeButton } from './project-files'
+import { ResizablePanel } from './resizable-panel'
+import { useEditorAvailability } from './workspace/use-editor-availability'
 import { WebTerminalModal, type WebTerminalMode } from './web-terminal-modal'
 import { SessionJsonlPanel } from './session-jsonl-panel'
 import { scrollDebug } from './scroll-debug'
@@ -2017,6 +2019,11 @@ type EasyProjectOption = {
 
 type SearchHitTarget = { uuid?: string | null; timestamp?: string | null }
 
+// 简易模式右侧文件编辑栏: 复用代码对话 v2 的 CodeConversationPane (variant='sidebar'),
+// 按需加载避免简易模式首屏背上 CodeMirror 的 bundle.
+const EasyFilesPane = lazy(() => import('./workspace/code-conversation-pane').then(module => ({ default: module.CodeConversationPane })))
+const EASY_FILES_OPEN_KEY = 'mobius:ui:easy-files-sidebar:open'
+
 export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easyProjectControl }: {
   layout?: 'default' | 'stacked' | 'easy'
   onNewSession?: () => void
@@ -2404,6 +2411,32 @@ export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easy
     setEasyRoundCount(previous => previous === count ? previous : count)
   }, [])
   const currentProjectId = (currentIssue as any)?.project_id || (currentSession as any)?.project_id || (currentTask as any)?.project_id || ''
+  // ===== 简易模式右侧文件编辑栏 (复用代码对话 v2 的文件树 + CodeMirror 编辑器) =====
+  // 开关状态存本浏览器; easyFilesMounted 首次打开后保活 (文件树展开/选中/未保存草稿不丢),
+  // 关闭仅 display:none — 与 IssuePage 的 editorMounted/v2Mounted 同一模式.
+  const [easyFilesOpen, setEasyFilesOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(EASY_FILES_OPEN_KEY) === '1' } catch { return false }
+  })
+  const [easyFilesMounted, setEasyFilesMounted] = useState<boolean>(() => {
+    try { return localStorage.getItem(EASY_FILES_OPEN_KEY) === '1' } catch { return false }
+  })
+  useEffect(() => { if (easyFilesOpen) setEasyFilesMounted(true) }, [easyFilesOpen])
+  const toggleEasyFiles = useCallback(() => {
+    setEasyFilesOpen(previous => {
+      const next = !previous
+      try { localStorage.setItem(EASY_FILES_OPEN_KEY, next ? '1' : '0') } catch { /* 静默 */ }
+      return next
+    })
+  }, [])
+  // bind_path 与代码对话模式同源 (useEditorAvailability 模块级缓存, 同项目只发一次请求).
+  const easyFilesEnabled = layout === 'easy' && easyFilesMounted && !!currentProjectId && !!currentSession
+  const { bindPath: easyFilesBindPath, vscodeWebUrl: easyFilesVscodeUrl } = useEditorAvailability(currentProjectId, easyFilesEnabled)
+  // 侧栏宽度: 默认 ≈ 视口 44%. 上限给对话区留足空间 (简易模式左侧还有近期会话栏,
+  // chat-area 实际只有视口 80% 左右, 58% 视口上限已接近其全部宽度).
+  const easyViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280
+  const easyFilesSidebarMinWidth = 420
+  const easyFilesSidebarMaxWidth = Math.max(560, Math.floor(easyViewportWidth * 0.58))
+  const easyFilesSidebarDefaultWidth = Math.max(easyFilesSidebarMinWidth, Math.min(easyFilesSidebarMaxWidth, Math.floor(easyViewportWidth * 0.44)))
   const currentIssueId = (currentSession as any)?.issue_id || (currentIssue as any)?.id || ''
   const currentResearchId = (currentSession as any)?.research_id || (currentTask as any)?.research_id || ''
   // 规划模式: 当前 Issue 是 is_planning 时, 隐藏执行控件 + 嵌入规划编辑器.
@@ -4393,6 +4426,21 @@ export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easy
               <small>{easyRoundCount} 轮</small>
             </div>
           </div>
+          {/* 右侧: 文件编辑栏开关 (简易模式的代码对话入口, 打开后右侧出现 文件树+编辑器) */}
+          {currentProjectId && (
+            <button
+              type="button"
+              onClick={toggleEasyFiles}
+              aria-pressed={easyFilesOpen}
+              aria-label={easyFilesOpen ? '收起文件编辑栏' : '展开文件编辑栏'}
+              title={easyFilesOpen ? '收起文件编辑栏' : '展开文件编辑栏'}
+              data-testid="easy-files-toggle"
+              className="easy-files-toggle inline-flex h-5 flex-shrink-0 items-center gap-1 rounded px-1.5 transition-colors hover:bg-[var(--bg-hover)]"
+              style={{ color: easyFilesOpen ? 'var(--accent-primary)' : 'var(--text-muted)' }}
+            >
+              <FolderTree className="h-3.5 w-3.5" strokeWidth={1.8} />
+            </button>
+          )}
         </div>
       )}
 
@@ -4561,13 +4609,18 @@ export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easy
         </div>
       )}
 
+      {/* body 外层水平壳: chat-body (flex-1) + 简易模式右侧文件编辑栏. 壳常驻渲染
+          (default/stacked 下只是多一层等宽包裹, 零视觉变化), 保证 easy↔default 切换布局时
+          chat-body 不因父结构变化而重挂. */}
+      <div className="flex min-h-0 flex-1">
       {/* body: 默认横向分栏，JsonlView 与输入/skill-memory 之间可拖拽调宽；初始 68/32。
           窄屏改纵向堆叠 (见 index.css .mobius-chat-body).
-          layout='stacked' 时附加 mobius-chat-body--stacked, 与视口无关地强制纵向堆叠 (代码对话模式). */}
+          layout='stacked' 时附加 mobius-chat-body--stacked, 与视口无关地强制纵向堆叠 (代码对话模式).
+          easy + 文件栏打开时右 padding 收回 (空间让给文件栏, padding 平滑过渡避免内容跳动). */}
       <div
         ref={chatBodyRef}
-        className={`mobius-chat-body flex-1 flex min-h-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}`}
-        style={layout === 'easy' ? { paddingLeft: '10%', paddingRight: '10%' } : undefined}
+        className={`mobius-chat-body flex-1 flex min-h-0 min-w-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}`}
+        style={layout === 'easy' ? { paddingLeft: '10%', paddingRight: easyFilesOpen ? '0' : '10%', transition: 'padding .2s ease' } : undefined}
       >
         {/* 左侧: JSONL 视图，自动占满右栏之外的剩余宽度。
             快照订阅在面板内部 (Chat 不随每条数据重渲染); 条目驱动的自动滚底由旁边的 EntriesAutoScroll 承担. */}
@@ -4999,6 +5052,46 @@ export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easy
             persistActivePanel: true,
           }))}
         </div>
+      </div>
+
+      {/* ===== 简易模式右侧文件编辑栏: 文件树 + CodeMirror 编辑器 (复用代码对话 v2).
+            easyFilesMounted 首开保活; 关闭仅隐藏 (树展开/选中/草稿不丢).
+            side='right' 手柄贴左缘, 拖动调整文件栏与对话区的宽度分配. ===== */}
+      {layout === 'easy' && easyFilesMounted && (
+        <ResizablePanel
+          storageKey="mobius:ui:easy-files-sidebar:width"
+          defaultWidth={easyFilesSidebarDefaultWidth}
+          minWidth={easyFilesSidebarMinWidth}
+          maxWidth={easyFilesSidebarMaxWidth}
+          side="right"
+          className={`border-l flex overflow-hidden${easyFilesOpen ? '' : ' hidden'}`}
+          style={{ borderColor: 'var(--border-color)' }}
+          data-testid="easy-files-sidebar"
+        >
+          {easyFilesBindPath ? (
+            <Suspense
+              fallback={(
+                <div className="flex flex-1 items-center justify-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
+                  正在加载文件编辑器...
+                </div>
+              )}
+            >
+              <EasyFilesPane
+                variant="sidebar"
+                projectId={currentProjectId}
+                bindPath={easyFilesBindPath}
+                vscodeWebUrl={easyFilesVscodeUrl}
+                sessionId={currentSession?.session_id || sessionId}
+              />
+            </Suspense>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: 'var(--text-muted)' }}>
+              <Loader2 className="h-5 w-5 animate-spin" />
+              <div className="text-[length:var(--fs-md)]">正在获取项目路径...</div>
+            </div>
+          )}
+        </ResizablePanel>
+      )}
       </div>
 
       {inputExpanded && (
