@@ -666,17 +666,21 @@ export class AimuxSupervisor {
 
 let supervisor: AimuxSupervisor | null = null
 let installing: Promise<void> | null = null
+/** 上一次 startAimuxConnection 的参数，供 `/upgrade` 重装后原地重连。 */
+let lastStartOpts: StartOptions | null = null
+
+interface StartOptions {
+  server: string
+  token: string
+  onStatus?: (s: AimuxStatus) => void
+  refreshToken?: () => Promise<string | null>
+}
 // Resolved Windows console-hiding flag for the installed aimux (undefined =
 // not probed yet this process). Cached so reconnects reuse it without re-running
 // `aimux reverse connect --help`. See reverseConnectArgs for why this is probed.
 let cachedSilentFlag: string | null | undefined = undefined
 
-export async function startAimuxConnection(opts: {
-  server: string
-  token: string
-  onStatus?: (s: AimuxStatus) => void
-  refreshToken?: () => Promise<string | null>
-}): Promise<void> {
+export async function startAimuxConnection(opts: StartOptions): Promise<void> {
   const onStatus = opts.onStatus ?? (() => {})
   // Tests and explicitly opted-out users should not spawn a network worker.
   if (process.env.MOBIUS_TUI_DISABLE_AIMUX === '1') {
@@ -686,6 +690,7 @@ export async function startAimuxConnection(opts: {
     onStatus({ state: 'disabled', phase: 'idle', detail: 'AIMUX 测试连接已跳过' }); return
   }
   if (supervisor || installing) return
+  lastStartOpts = opts
   installing = (async () => {
     onStatus({ state: 'starting', phase: 'python', detail: '检查 Python 与 AIMUX 运行环境…' })
     const ready = await ensureAimux(p => onStatus({
@@ -717,4 +722,80 @@ export async function startAimuxConnection(opts: {
 export async function stopAimuxConnection(): Promise<void> {
   const current = supervisor; supervisor = null
   await current?.stop()
+}
+
+/** SIGTERM 掉本工作区 runtime JSON 里记录的守护进程，并删掉该文件。
+ *  不这么做的话，新 supervisor 会按 pid 复用到刚升级前的旧 daemon。 */
+async function stopDaemonFromRuntime(): Promise<void> {
+  const hash = aimuxWorkspaceHash()
+  const pid = (await readRuntime(hash))?.pid ?? null
+  if (pid !== null && pidAlive(pid)) {
+    try { process.kill(pid, 'SIGTERM') } catch { /* 已经退了 */ }
+    for (let i = 0; i < 30 && pidAlive(pid); i++) await new Promise(r => setTimeout(r, 100))
+    if (pidAlive(pid)) { try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ } }
+  }
+  try { await fs.unlink(runtimePath(hash)) } catch { /* 本来就没有 */ }
+}
+
+/** `/upgrade` 装的永远是 PyPI 上的最新版，故意不走 AIMUX_TARGET_VERSION 这条 pin。 */
+const AIMUX_PYPI_INDEX = 'https://pypi.org/simple'
+
+/** 从 PyPI 官方索引安装最新 aimux（不带版本约束），返回实际装上的版本。 */
+async function installLatestAimux(onProgress?: (p: InstallProgress) => void): Promise<{ ok: boolean; version?: string; error?: string }> {
+  const py = await pythonForAimux(onProgress)
+  if (!py) return { ok: false, error: '未找到 Python 3.10+（或 uv），无法升级 AIMUX' }
+  if (!existsSync(venvPython())) {
+    onProgress?.({ phase: 'venv', detail: `创建 Python 虚拟环境（${py}）…` })
+    let r = await run(py, ['-m', 'venv', venvDir()])
+    if (r.code !== 0 && py === 'py') r = await run(py, ['-3', '-m', 'venv', venvDir()])
+    if (r.code !== 0) return { ok: false, error: `venv 创建失败: ${r.stderr || r.stdout}` }
+  }
+  onProgress?.({ phase: 'install', detail: '正在从 PyPI 安装最新 aimux…' })
+  // --no-cache-dir：刚发布的版本可能还躺在 pip 的索引/包缓存里（TTL 内），
+  // 用户点 /upgrade 就是要立刻拿到新版本，宁可多下一次也不吃缓存。
+  const r = await run(venvPython(), [
+    '-m', 'pip', 'install', '--no-input', '--disable-pip-version-check',
+    '--upgrade', '--no-cache-dir', '--index-url', AIMUX_PYPI_INDEX, 'aimux',
+  ], line => {
+    if (/downloading|collecting|installing|using cached|%\s*\d|━|─/i.test(line)) onProgress?.({ phase: 'install', detail: line.slice(0, 120) })
+  })
+  if (r.code !== 0) return { ok: false, error: `pip install 失败: ${r.stderr || r.stdout}` }
+  const v = await run(venvPython(), ['-c', 'import aimux; print(aimux.__version__)'])
+  const version = v.code === 0 ? v.stdout.trim().split(/\s+/).pop() : undefined
+  logInstall(`/upgrade installed aimux ${version ?? '(version unknown)'} from ${AIMUX_PYPI_INDEX}\n`)
+  return { ok: true, version }
+}
+
+/**
+ * `/upgrade`：把本地 AIMUX 升到 PyPI 上的最新版并原地重连。
+ *
+ * 顺序很关键——先停 TUI 的续租与旧守护进程，再装，最后用上次的连接参数重连：
+ * 否则 supervisor 会按旧 pid 把升级前的 daemon 复用回来，升级看起来"没生效"。
+ */
+export async function upgradeAimuxRuntime(): Promise<{ ok: boolean; version?: string; error?: string }> {
+  const opts = lastStartOpts
+  const onStatus = opts?.onStatus ?? (() => {})
+  if (process.env.MOBIUS_TUI_DISABLE_AIMUX === '1') {
+    const error = 'AIMUX 自动连接已关闭 (MOBIUS_TUI_DISABLE_AIMUX=1)'
+    onStatus({ state: 'disabled', phase: 'idle', detail: 'AIMUX 自动连接已关闭' })
+    return { ok: false, error }
+  }
+  if (!opts) return { ok: false, error: '尚未登录或 AIMUX 未启动，无法升级' }
+  logInstall(`\n########## /upgrade requested ${new Date().toISOString()} ##########\n`)
+  onStatus({ state: 'starting', phase: 'install', detail: '正在停止 AIMUX 守护进程…' })
+  await stopAimuxConnection()
+  await stopDaemonFromRuntime()
+  const installed = await installLatestAimux(p => onStatus({
+    state: 'starting',
+    phase: p.phase === 'ready' ? 'connecting' : p.phase,
+    detail: p.detail || (p.phase === 'ready' ? 'AIMUX 已就绪，准备连接…' : p.phase),
+  }))
+  if (!installed.ok) {
+    logInstall(`########## /upgrade FAILED: ${installed.error} ##########\n`)
+    onStatus({ state: 'failed', phase: 'idle', detail: `${installed.error} · 日志: ${aimuxLogPath()}` })
+    return { ok: false, error: installed.error }
+  }
+  onStatus({ state: 'starting', phase: 'connecting', detail: `AIMUX ${installed.version ?? '最新版'} 已安装，正在重新连接…` })
+  await startAimuxConnection(opts)
+  return { ok: true, version: installed.version }
 }

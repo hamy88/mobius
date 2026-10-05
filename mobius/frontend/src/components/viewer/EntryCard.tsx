@@ -36,6 +36,7 @@ import {
   PLAN_THEME,
   MCP_RESULT_THEME,
   INITIAL_THEME,
+  IMAGES_THEME,
 } from './themes'
 import { formatTs } from './utils'
 import { consumeFreshEntry } from '../../services/agent-history-store'
@@ -48,6 +49,7 @@ import {
   isStartPyToolUse,
   functionOutputImageUrls,
   functionOutputTextBody,
+  claudeToolResultImageOutput,
   isFunctionCallOutputPayload,
   extractPlanCard,
   extractTaskToolCalls,
@@ -83,7 +85,7 @@ import { JsonEntryLocalCommandBlock } from './LocalCommandBlock'
 import { JsonEntryPlanCard } from './PlanCard'
 import { JsonEntryInitialCard } from './InitialCard'
 import { extractInitialContext } from './initial-context'
-import { ImageOutputPanel } from './ImageOutput'
+import { ImageOutputPanel, PersistedImageOutputPanel } from './ImageOutput'
 import { CompactPlainTextFallback } from './text-preview'
 import { JsonlCopyButton } from './JsonlCopyButton'
 import { RemoteAimuxMcpIcon } from '../aimux-link-indicator'
@@ -131,6 +133,9 @@ export function isEasyFlatEntry(entry: AnyEntry): boolean {
   if (entry.type === 'response_item' && isFunctionCallOutputPayload(entry.payload)) {
     if (functionOutputImageUrls(entry.payload?.output).length > 0) return true
   }
+  // Claude tool_result 内嵌图片 (MCP 图像信封): 简易模式平铺成图像卡, 不进微缩步骤串
+  // Claude tool_result embedded images flatten into an image card instead of a micro step
+  if (claudeToolResultImageOutput(entry)) return true
   return assistantEntryText(entry).trim().length > 0
 }
 
@@ -210,22 +215,26 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighte
   const easyOpener = easyMode && (easyOpenerOverride || isRoundOpenerEntry(entry))
   // 超大卡片保护: entry + 工具结果的渲染字符总量超过 10 万时, 用截断版渲染, 避免前端卡顿崩溃.
   // 截断版只影响"展开态内容渲染", 卡片头部摘要 / 配色 / 折叠态不受影响.
-  const { renderEntry, renderBashResults, renderReadResults, oversized, totalChars, imageOutputUrls, imageOutputText } = useMemo(() => {
-    // codex function_call_output 里的内嵌图片 (input_image base64): 单独抽 data url 走 <img> 渲染,
-    // 不进字段模式递归展开 base64. 图片源取自未截断的原始 entry (截断会破坏 base64).
+  const { renderEntry, renderBashResults, renderReadResults, oversized, totalChars, imageOutputUrls, imageOutputText, imageDeferred } = useMemo(() => {
+    // codex function_call_output 里的内嵌图片 (input_image base64) 与 Claude tool_result 里的
+    // MCP 图像信封: 单独抽 data url 走 <img> 渲染, 不进字段模式递归展开 base64.
+    // 图片源取自未截断的原始 entry (截断会破坏 base64).
     const isImageOutput = entry?.type === 'response_item' && isFunctionCallOutputPayload(entry?.payload)
-    const imageUrls = isImageOutput ? functionOutputImageUrls(entry?.payload?.output) : []
-    const imageText = isImageOutput ? functionOutputTextBody(entry?.payload?.output) : ''
+    const claudeImages = isImageOutput ? null : claudeToolResultImageOutput(entry)
+    const imageUrls = isImageOutput ? functionOutputImageUrls(entry?.payload?.output) : claudeImages?.imageUrls ?? []
+    const imageText = isImageOutput ? functionOutputTextBody(entry?.payload?.output) : claudeImages?.textBody ?? ''
+    // 存根场景: 原图在 <persisted-output> 落盘文件里, 由 PersistedImageOutputPanel 按需取回.
+    const deferred = !isImageOutput ? claudeImages?.deferred ?? null : null
     const total =
       estimateRenderChars(entry) +
       estimateToolResultsChars(bashResults) +
       estimateToolResultsChars(readResults)
     // 含图片的 output 走专用渲染分支, 不展开 base64 字段, 不会卡顿, 不触发超大卡片保护.
-    if (imageUrls.length > 0) {
-      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText }
+    if (imageUrls.length > 0 || deferred) {
+      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText, imageDeferred: deferred }
     }
     if (total <= MAX_CARD_RENDER_CHARS) {
-      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText }
+      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText, imageDeferred: deferred }
     }
     const budget = { remaining: MAX_CARD_RENDER_CHARS }
     return {
@@ -236,9 +245,10 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighte
       totalChars: total,
       imageOutputUrls: imageUrls,
       imageOutputText: imageText,
+      imageDeferred: deferred,
     }
   }, [entry, bashResults, readResults])
-  const canImage = imageOutputUrls.length > 0
+  const canImage = imageOutputUrls.length > 0 || !!imageDeferred
   const headerSummary = useMemo(() => buildHeaderSummary(renderEntry), [renderEntry])
   // 任务工具卡摘要增强: 跨条目累积快照在手时, 标题栏显示 "计划 · X/N · 任务标题"
   // 而非原始 tool_use JSON. 仅影响一行预览, 字段模式仍可看原始数据.
@@ -279,7 +289,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighte
   const isPatchApplyEvent = entry?.type === 'event_msg' && String(entry?.payload?.type || '').startsWith('patch_apply')
   // 正文含 blackboard 标记 → 视作 Research Blackboard 相关消息.
   const isBlackboard = headerSummary.full.includes(BLACKBOARD_MARKER)
-  // 配色优先级: 初始消息 (结构辨识, 最具体) > blackboard 相关 (最醒目) > user compact 完成信号 (gold) > user /goal 设置信号 (gold) > user 其他本地命令产物 (gold) > assistant 只含 thinking 思考卡 (purple) > codex reasoning 思考卡 (purple) > assistant end_turn (gold) > assistant 文本关键词 (gold) > name:"Edit" 的 tool_use (indigo) > AIMUX 协作执行 (teal) > Bash command 含 "start.py" (gold) > 普通 Bash tool_use (cyan) > event_msg.context_compacted (gold) > 顶层 type.
+  // 配色优先级: 初始消息 (结构辨识, 最具体) > blackboard 相关 (最醒目) > user compact 完成信号 (gold) > user /goal 设置信号 (gold) > user 其他本地命令产物 (gold) > assistant 只含 thinking 思考卡 (purple) > codex reasoning 思考卡 (purple) > assistant end_turn (gold) > assistant 文本关键词 (gold) > name:"Edit" 的 tool_use (indigo) > AIMUX 协作执行 (teal) > Bash command 含 "start.py" (gold) > 普通 Bash tool_use (cyan) > Read tool_use (sky) > 内嵌图片载体卡 (teal 图像) > event_msg.context_compacted (gold) > 顶层 type.
   // initial 必须排在 blackboard 之前: research 会话的初始消息正文含 blackboard 字样, 但它是初始消息不是黑板写入.
   // start.py 必须排在 Bash 之前: 它本身也是 Bash, 但语义更具体, 不能被 cyan 普通主题盖掉.
   // compact / goal-set 必须排在 local-cmd 之前: 它们都是 local-command-stdout 的特例, 文案/标签更具体.
@@ -314,6 +324,8 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighte
     ? BASH_TOOL_THEME
     : readCalls.length > 0
     ? READ_TOOL_THEME
+    : canImage
+    ? IMAGES_THEME
     : isContextCompactedEvent(entry)
     ? CONTEXT_COMPACTED_THEME
     : isThreadSettingsAppliedEvent(entry)
@@ -580,7 +592,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighte
             </div>
           )}
           {easyFlat && canImage ? (
-            <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
+            imageDeferred ? <PersistedImageOutputPanel callId={imageDeferred.callId} savedPath={imageDeferred.savedPath} /> : <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
           ) : easyFlat && !canCode ? (
             <div className="easy-flat-markdown max-w-none">
               <Suspense fallback={<CompactPlainTextFallback text={headerSummary.full} />}>
@@ -603,7 +615,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighte
               )}
             </div>
           ) : mode === 'image' && canImage ? (
-            <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
+            imageDeferred ? <PersistedImageOutputPanel callId={imageDeferred.callId} savedPath={imageDeferred.savedPath} /> : <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
           ) : mode === 'plan' && planUpdate ? (
             <JsonEntryPlanCard plan={planUpdate} />
           ) : mode === 'initial' && initialContext ? (

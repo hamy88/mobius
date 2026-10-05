@@ -65,6 +65,7 @@ function buildStatements(db: Database.Database) {
     listGroupEntries: db.prepare('SELECT json, round_opener FROM entries WHERE session_id = ? AND group_seq = ? ORDER BY seq_in_group ASC'),
     lastEntry: db.prepare('SELECT json FROM entries WHERE session_id = ? ORDER BY seq DESC LIMIT 1'),
     deleteState: db.prepare('DELETE FROM ingest_state WHERE session_id = ?'),
+    getSessionByPath: db.prepare('SELECT session_id FROM ingest_state WHERE primary_path = ? LIMIT 1'),
     deleteRounds: db.prepare('DELETE FROM rounds WHERE session_id = ?'),
     deleteEntries: db.prepare('DELETE FROM entries WHERE session_id = ?'),
   };
@@ -1086,6 +1087,15 @@ function deleteSessionData(sessionId: string): void {
   });
   try { tx(); } catch {}
   subscribers.delete(sessionId);
+}
+
+/*
+ * 反查 jsonl 主路径对应的会话 id (仅在 ingest_state 登记过的路径才算数).
+ * 供 tool-result-media 端点校验 <persisted-output> 落盘文件归属于用户可读的会话.
+ */
+export function sessionIdOfJsonlPath(primaryPath: string): string | null {
+  const row = S().getSessionByPath.get(primaryPath) as { session_id?: string } | undefined;
+  return row?.session_id ?? null;
 }
 
 export {

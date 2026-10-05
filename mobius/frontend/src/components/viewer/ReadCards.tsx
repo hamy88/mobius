@@ -9,6 +9,7 @@ import { splitDiffValue, basename } from './utils'
 import { ResultTextPreview } from './text-preview'
 import { JsonlCopyButton } from './JsonlCopyButton'
 import { JsonlDownloadButton } from './JsonlDownloadButton'
+import { ImageOutputPanel } from './ImageOutput'
 import type { ReadToolCall, BashToolResult } from './types'
 
 export function JsonEntryReadCalls({ calls, results = [] }: { calls: ReadToolCall[]; results?: BashToolResult[] }) {
@@ -92,7 +93,9 @@ function ReadResultPanel({ result, fallbackPath }: { result: BashToolResult; fal
   const [copied, setCopied] = useState<boolean>(false)
   const readFile = result.readFile
   const filePath = readFile?.filePath || fallbackPath
-  const text = readFile?.content || result.content
+  const imageUrls = result.imageUrls || []
+  const isImageResult = imageUrls.length > 0
+  const text = isImageResult ? '' : (readFile?.content || result.content)
   const startLine = readFile?.startLine || 1
   const lines = splitDiffValue(text)
   const stateLabel = result.isError ? 'error' : 'ok'
@@ -106,10 +109,16 @@ function ReadResultPanel({ result, fallbackPath }: { result: BashToolResult; fal
           <span className="ml-1 text-[var(--text-muted)]">#{result.lineNo}</span>
         </span>
         <span className={`flex-shrink-0 font-mono ${stateClass}`}>{stateLabel}</span>
-        <span className="flex-shrink-0 rounded border border-[var(--border-color)] px-1.5 py-0.5 font-mono text-[var(--text-muted)]">
-          {lines.length} lines
-        </span>
-        {readFile?.totalLines != null && (
+        {isImageResult ? (
+          <span className="flex-shrink-0 rounded border border-[var(--border-color)] px-1.5 py-0.5 font-mono text-[var(--text-muted)]">
+            图像 ×{imageUrls.length}
+          </span>
+        ) : (
+          <span className="flex-shrink-0 rounded border border-[var(--border-color)] px-1.5 py-0.5 font-mono text-[var(--text-muted)]">
+            {lines.length} lines
+          </span>
+        )}
+        {readFile?.totalLines != null && !isImageResult && (
           <span className="flex-shrink-0 rounded border border-[var(--border-color)] px-1.5 py-0.5 font-mono text-[var(--text-muted)]">
             total {readFile.totalLines}
           </span>
@@ -130,7 +139,13 @@ function ReadResultPanel({ result, fallbackPath }: { result: BashToolResult; fal
           />
         )}
       </div>
-      {text ? (
+      {isImageResult ? (
+        // 图片读取结果: 直接铺图像面板, 不把 base64 当文本渲染
+        // An image read result renders an image panel instead of base64 text
+        <div className="px-2.5 pb-2 pt-1">
+          <ImageOutputPanel imageUrls={imageUrls} />
+        </div>
+      ) : text ? (
         <div className="max-h-[34rem] overflow-auto">
           <ResultTextPreview text={text} startLine={startLine} />
         </div>

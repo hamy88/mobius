@@ -40,6 +40,7 @@ interface ChatProps {
   onResume: () => void
   onQuit: () => void
   onLogout: () => void
+  onUpgradeAimux: () => void
   onReconfigure: (result: ConfigResult) => void
   onConfigCancel: (sessionId: string | null) => void
   aimuxStatus?: AimuxStatus
@@ -64,10 +65,11 @@ const SLASH_COMMANDS = [
   { cmd: '/logout', desc: '断开当前连接并返回登录界面' },
   { cmd: '/help', desc: '显示帮助' },
   { cmd: '/version', desc: '显示 TUI、AIMUX 和运行环境版本' },
+  { cmd: '/upgrade', desc: '从 PyPI 安装最新 AIMUX 并重连' },
   { cmd: '/quit', desc: '退出 TUI' },
 ]
 
-export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear, onResume, onQuit, onLogout, onReconfigure, onConfigCancel, aimuxStatus }: ChatProps) {
+export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear, onResume, onQuit, onLogout, onUpgradeAimux, onReconfigure, onConfigCancel, aimuxStatus }: ChatProps) {
   const chat = useChat({ client, ready, resumeSessionId })
   const [showHelp, setShowHelp] = useState(false)
   // null means "follow the tail". A concrete anchor identifies the exact row
@@ -130,11 +132,18 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
       }
       case '/model': setConfigOpen(true); return true
       case '/config': setReconfigOpen(true); return true
+      case '/upgrade': {
+        // 安装与重连进度都走 aimuxStatus（状态行），失败也会落进 aimuxStatus.detail，
+        // 所以这里只管触发，不额外弹错。
+        setVersionInfo(null)
+        onUpgradeAimux()
+        return true
+      }
       case '/logout': onLogout(); return true
       case '/quit': case '/exit': onQuit(); return true
       default: return false
     }
-  }, [aimuxStatus, chat, client.server, modelLabel, ready.prefs.model, onClear, onResume, onQuit, onLogout])
+  }, [aimuxStatus, chat, client.server, modelLabel, ready.prefs.model, onClear, onResume, onQuit, onLogout, onUpgradeAimux])
 
   const onSubmit = useCallback((text: string) => {
     const t = text.trim()

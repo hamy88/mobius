@@ -422,6 +422,9 @@ export function extractBashToolResultRecords(entry: AnyEntry, lineNo: number): B
 
   return blocks.map((block: any) => {
     const blockContent = toolResultContentText(block?.content)
+    // ✨ 图片载荷 (原生 image 块 / 字符串化信封) 单独抽出, 正文不再铺 base64
+    // Image payloads (native blocks / stringified envelopes) are extracted; the body never shows base64
+    const blockImages = toolResultBlockImages(block?.content)
     // aimux exec 信封: block 正文是 {"output":..., "wall_time_seconds":..., "exit_code":...} JSON 串.
     // 直接把信封当 stdout 会渲染成一整行转义 JSON (\n 字面量, 引号全被转义, 换行全部失效 —
     // 用户报告的问题). 命中信封时解包: stdout/content = output 正文, meta 带执行元信息.
@@ -438,7 +441,8 @@ export function extractBashToolResultRecords(entry: AnyEntry, lineNo: number): B
         content: envelope.output,
         isError: block?.is_error === true || envelope.raw.exit_code !== undefined && envelope.raw.exit_code !== 0,
         interrupted,
-        isImage,
+        isImage: isImage || blockImages.length > 0,
+        imageUrls: blockImages,
         noOutputExpected,
         readFile,
         meta: mcpEnvelopeMeta(envelope.raw),
@@ -453,10 +457,11 @@ export function extractBashToolResultRecords(entry: AnyEntry, lineNo: number): B
       sourceAssistantUuid: sourceAssistantUuid || undefined,
       stdout,
       stderr,
-      content: blockContent || fallbackContent,
+      content: blockImages.length > 0 ? '' : (blockContent || fallbackContent),
       isError: block?.is_error === true || toolUseResult.is_error === true || !!toolUseResult.error,
       interrupted,
-      isImage,
+      isImage: isImage || blockImages.length > 0,
+      imageUrls: blockImages,
       noOutputExpected,
       readFile,
     }
@@ -734,6 +739,156 @@ export function functionOutputTextBody(output: any): string {
     if (textField) parts.push(textField)
   }
   return parts.filter(Boolean).join('\n').trim()
+}
+
+// ── Claude tool_result 内嵌图片 (MCP 图像返回) 解析 ──────────────────────
+// Claude Code 的 MCP 图像工具 (如 analyze_image) 把图片包进 tool_result 回填, 两种形态:
+//  1) text 块正文是一段字符串化 JSON: {"detail":"high","image_url":"data:image/png;base64,…"}
+//     (OpenAI images 形态, image_url 也可能是 {"url": "data:…"} 嵌套);
+//  2) 原生 image 块: {type:'image', source:{type:'base64', media_type:'image/png', data:'<裸base64>'}}.
+// 与 functionOutputImageUrls (codex 路径) 同理: 抽出 data url 交给 <img> 渲染, 不进字段模式
+// 递归展开 base64. 图片信封整块消费; 其余 text 块作为文字说明附在图片下方.
+
+// image_url 引用 (字符串直给或 OpenAI {url} 嵌套) → 合法图片 url, 否则空串.
+function imageRefUrl(ref: any): string {
+  const url = typeof ref === 'string' ? ref : typeof ref?.url === 'string' ? ref.url : ''
+  return /^(?:data:image\/|https?:\/\/)/i.test(url) ? url : ''
+}
+
+// text 正文若是字符串化 JSON (对象或内容块数组) → 抽出其中全部图片 url. 覆盖:
+//  {"image_url":"data:…"} / {"image_url":{"url":"data:…"}} (OpenAI images 信封);
+//  [{"type":"text","text":"{\"image_url\":…}"}] (内容块数组的字符串化 — 工具原始返回/用户粘贴卡的形态);
+//  [{"type":"image","source":{…base64…}}] (原生 image 块的字符串化).
+// 只认 image_url 键与 image/input_image 块 (不认裸 url 键), 避免把普通 JSON 误判成图片.
+function jsonTextImageUrls(text: string): string[] {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return []
+  let parsed: any
+  try { parsed = JSON.parse(trimmed) } catch { return [] }
+  return jsonValueImageUrls(parsed, 0)
+}
+
+function jsonValueImageUrls(value: any, depth: number): string[] {
+  if (depth > 4 || value == null) return []
+  const out: string[] = []
+  if (Array.isArray(value)) {
+    for (const item of value) out.push(...jsonValueImageUrls(item, depth + 1))
+    return out
+  }
+  if (typeof value !== 'object') return []
+  if (value.type === 'image' || value.type === 'input_image') {
+    const url = nativeImageBlockUrl(value) || imageRefUrl(value.image_url) || imageRefUrl(value.url)
+    if (url) out.push(url)
+  }
+  const refUrl = imageRefUrl(value.image_url)
+  if (refUrl) out.push(refUrl)
+  // {"type":"text","text":"…"} 里的嵌套信封再解一层
+  // A nested envelope inside a text block gets one more level of unwrapping
+  if (typeof value.text === 'string') out.push(...jsonTextImageUrls(value.text))
+  return out
+}
+
+// 原生 image 块 (source.type === 'base64') → data url.
+function nativeImageBlockUrl(block: any): string | null {
+  const source = block?.source
+  if (!source || source?.type !== 'base64') return null
+  const data = typeof source?.data === 'string' ? source.data : ''
+  if (!data) return null
+  const mime = typeof source?.media_type === 'string' && source.media_type ? source.media_type : 'image/png'
+  return `data:${mime};base64,${data}`
+}
+
+// 单个 tool_result 的 content (数组块或字符串) → 图片 url 列表. 与 claudeToolResultImageOutput
+// 同源逻辑的"无 callId"版, 供 extractBashToolResultRecords 给合并结果记录挂 imageUrls.
+function toolResultBlockImages(content: any): string[] {
+  const out: string[] = []
+  if (Array.isArray(content)) {
+    for (const sub of content) {
+      if (typeof sub === 'string') { out.push(...jsonTextImageUrls(sub)); continue }
+      if (!sub || typeof sub !== 'object') continue
+      if (sub.type === 'image' || sub.type === 'input_image') {
+        const url = nativeImageBlockUrl(sub) || imageRefUrl(sub.image_url) || imageRefUrl(sub.url)
+        if (url) out.push(url)
+        continue
+      }
+      if (typeof sub.text === 'string') out.push(...jsonTextImageUrls(sub.text))
+    }
+  } else if (typeof content === 'string') {
+    out.push(...jsonTextImageUrls(content))
+  }
+  return out
+}
+
+// <persisted-output> 存根: CC 把超大 tool result 落盘, jsonl 里只剩 2KB 预览.
+// 预览出现图片信封特征 (image_url + data:image/) 时该结果实为一张大图 — 返回落盘
+// 文件路径, 图片字节由前端经 /api/sessions/tool-result-media 按需取回.
+// image_url 不带引号匹配: 预览里的引号是转义形态 (\"image_url\"), 带引号会漏.
+function persistedImageStubPath(text: string): string | null {
+  if (!text.includes('<persisted-output>')) return null
+  const match = /Full output saved to:\s*(\S+)/.exec(text)
+  if (!match) return null
+  const isImageEnvelope = text.includes('image_url') && text.includes('data:image/')
+  return isImageEnvelope ? match[1] : null
+}
+
+// claudeToolResultImageOutput 的返回: imageUrls 是可直接渲染的 data url;
+// deferred 标记存根场景 (原图在落盘文件里, 卡片只有 2KB 预览), 两者互斥.
+export type ClaudeToolResultImages = {
+  imageUrls: string[]
+  textBody: string
+  deferred?: { callId: string; savedPath: string }
+}
+
+// 从 tool_result entry (user 回填 / assistant 承载的 server_tool_result) 抽内嵌图片
+// (内联信封 / 原生 image 块 / 字符串化数组 / 落盘存根). 都不是图片载体时返回 null.
+export function claudeToolResultImageOutput(entry: AnyEntry): ClaudeToolResultImages | null {
+  if (entry?.type !== 'user' && entry?.type !== 'assistant') return null
+  const content = entry?.message?.content
+  if (!Array.isArray(content)) return null
+  const imageUrls: string[] = []
+  const textParts: string[] = []
+  let deferred: ClaudeToolResultImages['deferred'] | undefined
+  let sawToolResult = false
+
+  // 单个 content 载体 (数组块或整段字符串) 的图片抽取, 命中返回 true 表示已消费.
+  const consumeBlockText = (text: string, callId: unknown): boolean => {
+    const urls = jsonTextImageUrls(text)
+    if (urls.length > 0) { imageUrls.push(...urls); return true }
+    const stubPath = persistedImageStubPath(text)
+    if (stubPath && typeof callId === 'string' && callId && !deferred) {
+      deferred = { callId, savedPath: stubPath }
+      return true
+    }
+    return false
+  }
+
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || block?.type !== 'tool_result') continue
+    sawToolResult = true
+    const callId = typeof block?.tool_use_id === 'string' ? block.tool_use_id : undefined
+    if (Array.isArray(block?.content)) {
+      for (const sub of block.content) {
+        if (typeof sub === 'string') {
+          if (!consumeBlockText(sub, callId)) textParts.push(sub)
+          continue
+        }
+        if (!sub || typeof sub !== 'object') continue
+        if (sub?.type === 'image') {
+          const url = nativeImageBlockUrl(sub)
+          if (url) { imageUrls.push(url); continue }
+        }
+        if (typeof sub?.text === 'string') {
+          // ✨ 图片信封/存根命中即整块消费, 不再把 base64 原文混进文字正文
+          // A matched envelope or stub is consumed whole; its base64 never leaks into the text body
+          if (!consumeBlockText(sub.text, callId)) textParts.push(sub.text)
+        }
+      }
+    } else if (typeof block?.content === 'string') {
+      if (!consumeBlockText(block.content, callId)) textParts.push(block.content)
+    }
+  }
+  if (!sawToolResult || (imageUrls.length === 0 && !deferred)) return null
+  return { imageUrls: Array.from(new Set(imageUrls)), textBody: textParts.filter(Boolean).join('\n').trim(), deferred }
 }
 
 // ── update_plan (codex 计划模式) ─────────────────────────────────────────

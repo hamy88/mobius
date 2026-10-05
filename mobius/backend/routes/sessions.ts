@@ -2,7 +2,7 @@ import express from 'express';
 import { v4 as uuid } from 'uuid';
 import path from 'path';
 import fs from 'fs';
-import { auth, authOrQuery } from '../middleware/auth';
+import { auth, authOrQuery, downloadAuth } from '../middleware/auth';
 import { Sessions } from '../repositories/sessions';
 import { Conversations } from '../repositories/conversations';
 import { isAssistantSession } from '../services/assistant-session';
@@ -46,6 +46,7 @@ import {
   writeMobiusErrorEntry,
   deleteSessionData as deleteHistoryData,
   subscribeSessionEvents,
+  sessionIdOfJsonlPath,
 } from '../services/mobius-agent-history';
 // @ts-ignore — service 仍是 .js
 import { readSessionInputs } from '../services/session-inputs';
@@ -1031,6 +1032,84 @@ router.get('/:id/groups/:gid/entries', auth, (req: express.Request, res: express
     console.warn(`[sessions/group-entries] failed (${id}/${gid}): ${(e as Error).message}`);
     res.status(500).json({ error: (e as Error).message || String(e) });
   }
+});
+
+// ── <persisted-output> 落盘 tool result 的图片取回 ────────────────────────
+// CC 把超大 tool result 落盘成 <jsonl目录>/tool-results/<call_id>.json, jsonl 里只剩
+// 2KB 预览存根. MCP 图像工具 (如 analyze_image) 的返回整张是大图时, 前端图像卡片来此
+// 按需取图: ?meta=1 只回图片元信息 (张数/mime/体积), 默认回第 index 张的字节流
+// (<img> 直连, token 走 query 与 /api/download 同款).
+// 权限三重校验: 文件名必须 = <call_id>.json、父目录必须叫 tool-results、其上级
+// <session>/<session>.jsonl 必须已登记为某会话主 jsonl 且该会话当前用户可读.
+
+// 从落盘 JSON 里抽出全部图片. 形态与前端 claudeToolResultImageOutput 对齐:
+// [{type:'text', text:'{"detail":…,"image_url":"data:image/…;base64,…"}'}] (字符串化信封)
+// 或原生 [{type:'image', source:{type:'base64', media_type, data}}].
+function persistedToolResultImages(parsed: any): Array<{ mime: string; b64: string }> {
+  const out: Array<{ mime: string; b64: string }> = [];
+  const blocks = Array.isArray(parsed) ? parsed : [parsed];
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+    const source = block?.source;
+    if (block?.type === 'image' && source?.type === 'base64' && typeof source?.data === 'string' && source.data) {
+      out.push({
+        mime: typeof source?.media_type === 'string' && source.media_type ? source.media_type : 'image/png',
+        b64: source.data,
+      });
+      continue;
+    }
+    if (typeof block?.text !== 'string') continue;
+    let inner: any;
+    try { inner = JSON.parse(block.text); } catch { continue; }
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) continue;
+    const ref = inner.image_url;
+    const url = typeof ref === 'string' ? ref : typeof ref?.url === 'string' ? ref.url : '';
+    const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)\s*$/.exec(url);
+    if (m) out.push({ mime: m[1], b64: m[2] });
+  }
+  return out;
+}
+
+const TOOL_RESULT_CALL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const TOOL_RESULT_MEDIA_LIMIT_BYTES = 32 * 1024 * 1024;
+
+router.get('/tool-result-media', downloadAuth, (req: express.Request, res: express.Response) => {
+  const user = userOf(req);
+  const callId = String(req.query.call_id || '');
+  if (!TOOL_RESULT_CALL_ID_RE.test(callId)) { res.status(400).json({ error: '无效 call_id' }); return; }
+  const absPath = path.resolve(String(req.query.path || ''));
+  // ✨ 三重校验: 文件名=call_id.json → 父目录=tool-results → jsonl 归属可读会话
+  // Triple check: filename = call_id.json, parent dir named tool-results, jsonl maps to a readable session
+  if (path.basename(absPath) !== `${callId}.json` || path.basename(path.dirname(absPath)) !== 'tool-results') {
+    res.status(400).json({ error: '路径与 call_id 不匹配' });
+    return;
+  }
+  // jsonl 是 session 目录的兄弟文件: <projects>/<cc-session-id>/<cc-session-id>.jsonl
+  const sessionDir = path.dirname(path.dirname(absPath));
+  const sid = sessionIdOfJsonlPath(path.join(path.dirname(sessionDir), `${path.basename(sessionDir)}.jsonl`));
+  if (!sid) { res.status(404).json({ error: '落盘文件未归属任何会话' }); return; }
+  const session = findSessionReadable(sid, user);
+  if (!session) { res.status(403).json({ error: '无权访问该会话' }); return; }
+
+  let stat: fs.Stats;
+  try { stat = fs.statSync(absPath); } catch { res.status(404).json({ error: '文件不存在' }); return; }
+  if (stat.size > TOOL_RESULT_MEDIA_LIMIT_BYTES) { res.status(413).json({ error: '文件过大' }); return; }
+  let parsed: any;
+  try { parsed = JSON.parse(fs.readFileSync(absPath, 'utf8')); } catch { res.status(422).json({ error: '文件不是有效 JSON' }); return; }
+  const images = persistedToolResultImages(parsed);
+  if (images.length === 0) { res.status(404).json({ error: '文件里没有图片' }); return; }
+  if (req.query.meta !== undefined) {
+    res.json({ count: images.length, images: images.map(im => ({ mime: im.mime, bytes: Math.floor(im.b64.length * 0.75) })) });
+    return;
+  }
+  const index = Number(req.query.index ?? 0) || 0;
+  const image = images[index];
+  if (!image) { res.status(400).json({ error: `图片序号越界 (0..${images.length - 1})` }); return; }
+  const buf = Buffer.from(image.b64, 'base64');
+  res.setHeader('Content-Type', image.mime);
+  res.setHeader('Content-Length', String(buf.length));
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.end(buf);
 });
 
 router.get('/:id/time-consume-waterfall', auth, (req: express.Request, res: express.Response) => {

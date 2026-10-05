@@ -35,6 +35,7 @@ import {
   extractTaskToolCalls,
   summarizePlanUpdate,
   parseMcpResultEnvelope,
+  claudeToolResultImageOutput,
 } from './entry-extract'
 import { extractInitialContext, initialContextSummaryLine } from './initial-context'
 
@@ -304,6 +305,25 @@ export function buildHeaderSummary(entry: AnyEntry): HeaderSummary {
           : Array.isArray(tr.content) ? tr.content.map((b: any) => b?.text || '').join('') : ''
         const head = `tool_result ← ${tr.tool_use_id?.slice(0, 8)}…`
         if (!body) return clip(head, HEADER_SHORT_LIMIT)
+        // MCP 图像信封 ({"detail":…,"image_url":"data:…"} / 原生 image 块): 标题栏给一行"图像返回"摘要,
+        // 不把 base64 铺进预览; 正文渲染走 EntryCard 图片模式 (<img> 网格).
+        const imgs = claudeToolResultImageOutput(entry)
+        if (imgs) {
+          // 存根场景: 原图在落盘文件里, 摘要提示可展开加载, 不暴露预览里的残缺 base64.
+          if (imgs.deferred) {
+            const line = '图像返回 · 原图已存盘, 点击卡片加载'
+            return { short: line, shortTail: line, full: line, truncated: false, canCompact: false }
+          }
+          const first = imgs.imageUrls[0]
+          const mime = (first.match(/^data:([^;,]+)/) || [])[1] || 'image'
+          const commaIdx = first.indexOf(',')
+          const bytes = first.startsWith('data:') && commaIdx > 0 ? Math.floor((first.length - commaIdx - 1) * 0.75) : 0
+          const sizeLabel = bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)}MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)}KB` : bytes > 0 ? `${bytes}B` : ''
+          const parts = ['图像返回', mime, sizeLabel]
+          if (imgs.imageUrls.length > 1) parts.push(`×${imgs.imageUrls.length}`)
+          const line = parts.filter(Boolean).join(' · ')
+          return { short: line, shortTail: line, full: imgs.textBody || line, truncated: false, canCompact: false }
+        }
         // MCP 工具返回信封: 精简模式正文 = meta 行 + output 代码块. 终端文本必须用 code fence 包,
         // 否则 markdown 会吞掉 Windows 路径的反斜杠; 用 codeFence 自动处理 output 内嵌的反引号.
         // 标题栏一行展示 output 首行 (折叠态预览), 不暴露原始 JSON 信封.
