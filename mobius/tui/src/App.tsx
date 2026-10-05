@@ -19,7 +19,7 @@ import { ChatScreen } from './components/Chat.js'
 import type { ConfigResult } from './components/ConfigFlow.js'
 import { ResumePicker } from './components/ResumePicker.js'
 import { Screen } from './components/Screen.js'
-import { startAimuxConnection, stopAimuxConnection, type AimuxStatus } from './aimux.js'
+import { startAimuxConnection, stopAimuxConnection, upgradeAimuxRuntime, type AimuxStatus } from './aimux.js'
 import { AimuxStatusLine } from './components/AimuxStatus.js'
 import { bufferUnclaimedInput, useStableInput } from './components/primitives.js'
 
@@ -200,6 +200,7 @@ export function App() {
         onResume={onResume}
         onQuit={onQuit}
         onLogout={() => { void onLogout() }}
+        onUpgradeAimux={() => { void upgradeAimuxRuntime() }}
         onReconfigure={onReconfigure}
         onConfigCancel={onConfigCancel}
         aimuxStatus={aimuxStatus}

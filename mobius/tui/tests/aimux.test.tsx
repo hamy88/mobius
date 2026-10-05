@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION } from '../src/aimux.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 let pass = 0, fail = 0
@@ -174,11 +174,11 @@ async function testBundleArchAndUrl() {
   const arch = bundleArch()
   ok(arch === 'linux-x64' || arch === 'win-x64' || arch === 'mac-x64', `bundleArch returns a supported arch on this host (${arch})`)
   const before = bundleUrl('linux-x64')
-  ok(before.includes('mobius-python-linux-x64-v11') && before.endsWith('.zip'), 'bundleUrl follows the fixed filename pattern')
+  ok(before.includes(`mobius-python-linux-x64-v${BUNDLE_VER}`) && before.endsWith('.zip'), 'bundleUrl follows the fixed filename pattern')
   const saved = process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL
   process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL = 'https://example.test/cdn/'
   try {
-    ok(bundleUrl('win-x64') === 'https://example.test/cdn/mobius-python-win-x64-v11.zip', 'MOBIUS_TUI_PYTHON_BUNDLE_URL overrides the CDN base and trims trailing slash')
+    ok(bundleUrl('win-x64') === `https://example.test/cdn/mobius-python-win-x64-v${BUNDLE_VER}.zip`, 'MOBIUS_TUI_PYTHON_BUNDLE_URL overrides the CDN base and trims trailing slash')
   } finally { if (saved === undefined) delete process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL; else process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL = saved }
 }
 
@@ -224,6 +224,18 @@ function testPickSilentFlag() {
   ok(pickSilentFlag('  --silent-shell  Hide console.', 'win32') === '--silent-shell', 'old aimux advertising only --silent-shell')
   ok(pickSilentFlag('Usage: aimux reverse connect ...', 'win32') === null, 'unsupported aimux → null (send nothing, avoid crash-loop)')
   ok(pickSilentFlag('  --silent-v2  Hide console.', 'linux') === null, 'off-Windows → always null')
+}
+
+function testVersionAtLeast() {
+  console.log('\n[AIMUX 6c] aimux pin is a floor, not an exact match')
+  // /upgrade 装的是 PyPI 最新版，通常比 pin 新；不能被 pin 校验判成"没装好"又拽回去。
+  ok(versionAtLeast('0.3.62', '0.3.61'), 'newer aimux satisfies the pinned floor')
+  ok(versionAtLeast('0.3.61', '0.3.61'), 'exactly the pinned version satisfies the floor')
+  ok(versionAtLeast('0.4.0', '0.3.61'), 'a newer minor satisfies the floor')
+  ok(!versionAtLeast('0.3.60', '0.3.61'), 'an older aimux is still reinstalled')
+  ok(!versionAtLeast('0.1.40', '0.3.61'), 'the old 0.1.x line is still reinstalled')
+  ok(versionAtLeast('0.3.61.1', '0.3.61'), 'a longer version string compares by segment')
+  ok(!versionAtLeast('garbage', '0.3.61'), 'an unparseable version is treated as not-ready')
 }
 
 function testAimuxIdentifierScopesWorkspace() {
@@ -298,6 +310,7 @@ async function main() {
   await testSpawnLauncher()
   testReverseConnectArgs()
   testPickSilentFlag()
+  testVersionAtLeast()
   testAimuxIdentifierScopesWorkspace()
   testBundleHealthCheck()
   await testEnsureFromBundleReady()

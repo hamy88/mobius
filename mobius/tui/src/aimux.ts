@@ -32,7 +32,7 @@ export type AimuxLauncher =
   | { kind: 'exe'; path: string }
   | { kind: 'module'; python: string }
 
-const AIMUX_TARGET_VERSION = '0.3.61'
+const AIMUX_TARGET_VERSION = '0.3.62'
 const AIMUX_PACKAGE = `aimux==${AIMUX_TARGET_VERSION}`
 const WIN = process.platform === 'win32'
 const venvDir = () => path.join(mobiusHome(), 'aimux-venv')
@@ -92,7 +92,8 @@ async function pythonForAimux(onProgress?: (p: InstallProgress) => void): Promis
 // 解压到 ~/.mobius/python-bundle/ 后用 `<python> -m aimux` 运行，彻底绕开宿主机
 // 系统 python（如被精简掉 ensurepip 的容器镜像）。aimux 全部依赖为纯 Python，
 // 故三平台可共用同一套打包产物，分别按 arch 发布到 CDN。
-const BUNDLE_VER = '11'
+/** Plan B 内置运行时包版本；每次发版跟 aimux pin 一起 +1，测试也从这里取。 */
+export const BUNDLE_VER = '12'
 const BUNDLE_AIMUX_VERSION = AIMUX_TARGET_VERSION
 /** Version expected from the installed or bundled AIMUX runtime. */
 export const AIMUX_VERSION = BUNDLE_AIMUX_VERSION
@@ -288,22 +289,44 @@ function spawnDetachedDaemon(launcher: AimuxLauncher, args: string[]): ChildProc
 /** test-only 导出: 暴露内部 downloadBundle 以便单测 mock fetch 验证流式下载+进度。 */
 export const downloadBundleForTest = downloadBundle
 
-function venvReady(): boolean {
-  if (!existsSync(aimuxExe()) || !existsSync(venvPython())) return false
-  try {
-    return spawnSync(
-      venvPython(),
-      ['-c', `import aimux; assert aimux.__version__ == '${AIMUX_TARGET_VERSION}'`],
-      { stdio: 'ignore', windowsHide: true },
-    ).status === 0
-  } catch {
-    return false
+/** `a >= b`（点分数字）。非数字段一律判 false，宁可重装也不要用一个看不懂的版本。 */
+export function versionAtLeast(a: string, b: string): boolean {
+  const pa = a.split('.'), pb = b.split('.')
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = Number(pa[i] ?? 0), y = Number(pb[i] ?? 0)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false
+    if (x !== y) return x > y
   }
+  return true
+}
+
+/** venv 里现成的 aimux 版本（跑不起来时 null）。 */
+function installedAimuxVersion(): string | null {
+  if (!existsSync(aimuxExe()) || !existsSync(venvPython())) return null
+  try {
+    const r = spawnSync(venvPython(), ['-c', 'import aimux; print(aimux.__version__)'], { encoding: 'utf8', windowsHide: true })
+    if (r.status !== 0) return null
+    const v = (r.stdout ?? '').trim().split(/\s+/).pop()
+    return v || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * pin 是**最低可用版本**，不是精确版本：比它新的直接沿用。
+ * 否则用户 `/upgrade` 到 PyPI 最新版后，下一次连接（乃至下次启动）会被拽回 pin，
+ * 升级看着"没生效"。
+ */
+function venvReady(): boolean {
+  const installed = installedAimuxVersion()
+  return installed !== null && versionAtLeast(installed, AIMUX_TARGET_VERSION)
 }
 
 export async function ensureAimux(onProgress?: (p: InstallProgress) => void): Promise<{ ok: boolean; error?: string; launcher?: AimuxLauncher }> {
   // Fast-path：venv 里已有 aimux 可执行 → 直接用。
-  if (venvReady()) { logInstall(`ensureAimux fast-path: venv aimux ${AIMUX_TARGET_VERSION} present\n`); onProgress?.({ phase: 'ready' }); return { ok: true, launcher: { kind: 'exe', path: aimuxExe() } } }
+  const existing = venvReady() ? installedAimuxVersion() : null
+  if (existing) { logInstall(`ensureAimux fast-path: venv aimux ${existing} present (pin ${AIMUX_TARGET_VERSION})\n`); onProgress?.({ phase: 'ready' }); return { ok: true, launcher: { kind: 'exe', path: aimuxExe() } } }
   logInstall(`\n########## ensureAimux install begin ${new Date().toISOString()} platform=${process.platform} arch=${process.arch} home=${mobiusHome()} ##########\n`)
   const py = await pythonForAimux(onProgress)
   logInstall(`  pythonForAimux → ${py ?? '(null: no system python)'}\n`)

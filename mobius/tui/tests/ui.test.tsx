@@ -1256,6 +1256,40 @@ async function testVersionSlash() {
   } finally { restoreFetch() }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// TEST 18 — /upgrade hands off to the host (install latest aimux + reconnect)
+// ════════════════════════════════════════════════════════════════════════════
+async function testUpgradeSlash() {
+  console.log('\n[UI 18] /upgrade slash command')
+  const client = new MobiusClient('http://mock.local', 'mock-jwt-token')
+  const ready: ReadyState = {
+    project: { id: 'p1', name: '测试项目' },
+    issue: { id: 'i1', project_id: 'p1', title: '测试任务' },
+    prefs: { model: 'codex', language: 'zh', excluded_skill_ids: [], excluded_memory_ids: [] },
+  }
+  installMock((url) => {
+    if (url.includes('/events')) {
+      return new Response(new RS({ start(c: any) { sseController = c; c.enqueue(enc.encode('event: subscribed\ndata: {"event":"subscribed","session":{}}\n\n')) } }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    return jsonResponse({ error: 'no mock' }, 404)
+  })
+  try {
+    let upgrades = 0
+    const { stdin, lastFrame, unmount } = render(
+      <ChatScreen client={client} ready={ready} webUserId="u" onClear={() => {}} onResume={() => {}} onQuit={() => {}} onLogout={() => {}} onUpgradeAimux={() => { upgrades += 1 }} onReconfigure={() => {}} onConfigCancel={() => {}} />,
+    )
+    await delay(60)
+    // 打全了命令名弹窗就收起，所以先在只打了前缀时看菜单里有没有它。
+    stdin.write('/upg'); await delay(40)
+    const menu = lastFrame() ?? ''
+    ok(menu.includes('/upgrade'), '/upgrade is offered in the slash-command menu')
+    stdin.write('rade'); await delay(40)
+    stdin.write('\r'); await delay(80)
+    unmount()
+    ok(upgrades === 1, '/upgrade calls the host upgrade hook exactly once')
+  } finally { restoreFetch() }
+}
+
 async function main() {
   await testLogin()
   await testChat()
@@ -1283,6 +1317,7 @@ async function main() {
   await testSendRetries502()
   await testCompactSlash()
   await testVersionSlash()
+  await testUpgradeSlash()
   // cleanup temp home
   try { fs.rmSync(TMP_HOME, { recursive: true, force: true }) } catch { /* ignore */ }
   console.log(`\n==== UI RESULT: ${pass} passed, ${fail} failed ====\n`)

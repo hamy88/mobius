@@ -40,7 +40,8 @@ interface ChatProps {
   onResume: () => void
   onQuit: () => void
   onLogout: () => void
-  onUpgradeAimux: () => void
+  /** 可选，与 aimuxStatus 一样只在接了 AIMUX 的宿主里给；缺省时 /upgrade 不动作。 */
+  onUpgradeAimux?: () => void
   onReconfigure: (result: ConfigResult) => void
   onConfigCancel: (sessionId: string | null) => void
   aimuxStatus?: AimuxStatus
@@ -136,7 +137,7 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
         // 安装与重连进度都走 aimuxStatus（状态行），失败也会落进 aimuxStatus.detail，
         // 所以这里只管触发，不额外弹错。
         setVersionInfo(null)
-        onUpgradeAimux()
+        onUpgradeAimux?.()
         return true
       }
       case '/logout': onLogout(); return true
