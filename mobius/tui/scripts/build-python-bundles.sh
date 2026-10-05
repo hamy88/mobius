@@ -13,8 +13,8 @@ set -euo pipefail
 
 TAG=20241002
 PYVER=3.12.7
-BUNDLE_VER=12
-AIMUX_VERSION=0.3.62
+BUNDLE_VER=13
+AIMUX_VERSION=0.3.64
 PYPI_INDEX=https://pypi.org/simple
 WORK="${WORK:-$HOME/python-bundles}"
 DIST="${DIST:-$WORK/dist}"
