@@ -54,6 +54,10 @@ export function PrepScreen({ client, onReady, onQuit }: {
   const [memories, setMemories] = useState<Memory[]>([])
   const [defaultModel, setDefaultModel] = useState<string | null>(null)
   const [statusMsg, setStatusMsg] = useState<string>('')
+  // GUI 授权的确认子屏: 选"是"后先停下来高亮提醒(Windows 会弹 UAC), 用户再确认才真正生效
+  // GUI authorization confirm sub-screen: pause with a highlighted notice (a
+  // UAC prompt follows on Windows) before the choice takes effect.
+  const [guiConfirm, setGuiConfirm] = useState(false)
   const thisCwd = cwd()
 
   // ── bootstrap ────────────────────────────────────────────────────────────
@@ -219,7 +223,7 @@ export function PrepScreen({ client, onReady, onQuit }: {
           items={[{ label: '中文', value: 'zh' }, { label: 'English', value: 'en' }]}
           onSelect={v => completeStep('language', { language: v as 'zh' | 'en' })} />
       : null}
-    {step === 'gui'
+    {step === 'gui' && !guiConfirm
       ? <Select
           title="是否授权操作图形界面 (GUI/computer use)"
           items={[
@@ -227,15 +231,45 @@ export function PrepScreen({ client, onReady, onQuit }: {
             { label: `是`, value: 'yes', desc: '以 gui- 前缀注册 bridge client 并启用界面操作工具' },
           ]}
           onSelect={v => {
-            const want = v === 'yes'
-            if (want !== tuiGuiAuthorized()) {
-              setTuiGuiAuthorized(want)
-              // 标识符在 tui-⇄gui- 间切换, 旧守护进程必须换掉才能带上/去掉 --enable-gui
-              // The identifier flips tui-⇄gui-, so the daemon must restart to pick it up
+            if (v === 'yes') {
+              // 先停在确认屏: 让用户对即将出现的系统授权弹窗有预期, 不做突袭
+              // Pause on the confirm screen first so the OS prompt never
+              // ambushes the user.
+              setGuiConfirm(true)
+              return
+            }
+            if (tuiGuiAuthorized()) {
+              setTuiGuiAuthorized(false)
               void restartAimuxConnectionForGuiChange()
             }
             completeStep('gui', {})
           }} />
+      : null}
+    {step === 'gui' && guiConfirm
+      ? <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+          <Text bold color="yellow">⚠ 即将授权操作图形界面</Text>
+          <Text color="yellow">确认后{process.platform === 'win32' ? '系统会弹出 UAC 管理员授权窗口' : '将启用界面操作工具'}，请留意屏幕上的弹窗并点击确认。</Text>
+          <Text color="yellow">授权后本机以 gui- 前缀注册，智能体可以操作本机图形界面（含{process.platform === 'win32' ? '管理员' : ''}窗口）。</Text>
+          <Box marginTop={1}>
+            <Select
+              title="继续吗？"
+              items={[
+                { label: '继续并授权', value: 'go', desc: process.platform === 'win32' ? '回车后请到 UAC 弹窗点击"是"' : '启用界面操作' },
+                { label: '取消', value: 'cancel', desc: '返回上一题，不做任何改动' },
+              ]}
+              onSelect={v => {
+                if (v !== 'go') { setGuiConfirm(false); return }
+                setTuiGuiAuthorized(true)
+                // 标识符在 tui-⇄gui- 间切换, 旧守护进程必须换掉才能带上 --enable-gui
+                // (Windows 下新客户端启动时会请求管理员权限 → UAC 弹窗)
+                // The identifier flips tui-⇄gui-, so the daemon restarts with
+                // --enable-gui (which triggers the UAC request on Windows).
+                void restartAimuxConnectionForGuiChange()
+                setGuiConfirm(false)
+                completeStep('gui', {})
+              }} />
+          </Box>
+        </Box>
       : null}
     {step === 'skills'
       ? <MultiPicker title={`选择启用的 Skill（默认全部启用，空格取消）`} items={toItems(skills)}
