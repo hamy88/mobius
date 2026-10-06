@@ -7,7 +7,7 @@
  */
 import { spawn, spawnSync, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { promises as fs, existsSync, createWriteStream, mkdirSync, openSync, closeSync } from 'node:fs'
+import { promises as fs, existsSync, createWriteStream, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -365,14 +365,41 @@ export function aimuxWorkspaceHash(username = currentUsername(), cwd = process.c
   return createHash('sha256').update(`${username}:${path.resolve(cwd)}`).digest('hex').slice(0, 10)
 }
 
-export function tuiAimuxIdentifier(hostname = os.hostname(), cwd = process.cwd(), username = currentUsername()): string {
+// ── GUI (computer use) authorization ─────────────────────────────────────
+// Machine-level choice made in the first-run wizard: when true the reverse
+// client registers as gui-<host>-<hash> and connects with --enable-gui, so
+// the remote exposes the remote_gui_* (computer use) toolset.
+const GUI_AUTH_FILE = 'tui-gui-authorized.json'
+let guiAuthorizedCache: boolean | undefined = undefined
+
+export function tuiGuiAuthorized(): boolean {
+  if (guiAuthorizedCache === undefined) {
+    try {
+      const raw = readFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), 'utf8')
+      guiAuthorizedCache = (JSON.parse(raw) as { gui?: boolean })?.gui === true
+    } catch { guiAuthorizedCache = false }
+  }
+  return guiAuthorizedCache
+}
+
+export function setTuiGuiAuthorized(value: boolean): void {
+  guiAuthorizedCache = value
+  try {
+    mkdirSync(mobiusHome(), { recursive: true })
+    writeFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), JSON.stringify({ gui: value }), { mode: 0o600 })
+  } catch { /* unwritable home: the in-memory cache still holds this session */ }
+}
+
+export function tuiAimuxIdentifier(hostname = os.hostname(), cwd = process.cwd(), username = currentUsername(), guiEnabled = tuiGuiAuthorized()): string {
   const host = hostname.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
   // One machine may run several Mobius TUIs for different projects (and for
   // different users). A hostname-only identifier makes every reverse client
   // register with the same name and --replace continuously evicts its siblings.
   // The (username, cwd) hash is stable across restarts/resume but unique per
   // user and per workspace, so separate projects/users never collide.
-  return `tui-${host || 'pc'}-${aimuxWorkspaceHash(username, cwd)}`
+  // GUI-authorized machines register under a gui- prefix so the capability is
+  // visible in the remote name itself (web device picker, remote ls).
+  return `${guiEnabled ? 'gui' : 'tui'}-${host || 'pc'}-${aimuxWorkspaceHash(username, cwd)}`
 }
 
 // ── shared daemon runtime JSON (one reverse connect per user+workspace) ──
@@ -437,6 +464,7 @@ export function reverseConnectArgs(
   platform: NodeJS.Platform = process.platform,
   silentFlag: string | null = null,
   runtimeFile: string | null = null,
+  enableGui = false,
 ): string[] {
   return [
     'reverse', 'connect', `${server.replace(/\/$/, '')}/aimux_bridge`,
@@ -445,6 +473,7 @@ export function reverseConnectArgs(
     '--replace',
     ...(runtimeFile ? ['--runtime', runtimeFile, '--watchdog', runtimeFile] : []),
     ...(platform === 'win32' && silentFlag ? [silentFlag] : []),
+    ...(enableGui ? ['--enable-gui'] : []),
   ]
 }
 
@@ -477,6 +506,15 @@ export function pickSilentFlag(helpText: string, platform: NodeJS.Platform = pro
   if (/--slient-v2\b/.test(helpText)) return '--slient-v2'
   if (/--silent-shell\b/.test(helpText)) return '--silent-shell'
   return null
+}
+
+/**
+ * Does this aimux build advertise --enable-gui (0.3.64+)? Older installs
+ * reject unknown options outright, so the flag is only sent when the help
+ * text confirms it — same defensive pattern as pickSilentFlag.
+ */
+export function pickEnableGuiFlag(helpText: string): boolean {
+  return /--enable-gui\b/.test(helpText)
 }
 
 /** Result of a bridge heartbeat: is the stream up, and did the JWT just get rejected? */
@@ -577,7 +615,7 @@ export class AimuxSupervisor {
       if (pid !== null && pidAlive(pid)) { await touchWatchdog(this.hash); return }
       const { server, token, identifier, onStatus } = this.opts
       onStatus({ state: 'starting', phase: 'connecting', detail: '正在启动 AIMUX 守护进程…', identifier, attempt: this.reconnectAttempt })
-      const child = this.opts.spawnProcess?.(token) ?? spawnDetachedDaemon({ kind: 'exe', path: aimuxExe() }, reverseConnectArgs(server, identifier, token, process.platform, null, runtimePath(this.hash)))
+      const child = this.opts.spawnProcess?.(token) ?? spawnDetachedDaemon({ kind: 'exe', path: aimuxExe() }, reverseConnectArgs(server, identifier, token, process.platform, null, runtimePath(this.hash), tuiGuiAuthorized()))
       child.on('error', (e: Error) => { appendAimuxLog(installLogQueue, `\n[aimux spawn error] ${e.stack || e.message}\n`) })
       child.unref?.()
       this.reconnectAttempt = 0
@@ -702,6 +740,9 @@ interface StartOptions {
 // not probed yet this process). Cached so reconnects reuse it without re-running
 // `aimux reverse connect --help`. See reverseConnectArgs for why this is probed.
 let cachedSilentFlag: string | null | undefined = undefined
+// Same caching for --enable-gui support (aimux 0.3.64+): sending it to an older
+// build crashes the supervisor with "No such option".
+let cachedEnableGui: boolean | undefined = undefined
 
 export async function startAimuxConnection(opts: StartOptions): Promise<void> {
   const onStatus = opts.onStatus ?? (() => {})
@@ -727,15 +768,23 @@ export async function startAimuxConnection(opts: StartOptions): Promise<void> {
     // Windows only: ask the installed aimux which console-hiding flag it accepts
     // before spawning, so a version mismatch (older PyPI/bundle aimux without
     // --slient-v2) can't crash-loop the supervisor with "No such option".
-    if (WIN && cachedSilentFlag === undefined) {
+    const needGuiFlag = tuiGuiAuthorized()
+    if (cachedSilentFlag === undefined || (needGuiFlag && cachedEnableGui === undefined)) {
       const help = await probeReverseConnectHelp(launcher)
-      cachedSilentFlag = pickSilentFlag(help)
-      logInstall(`reverse-connect silent flag probe → ${cachedSilentFlag ?? '(none supported; sending no flag)'}\n`)
+      if (WIN && cachedSilentFlag === undefined) {
+        cachedSilentFlag = pickSilentFlag(help)
+        logInstall(`reverse-connect silent flag probe → ${cachedSilentFlag ?? '(none supported; sending no flag)'}\n`)
+      }
+      if (needGuiFlag && cachedEnableGui === undefined) {
+        cachedEnableGui = pickEnableGuiFlag(help)
+        logInstall(`reverse-connect --enable-gui probe → ${cachedEnableGui ? 'supported' : 'NOT supported (skipping; upgrade aimux to 0.3.64+)'}\n`)
+      }
     }
     const silentFlag = cachedSilentFlag
+    const enableGui = needGuiFlag && cachedEnableGui === true
     supervisor = new AimuxSupervisor({
       server: opts.server, token: opts.token, identifier, onStatus, refreshToken: opts.refreshToken,
-      spawnProcess: token => spawnDetachedDaemon(launcher, reverseConnectArgs(opts.server, identifier, token, process.platform, silentFlag, runtimePath(aimuxWorkspaceHash()))),
+      spawnProcess: token => spawnDetachedDaemon(launcher, reverseConnectArgs(opts.server, identifier, token, process.platform, silentFlag, runtimePath(aimuxWorkspaceHash()), enableGui)),
     })
     await supervisor.start()
   })().finally(() => { installing = null })
@@ -745,6 +794,20 @@ export async function startAimuxConnection(opts: StartOptions): Promise<void> {
 export async function stopAimuxConnection(): Promise<void> {
   const current = supervisor; supervisor = null
   await current?.stop()
+}
+
+/**
+ * Re-do the reverse connection after the GUI authorization choice changed:
+ * the identifier flips tui-⇄gui-, so the old daemon must die first (its
+ * runtime JSON is keyed by workspace hash, not identifier) and a fresh one
+ * spawns with/without --enable-gui. No-op when no connection is up yet —
+ * the next startAimuxConnection picks the new flag up anyway.
+ */
+export async function restartAimuxConnectionForGuiChange(): Promise<void> {
+  const opts = lastStartOpts
+  await stopAimuxConnection()
+  await stopDaemonFromRuntime()
+  if (opts) await startAimuxConnection(opts)
 }
 
 /** SIGTERM 掉本工作区 runtime JSON 里记录的守护进程，并删掉该文件。

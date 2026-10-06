@@ -15,14 +15,20 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Select, TextInput, type SelectItem } from './primitives.js'
 import { MobiusClient } from '../api.js'
+import { restartAimuxConnectionForGuiChange, setTuiGuiAuthorized, tuiGuiAuthorized } from '../aimux.js'
 import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
 } from '../config.js'
 import type { Issue, Memory, Project, SessionModelOption, Skill } from '../types.js'
 
-type PrefStep = 'issue' | 'model' | 'language' | 'skills' | 'memories'
-const STEP_ORDER: PrefStep[] = ['model', 'language', 'skills', 'memories']
+type PrefStep = 'issue' | 'model' | 'language' | 'gui' | 'skills' | 'memories'
+// GUI authorization is only meaningful where a computer-use helper exists
+// (Windows/macOS in this release); other platforms never see the step.
+const GUI_STEP_PLATFORMS: NodeJS.Platform[] = ['win32', 'darwin']
+const STEP_ORDER: PrefStep[] = GUI_STEP_PLATFORMS.includes(process.platform)
+  ? ['model', 'language', 'gui', 'skills', 'memories']
+  : ['model', 'language', 'skills', 'memories']
 
 export interface ReadyState {
   project: Project
@@ -212,6 +218,24 @@ export function PrepScreen({ client, onReady, onQuit }: {
           title="选择回复语言"
           items={[{ label: '中文', value: 'zh' }, { label: 'English', value: 'en' }]}
           onSelect={v => completeStep('language', { language: v as 'zh' | 'en' })} />
+      : null}
+    {step === 'gui'
+      ? <Select
+          title="是否授权操作图形界面 (GUI/computer use)"
+          items={[
+            { label: `否（默认）`, value: 'no', desc: '仅命令行/文件方式操作本机' },
+            { label: `是`, value: 'yes', desc: '以 gui- 前缀注册 bridge client 并启用界面操作工具' },
+          ]}
+          onSelect={v => {
+            const want = v === 'yes'
+            if (want !== tuiGuiAuthorized()) {
+              setTuiGuiAuthorized(want)
+              // 标识符在 tui-⇄gui- 间切换, 旧守护进程必须换掉才能带上/去掉 --enable-gui
+              // The identifier flips tui-⇄gui-, so the daemon must restart to pick it up
+              void restartAimuxConnectionForGuiChange()
+            }
+            completeStep('gui', {})
+          }} />
       : null}
     {step === 'skills'
       ? <MultiPicker title={`选择启用的 Skill（默认全部启用，空格取消）`} items={toItems(skills)}

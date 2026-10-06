@@ -26,6 +26,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const crypto = require('crypto')
+const { bridgeRemoteGuiAvailable } = require('../services/pc-client-context')
 
 import { AgentBackend } from './base'
 import type { HistorySnapshot, QueryOpts } from './base'
@@ -885,6 +886,8 @@ interface ClaudeDispatchOpts {
   suppressRunningFlag?: boolean
   urgent?: boolean
   aimuxRemoteName?: string
+  /** GUI(computer-use) authorization for the bound remote — adds the remote_gui_* toolset. */
+  aimuxGuiAuthorized?: boolean
   enableGulingMcp?: boolean
   modelLaunchOptions?: Record<string, unknown>
   model?: string | null
@@ -1448,7 +1451,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
    * the else-branch below can do nothing.
    */
   async _createImpl(opts: ClaudeDispatchOpts) {
-    const { sessionId, cwd, flagRoot, displayName, initialPrompt, agentSessionId, isInitialContextPrompt = false, aimuxRemoteName, enableGulingMcp = false } = opts
+    const { sessionId, cwd, flagRoot, displayName, initialPrompt, agentSessionId, isInitialContextPrompt = false, aimuxRemoteName, aimuxGuiAuthorized, enableGulingMcp = false } = opts
     const { model, useProxy, proxyMode, settingsPath, forceNoProxy, captureStream } = unpackLaunch(opts)
     if (!sessionId || !cwd) throw new Error('createNewSession 需要 sessionId + cwd')
     if (!initialPrompt) throw new Error('createNewSession 需要 initialPrompt')
@@ -1457,7 +1460,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     // 窗口还活着就复用，重启后不重复拉起
     // A live window is reused, so a restart never spawns a duplicate
     if (!windowExists(sessionId)) {
-      await this._spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, displayName, agentSessionId, settingsPath, captureStream, forceNoProxy, aimuxRemoteName, enableGulingMcp })
+      await this._spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, displayName, agentSessionId, settingsPath, captureStream, forceNoProxy, aimuxRemoteName, aimuxGuiAuthorized, enableGulingMcp })
     } else {
       // 重启后窗口还在但runtime可能为空，补建一条
       // The window is live but may have no runtime row; rebuild one
@@ -1505,7 +1508,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
    * path to touch it.
    */
   async _queueImpl(opts: ClaudeDispatchOpts) {
-    const { sessionId, prompt, cwd, flagRoot, displayName, agentSessionId, isInitialContextPrompt = false, mobiusPromptRecord = null, suppressRunningFlag = false, aimuxRemoteName, enableGulingMcp = false } = opts
+    const { sessionId, prompt, cwd, flagRoot, displayName, agentSessionId, isInitialContextPrompt = false, mobiusPromptRecord = null, suppressRunningFlag = false, aimuxRemoteName, aimuxGuiAuthorized, enableGulingMcp = false } = opts
     let { model, useProxy, proxyMode: proxyModeArg, settingsPath, forceNoProxy, captureStream } = unpackLaunch(opts)
     if (!sessionId) throw new Error('需要 sessionId')
     if (!prompt) throw new Error('需要 prompt')
@@ -1537,6 +1540,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
         displayName: displayName ?? (persisted?.displayName ?? undefined),
         agentSessionId: finalAgentSid ?? undefined,
         aimuxRemoteName,
+        aimuxGuiAuthorized,
         enableGulingMcp,
       })
     }
@@ -1690,7 +1694,7 @@ class TmuxClaudeCodeBackend extends AgentBackend {
    * need a second press. A TUI that never becomes ready has its window killed rather than left
    * behind, and the timeout is thrown with the cwd.
    */
-  async _spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode: proxyModeArg, displayName, agentSessionId, settingsPath, captureStream = false, forceNoProxy = false, aimuxRemoteName, enableGulingMcp = false }: ClaudeDispatchOpts) {
+  async _spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode: proxyModeArg, displayName, agentSessionId, settingsPath, captureStream = false, forceNoProxy = false, aimuxRemoteName, aimuxGuiAuthorized, enableGulingMcp = false }: ClaudeDispatchOpts) {
     // 入参可为null，此处归一为非空，兜底在调用方
     // Nullable args become non-null here; the persisted fallback is the caller's
     if (!sessionId || !cwd) throw new Error('_spawnWindow 需要 sessionId + cwd')
@@ -1764,7 +1768,17 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     // 给TUI会话注入aimux远程MCP，让claude驱动远端机器
     // TUI sessions get the aimux remote MCP server injected
     if (aimuxRemoteName) {
-      mcpServers.aimux = { command: resolveAimuxBin(), args: ['mcp', 'serve', '--remote', aimuxRemoteName] }
+      const aimuxArgs = ['mcp', 'serve', '--remote', aimuxRemoteName]
+      // GUI 会话: 远端当前真的报 gui.available 才上 classic-and-gui; 否则退回 classic,
+      // 不能让整个 aimux MCP 因 fail-fast 挂掉 (remote_* 也没了).
+      // GUI session: only serve the gui toolset when the remote currently reports
+      // gui.available; otherwise fall back to classic so the whole MCP never dies.
+      if (aimuxGuiAuthorized) {
+        const guiOk = await bridgeRemoteGuiAvailable(aimuxRemoteName)
+        if (guiOk) aimuxArgs.push('--toolset', 'classic-and-gui')
+        else console.warn(`[tmux-claude-code] session authorized GUI but remote ${aimuxRemoteName} has gui off; serving classic toolset`)
+      }
+      mcpServers.aimux = { command: resolveAimuxBin(), args: aimuxArgs }
     }
     // 小莫会话注入guling实盘MCP，直接读资金和持仓
     // Xiaomo sessions get the guling trading MCP to read funds and positions

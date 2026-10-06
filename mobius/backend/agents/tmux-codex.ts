@@ -12,6 +12,7 @@
  *   - completion: shares the .imac/flags/<sessionId> flag convention with the Claude backend
  */
 const { spawnSync } = require('child_process')
+const { bridgeRemoteGuiAvailable } = require('../services/pc-client-context')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -713,6 +714,8 @@ interface CodexDispatchOpts {
   suppressRunningFlag?: boolean
   urgent?: boolean
   aimuxRemoteName?: string
+  /** GUI(computer-use) authorization for the bound remote — adds the remote_gui_* toolset. */
+  aimuxGuiAuthorized?: boolean
   modelLaunchOptions?: Record<string, unknown>
   model?: string | null
   useProxy?: boolean
@@ -1179,7 +1182,7 @@ class TmuxCodexBackend extends AgentBackend {
   // Create path: reuse a live window (binding its existing thread) or spawn one, send the initial
   // prompt, then bind the codex thread that the new rollout created.
   async _createImpl(opts: CodexDispatchOpts) {
-    const { sessionId, cwd, flagRoot, displayName, initialPrompt, agentSessionId, aimuxRemoteName } = opts
+    const { sessionId, cwd, flagRoot, displayName, initialPrompt, agentSessionId, aimuxRemoteName, aimuxGuiAuthorized } = opts
     const { model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue } = unpackLaunch(opts)
     if (!sessionId || !cwd) throw new Error('createNewSession requires sessionId + cwd')
     if (!initialPrompt) throw new Error('createNewSession requires initialPrompt')
@@ -1188,7 +1191,7 @@ class TmuxCodexBackend extends AgentBackend {
     let spawnInfo: any = null
     let allowUpdatedThreadFallback = false
     if (!windowExists(sessionId)) {
-      spawnInfo = await this._spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue, displayName, agentSessionId, aimuxRemoteName })
+      spawnInfo = await this._spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue, displayName, agentSessionId, aimuxRemoteName, aimuxGuiAuthorized })
     } else {
       await this._ensureRuntimeFromKnownThread({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey: codexChannel || codexProfileKey, codexConfigPath, codexSecretEnvKey, displayName, agentSessionId })
       allowUpdatedThreadFallback = true
@@ -1229,7 +1232,7 @@ class TmuxCodexBackend extends AgentBackend {
   // Queue path: respawn the window when it is gone (falling back to the last persisted cwd/model/
   // proxy/thread), otherwise reuse it; then send the prompt and bind if still unbound.
   async _queueImpl(opts: CodexDispatchOpts) {
-    const { sessionId, prompt, agentSessionId, mobiusPromptRecord = null, suppressRunningFlag = false, aimuxRemoteName } = opts
+    const { sessionId, prompt, agentSessionId, mobiusPromptRecord = null, suppressRunningFlag = false, aimuxRemoteName, aimuxGuiAuthorized } = opts
     let { cwd, flagRoot, displayName } = opts
     let { model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath: codexConfigPath0, codexSecretEnvKey, codexSecretValue } = unpackLaunch(opts)
     let codexConfigPath = codexConfigPath0
@@ -1262,6 +1265,7 @@ class TmuxCodexBackend extends AgentBackend {
         displayName: displayName || persisted?.displayName,
         agentSessionId: finalAgentSid,
         aimuxRemoteName,
+        aimuxGuiAuthorized,
       })
       cwd = finalCwd
       flagRoot = flagRoot || persisted?.flagRoot || finalCwd
@@ -1520,7 +1524,7 @@ class TmuxCodexBackend extends AgentBackend {
   }
 
   // Start a new Codex tmux window and return the launch info used to bind its rollout later.
-  async _spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue, displayName, agentSessionId, captureStream = false, aimuxRemoteName }: CodexDispatchOpts) {
+  async _spawnWindow({ sessionId, cwd, flagRoot, model, useProxy, proxyMode, codexProfileKey, codexChannel, codexConfigPath, codexSecretEnvKey, codexSecretValue, displayName, agentSessionId, captureStream = false, aimuxRemoteName, aimuxGuiAuthorized }: CodexDispatchOpts) {
     if (!sessionId || !cwd) throw new Error('_spawnWindow requires sessionId + cwd')
     // Make sure the tmux hub session that hosts agent windows exists.
     ensureHub()
@@ -1603,13 +1607,23 @@ class TmuxCodexBackend extends AgentBackend {
     // codex parses `-c key=value` values as TOML, so the args use an inline array.
     if (aimuxRemoteName) {
       const aimuxBinPath = resolveAimuxBin()
+      // GUI 会话: 远端当前真的报 gui.available 才上 classic-and-gui; 否则退回 classic,
+      // 不能让整个 aimux MCP 因 fail-fast 挂掉 (remote_* 也没了).
+      // GUI session: only serve the gui toolset when the remote currently reports
+      // gui.available; otherwise fall back to classic so the whole MCP never dies.
+      let guiToolset = false
+      if (aimuxGuiAuthorized) {
+        guiToolset = await bridgeRemoteGuiAvailable(aimuxRemoteName)
+        if (!guiToolset) console.warn(`[tmux-codex] session authorized GUI but remote ${aimuxRemoteName} has gui off; serving classic toolset`)
+      }
       // enable_mcp_apps is codex's feature gate for loading mcp_servers (false in the profile by
       // default; end-to-end test: without it mcp_servers never load and the MCP tools are
       // unavailable). It also suppresses the under-development warning.
       codexArgs.push('-c', 'features.enable_mcp_apps=true')
       codexArgs.push('-c', 'suppress_unstable_features_warning=true')
       codexArgs.push('-c', `mcp_servers.aimux.command=${aimuxBinPath}`)
-      codexArgs.push('-c', `mcp_servers.aimux.args=["mcp","serve","--remote","${aimuxRemoteName}"]`)
+      const serveArgs = guiToolset ? '["mcp","serve","--remote","' + `${aimuxRemoteName}` + '","--toolset","classic-and-gui"]' : '["mcp","serve","--remote","' + `${aimuxRemoteName}` + '"]'
+      codexArgs.push('-c', `mcp_servers.aimux.args=${serveArgs}`)
     }
     // In resume mode the thread id is appended to the codex resume subcommand.
     if (useResume && agentSessionId) codexArgs.push(agentSessionId)

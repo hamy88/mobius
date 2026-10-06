@@ -25,7 +25,7 @@ import {
   stripContextItemBodies,
   wrapUserMessage,
 } from '../services/session-context';
-import { aimuxRemoteNameFromMeta } from '../services/pc-client-context';
+import { aimuxRemoteNameFromMeta, aimuxGuiAuthorizedFromMeta } from '../services/pc-client-context';
 // @ts-ignore — service 仍是 .js
 import { syncSkillsToWorkspace } from '../services/session-skills-sync';
 import { sessionPromptKind } from '../services/mobius-kinds';
@@ -1220,6 +1220,7 @@ async function startAssistantSession(req: express.Request, session: any, questio
       agentSessionId: session.agent_session_id || undefined,
       mobiusPromptRecord,
       aimuxRemoteName: aimuxRemoteNameFromMeta(session?.pc_client_metadata),
+      aimuxGuiAuthorized: aimuxGuiAuthorizedFromMeta(session?.pc_client_metadata),
       // 小莫 assistant 注入 guling 实盘 MCP (HTTP), 让 claude 直接读资金/持仓.
       // resolveGulingMcp() 未配置 env 时返回 null, 这里恒传 true 是安全 no-op.
       enableGulingMcp: true,

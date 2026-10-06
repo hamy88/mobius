@@ -30,6 +30,13 @@ export interface PcClientMetadata {
    * this flag (not is_tui alone), so the feature is opt-in per session.
    */
   add_remote_aimux_mcp?: boolean;
+  /**
+   * GUI (computer-use) authorization: the user explicitly allowed this session
+   * to drive the bound remote's graphical interface. Gates the remote_gui_*
+   * toolset on the injected aimux MCP server and adds a prompt clause. Only
+   * meaningful together with add_remote_aimux_mcp + aimux_id.
+   */
+  gui_authorized?: boolean;
 }
 
 export function parsePcClientMetadata(raw: unknown): PcClientMetadata | null {
@@ -72,6 +79,54 @@ export function aimuxRemoteNameFromMeta(raw: unknown): string | undefined {
     return meta.aimux_id.trim();
   }
   return undefined;
+}
+
+/** True when the user explicitly authorized GUI (computer-use) for this session's remote. */
+export function aimuxGuiAuthorizedFromMeta(raw: unknown): boolean {
+  return parsePcClientMetadata(raw)?.gui_authorized === true;
+}
+
+/**
+ * Does the bridge remote currently report a working GUI helper? Read from the
+ * local broker (same runtime.json the proxy uses) so a session authorized for
+ * GUI can degrade to the classic toolset instead of killing its whole aimux
+ * MCP server when the remote reconnected without --enable-gui. Any failure
+ * resolves to false — the safe (classic) toolset.
+ */
+export async function bridgeRemoteGuiAvailable(remoteName: string, timeoutMs = 2500): Promise<boolean> {
+  const fs = require('fs') as typeof import('fs');
+  const http = require('http') as typeof import('http');
+  const path = require('path') as typeof import('path');
+  const os = require('os') as typeof import('os');
+  const runtimePath = process.env.AIMUX_BRIDGE_RUNTIME
+    || path.join(os.homedir(), '.aimux', 'bridge', 'runtime.json');
+  let url = '';
+  let token = '';
+  try {
+    const runtime = JSON.parse(fs.readFileSync(runtimePath, 'utf8'));
+    url = String(runtime.url || '').replace(/\/$/, '');
+    token = String(runtime.token || '');
+  } catch { return false; }
+  if (!url.startsWith('http://') || !token || !remoteName) return false;
+  const target = new URL(`${url}/api/remotes`);
+  return await new Promise<boolean>((resolve) => {
+    const req = http.get(
+      { hostname: target.hostname, port: target.port, path: target.pathname, headers: { Authorization: `Bearer ${token}` }, timeout: timeoutMs },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk: Buffer) => { raw += chunk.toString('utf8'); });
+        res.on('end', () => {
+          try {
+            const remotes = JSON.parse(raw)?.remotes;
+            const hit = Array.isArray(remotes) ? remotes.find((r: any) => r?.name === remoteName) : null;
+            resolve(hit?.gui?.available === true);
+          } catch { resolve(false); }
+        });
+      },
+    );
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
 }
 
 /** TUI always needs the operating guide; Electron needs it only in pc/dual mode. */
@@ -197,7 +252,20 @@ function pcTaskModePromptFor(
   const client: ClientKind = meta.is_tui === true ? 'tui' : 'desktop';
   const lang: ContextLanguage = language === 'en' ? 'en' : 'zh';
   const modePrompt = MODE_PROMPTS[client][mode][lang](aimuxId, remotePath);
-  return client === 'tui'
+  const guiTail = meta.gui_authorized === true ? guiAuthorizationTail(aimuxId, lang) : '';
+  const body = client === 'tui'
     ? `${tuiBasePrompt(aimuxId, remotePath, lang)}\n${modePrompt}`
     : modePrompt;
+  return guiTail ? `${body}\n${guiTail}` : body;
+}
+
+/** GUI (computer-use) authorization sentence, appended when the session opted in. */
+function guiAuthorizationTail(aimuxId: string, language: ContextLanguage): string {
+  return language === 'en'
+    ? `This session is authorized to drive the graphical interface of ${aimuxId} with the registered remote_gui_* MCP tools (list windows, screenshot + outline, semantic press/setText, read text, wait, focus). ` +
+      `GUI actions default to the ax_only policy — they go through the accessibility tree and never inject real mouse/keyboard input. ` +
+      `Prefer remote_gui_* over remote_exec_command whenever the task is a desktop UI operation.`
+    : `本会话已授权你使用已注册的 remote_gui_* MCP（GUI/计算机操作）工具操作 ${aimuxId} 的图形界面（枚举窗口、截图+元素大纲、语义点击/输入、读文本、等待、切前台）。` +
+      `GUI 操作默认 ax_only 策略——只走无障碍语义路径，不注入真实键鼠输入。` +
+      `凡是桌面界面类操作，优先用 remote_gui_* 而不是 remote_exec_command。`;
 }

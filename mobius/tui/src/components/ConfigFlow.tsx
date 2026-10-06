@@ -27,7 +27,7 @@ import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
 } from '../config.js'
-import { tuiAimuxIdentifier } from '../aimux.js'
+import { tuiAimuxIdentifier, tuiGuiAuthorized} from '../aimux.js'
 import type { Issue, Project, SessionModelOption } from '../types.js'
 
 export interface ConfigResult {
@@ -82,6 +82,7 @@ export function ConfigFlow({ client, issue, onDone }: {
           local_path: process.cwd(),
           is_tui: true,
           add_remote_aimux_mcp: true,
+          ...(tuiGuiAuthorized() ? { gui_authorized: true } : {}),
         },
       })
       if (doneRef.current) return
@@ -281,6 +282,7 @@ export function ReconfigFlow({ client, onDone, onCancel }: {
           local_path: process.cwd(),
           is_tui: true,
           add_remote_aimux_mcp: true,
+          ...(tuiGuiAuthorized() ? { gui_authorized: true } : {}),
         },
       })
       if (doneRef.current) return

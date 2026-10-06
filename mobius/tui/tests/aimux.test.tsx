@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag } from '../src/aimux.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 let pass = 0, fail = 0
@@ -226,6 +226,34 @@ function testPickSilentFlag() {
   ok(pickSilentFlag('  --silent-v2  Hide console.', 'linux') === null, 'off-Windows → always null')
 }
 
+function testGuiAuthorization() {
+  console.log('\n[AIMUX 6c] GUI authorization: identifier prefix + --enable-gui args')
+  // Default (flag off): classic tui- prefix, no --enable-gui.
+  ok(tuiAimuxIdentifier('host-a', '/w', 'alice', false).startsWith('tui-host-a-'), 'flag off keeps the tui- prefix')
+  // Authorized: gui- prefix on the same host/hash — the capability shows in the remote name.
+  const tuiId = tuiAimuxIdentifier('host-a', '/w', 'alice', false)
+  const guiId = tuiAimuxIdentifier('host-a', '/w', 'alice', true)
+  ok(guiId.startsWith('gui-host-a-'), 'authorized client registers as gui-<host>-<hash>')
+  ok(guiId.endsWith(tuiId.split('-').slice(-1)[0]), 'gui- identifier keeps the same workspace hash')
+  ok(tuiAimuxIdentifier('host-a', '/w', 'alice', false) !== guiId, 'prefix flip changes the identifier')
+  // reverse connect args only carry --enable-gui when asked.
+  const plain = reverseConnectArgs('https://mobius.test/', 'tui-x', 't', 'linux', null, null, false)
+  const gui = reverseConnectArgs('https://mobius.test/', 'gui-x', 't', 'linux', null, null, true)
+  ok(!plain.includes('--enable-gui'), 'flag off sends no --enable-gui')
+  ok(gui.includes('--enable-gui'), 'authorized connection passes --enable-gui')
+  // Probe gates on what aimux advertises (0.3.64+), mirroring pickSilentFlag.
+  ok(pickEnableGuiFlag('  --enable-gui  Start the GUI helper.') === true, 'probe sees --enable-gui when advertised')
+  ok(pickEnableGuiFlag('  --silent-v2  Hide console.') === false, 'probe stays false without --enable-gui')
+  // setTuiGuiAuthorized flips the module cache and the default identifier prefix with it.
+  const before = tuiAimuxIdentifier('host-b', '/w2', 'bob')
+  setTuiGuiAuthorized(true)
+  const after = tuiAimuxIdentifier('host-b', '/w2', 'bob')
+  ok(before.startsWith('tui-') && after.startsWith('gui-'), 'writing the flag flips the default identifier prefix')
+  ok(tuiGuiAuthorized() === true, 'flag reads back true after write')
+  setTuiGuiAuthorized(false)
+  ok(tuiAimuxIdentifier('host-b', '/w2', 'bob').startsWith('tui-'), 'clearing the flag restores the tui- prefix')
+}
+
 function testVersionAtLeast() {
   console.log('\n[AIMUX 6c] aimux pin is a floor, not an exact match')
   // /upgrade 装的是 PyPI 最新版，通常比 pin 新；不能被 pin 校验判成"没装好"又拽回去。
@@ -310,6 +338,7 @@ async function main() {
   await testSpawnLauncher()
   testReverseConnectArgs()
   testPickSilentFlag()
+  testGuiAuthorization()
   testVersionAtLeast()
   testAimuxIdentifierScopesWorkspace()
   testBundleHealthCheck()

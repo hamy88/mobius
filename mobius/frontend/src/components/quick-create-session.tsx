@@ -229,7 +229,10 @@ export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectI
   // null = 跟随本机 (与改动前完全一致); 哨兵值代表"跟随本机"这一项.
   // Explicit aimux bridge device for this session; null keeps the previous behaviour (follow the local identifier)
   const [deviceOverride, setDeviceOverride] = useState<string | null>(null)
-  const [bridgeDevices, setBridgeDevices] = useState<Array<{ name: string; status?: string; platform?: string }>>([])
+  // GUI 授权变体: 选中 "xxx (授权操作图形界面)" 时置 true, 随 pc_client_metadata.gui_authorized 下发
+  // GUI-authorized variant: set when the "(授权操作图形界面)" option is picked, sent as gui_authorized
+  const [guiAuthorized, setGuiAuthorized] = useState(false)
+  const [bridgeDevices, setBridgeDevices] = useState<Array<{ name: string; status?: string; platform?: string; gui?: { available?: boolean } }>>([])
   const [devicesLoading, setDevicesLoading] = useState(false)
   const [devicesLoaded, setDevicesLoaded] = useState(false)
   // 拉取 bridge 设备清单 (与会话头部切换设备同一数据源); 供展开「更多会话设置」与标题栏刷新按钮共用
@@ -334,6 +337,9 @@ export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectI
   // 协作设备下拉里「跟随本机」那一项的哨兵值 (不会发给后端)
   // Sentinel value for the "follow the local identifier" option; never sent to the backend
   const DEVICE_AUTO = '__auto__'
+  // 设备下拉里 GUI 授权变体的哨兵值: 前缀 + 设备名, 选中即拆回 设备名 + gui_authorized
+  // Sentinel for the GUI-authorized device variant: prefix + device name; picked → device + gui_authorized
+  const DEVICE_GUI_PREFIX = '__gui__'
   // 显式选中的协作设备优先, 未选时沿用本机标识 (桌面端 bootData 注入); 两者皆空则为空.
   // An explicitly picked device wins; otherwise the local identifier applies
   const effectiveAimuxId = deviceOverride ?? aimuxId
@@ -375,7 +381,7 @@ export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectI
         name_touched: nameUserTouchedRef.current,
         // PC 任务模式: 桌面端恒有 workMode; web 端仅在用户显式选了协作设备时才附 (effectiveWorkMode 随之非空).
         // PC task mode: always on desktop, and on web once a collaboration device was explicitly picked
-        ...(effectiveWorkMode ? { pc_client_metadata: { work_mode: effectiveWorkMode, aimux_id: effectiveAimuxId || undefined, local_path: pcPath || undefined, is_tui: false, add_remote_aimux_mcp: true } } : {}),
+        ...(effectiveWorkMode ? { pc_client_metadata: { work_mode: effectiveWorkMode, aimux_id: effectiveAimuxId || undefined, local_path: pcPath || undefined, is_tui: false, add_remote_aimux_mcp: true, ...(guiAuthorized ? { gui_authorized: true } : {}) } } : {}),
       }) })
       if (s?.error) { setErr(s.error); return }
       // 记录「恢复上次选择」快照 (项目/任务/语言/Skill·Memory), 下次新建可一键回填. 与工作草稿 (gc:new-session) 不同键, 提交清草稿不影响此快照.
@@ -587,8 +593,12 @@ export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectI
                     <LabelWithRefresh label="设备（令智能体在指定设备工作）" loading={devicesLoading} onRefresh={loadDevices} />
                   </SectionLabel>
                   <DropdownSelect
-                    value={deviceOverride ?? DEVICE_AUTO}
-                    onChange={v => setDeviceOverride(v === DEVICE_AUTO ? null : v)}
+                    value={deviceOverride ? (guiAuthorized ? DEVICE_GUI_PREFIX + deviceOverride : deviceOverride) : DEVICE_AUTO}
+                    onChange={v => {
+                      if (v === DEVICE_AUTO) { setDeviceOverride(null); setGuiAuthorized(false) }
+                      else if (v.startsWith(DEVICE_GUI_PREFIX)) { setDeviceOverride(v.slice(DEVICE_GUI_PREFIX.length)); setGuiAuthorized(true) }
+                      else { setDeviceOverride(v); setGuiAuthorized(false) }
+                    }}
                     dark={dark}
                     placeholder="— 中枢 —"
                     emptyText="暂无可协作设备"
@@ -597,12 +607,23 @@ export function CreateSessionForm({ onClose, onDone, onNavigate, defaultProjectI
                       { value: DEVICE_AUTO, label: isDesktop ? '跟随本机' : '中枢', description: aimuxId ? `当前: ${aimuxId}` : '只在莫比乌斯中枢上工作' },
                       // 离线设备仍可选 (与头部切换设备一致: 断开时仍可依托中枢继续执行任务), 只标状态不置灰
                       // Offline devices stay selectable — they are flagged, not disabled, matching the header switcher
-                      ...bridgeDevices.map(d => ({
-                        value: d.name,
-                        label: d.name,
-                        description: [d.platform, d.status === 'connected' ? '在线' : '离线'].filter(Boolean).join(' · '),
-                        badge: d.status === 'connected' ? undefined : { text: '离线', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' },
-                      })),
+                      ...bridgeDevices.flatMap(d => {
+                        const entry = {
+                          value: d.name,
+                          label: d.name,
+                          description: [d.platform, d.status === 'connected' ? '在线' : '离线'].filter(Boolean).join(' · '),
+                          badge: d.status === 'connected' ? undefined : { text: '离线', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' },
+                        }
+                        // 可用 GUI 的设备额外给一个授权变体: 同一设备, 会话注入 remote_gui_* 工具与授权提示词
+                        // GUI-capable devices get an extra authorized variant: same remote, session gets remote_gui_* tools + prompt
+                        const guiEntry = d.gui?.available === true ? {
+                          value: DEVICE_GUI_PREFIX + d.name,
+                          label: `${d.name} (授权操作图形界面)`,
+                          description: '在线 · 图形界面 (computer use)',
+                          badge: { text: 'GUI', color: '#10b981', bg: 'rgba(16,185,129,0.15)' },
+                        } : null
+                        return guiEntry ? [entry, guiEntry] : [entry]
+                      }),
                     ]}
                   />
                   {devicesLoaded && bridgeDevices.length === 0 && (
