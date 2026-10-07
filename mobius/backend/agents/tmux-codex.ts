@@ -1622,7 +1622,14 @@ class TmuxCodexBackend extends AgentBackend {
       codexArgs.push('-c', 'features.enable_mcp_apps=true')
       codexArgs.push('-c', 'suppress_unstable_features_warning=true')
       codexArgs.push('-c', `mcp_servers.aimux.command=${aimuxBinPath}`)
-      const serveArgs = guiToolset ? '["mcp","serve","--remote","' + `${aimuxRemoteName}` + '","--toolset","classic-and-gui"]' : '["mcp","serve","--remote","' + `${aimuxRemoteName}` + '"]'
+      // --mobius-session 让 aimux MCP 知道自己的 mobius 会话（remote_set_remote_workdir 的
+      // 默认工作目录按 (mobius 会话 × bridge client) 记录，跨 MCP 重启保留）。
+      // JSON.stringify 负责引号转义，避免会话 id 里的字符破坏这段 TOML 数组字面量。
+      const aimuxRemoteArg = JSON.stringify(String(aimuxRemoteName))
+      const aimuxSessionArg = JSON.stringify(String(sessionId))
+      const serveArgs = guiToolset
+        ? `["mcp","serve","--remote",${aimuxRemoteArg},"--mobius-session",${aimuxSessionArg},"--toolset","classic-and-gui"]`
+        : `["mcp","serve","--remote",${aimuxRemoteArg},"--mobius-session",${aimuxSessionArg}]`
       codexArgs.push('-c', `mcp_servers.aimux.args=${serveArgs}`)
     }
     // In resume mode the thread id is appended to the codex resume subcommand.

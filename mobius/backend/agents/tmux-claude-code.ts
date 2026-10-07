@@ -1769,6 +1769,13 @@ class TmuxClaudeCodeBackend extends AgentBackend {
     // TUI sessions get the aimux remote MCP server injected
     if (aimuxRemoteName) {
       const aimuxArgs = ['mcp', 'serve', '--remote', aimuxRemoteName]
+      // 告诉 aimux MCP 它属于哪个 mobius 会话：remote_set_remote_workdir 设的默认工作目录
+      // 按 (mobius 会话 × bridge client) 记录，只有带上会话 id 才谈得上"属于这个会话"，
+      // 也才能跨 MCP 重启保留。
+      // Tell the aimux MCP which mobius session it belongs to: the default set by
+      // remote_set_remote_workdir is keyed by (mobius session, bridge client), and
+      // only with the id does it survive an MCP restart inside that session.
+      aimuxArgs.push('--mobius-session', sessionId)
       // GUI 会话: 远端当前真的报 gui.available 才上 classic-and-gui; 否则退回 classic,
       // 不能让整个 aimux MCP 因 fail-fast 挂掉 (remote_* 也没了).
       // GUI session: only serve the gui toolset when the remote currently reports
