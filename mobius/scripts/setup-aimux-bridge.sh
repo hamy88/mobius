@@ -6,7 +6,7 @@ set -euo pipefail
 
 MOBIUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${AIMUX_VENV:-$MOBIUS_DIR/.venv-aimux}"
-AIMUX_VERSION="${AIMUX_VERSION:-0.3.64}"
+AIMUX_VERSION="${AIMUX_VERSION:-0.3.66}"
 UV_BIN="${UV_BIN:-uv}"
 
 need_install=1
