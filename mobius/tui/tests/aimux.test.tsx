@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest, pidAlive, aimuxWorkspaceHash } from '../src/aimux.js'
 import { parseElevatedGroups } from '../src/lib/windows-admin.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -146,14 +146,28 @@ function pidAliveForTest(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch { return false }
 }
 
-async function testUnresponsiveLiveDaemonRestarts() {
-  console.log('\n[AIMUX 3d] stale live PID recovery')
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-stale-'))
+function testPidAliveErrorSemantics() {
+  console.log('\n[AIMUX 3e] liveness probe reads the kill() error code')
+  const throwing = (code: string) => () => { const e: any = new Error(code); e.code = code; throw e }
+  ok(pidAlive(process.pid) === true, 'no error means the pid is alive')
+  // The elevated-daemon case: --enable-gui makes aimux administrator while the
+  // TUI stays unelevated, so the probe is refused rather than answered.
+  ok(pidAlive(1234, throwing('EPERM')) === true, 'EPERM means "exists but not ours to signal" → alive')
+  ok(pidAlive(1234, throwing('ESRCH')) === false, 'ESRCH means the process is gone')
+  ok(pidAlive(1234, throwing('EINVAL')) === false, 'an unexpected error is not optimistically alive')
+}
+
+async function testLiveDaemonIsNotRespawned() {
+  console.log('\n[AIMUX 3d] a live daemon is left to reconnect itself')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-live-'))
   const savedHome = process.env.MOBIUS_TUI_HOME
   process.env.MOBIUS_TUI_HOME = home
+  const runtimeDir = path.join(home, 'aimux-runtime')
+  await fs.mkdir(runtimeDir, { recursive: true })
+  await fs.writeFile(path.join(runtimeDir, `${aimuxWorkspaceHash()}.json`), JSON.stringify({ pid: process.pid }))
   let spawns = 0
   const supervisor = new AimuxSupervisor({
-    server: 'https://mobius.test', token: 'jwt-test', identifier: 'tui-stale',
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'tui-live',
     heartbeatIntervalMs: 5,
     probeConnection: async () => ({ connected: false, authError: false }),
     spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
@@ -161,8 +175,66 @@ async function testUnresponsiveLiveDaemonRestarts() {
   })
   try {
     await supervisor.start()
-    for (let i = 0; i < 100 && spawns < 2; i += 1) await delay(5)
-    ok(spawns >= 2, 'three failed bridge probes restart an apparently live daemon')
+    await delay(120)   // ~24 probe intervals, well past the old 3-failure threshold
+    ok(spawns === 0, 'failing probes never kill or replace a daemon that is still running')
+    await supervisor.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function testSlowStartDoesNotStackSpawns() {
+  console.log('\n[AIMUX 3f] a start with no runtime state yet does not stack spawns')
+  // --enable-gui waits for a human at the elevation prompt, and the daemon cannot
+  // write runtime state until it is approved. Respawning on "no pid on disk"
+  // therefore stacked one window (and one prompt) per probe interval.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-slow-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  let spawns = 0
+  const supervisor = new AimuxSupervisor({
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'gui-slow',
+    heartbeatIntervalMs: 5,
+    spawnGraceMs: 30_000,          // the real value is 90s; only the ordering matters here
+    probeConnection: async () => ({ connected: false, authError: false }),
+    spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
+    onStatus: () => {},
+  })
+  try {
+    await supervisor.start()
+    await delay(150)   // ~30 probe intervals
+    ok(spawns === 1, 'the grace window absorbs the failed probes instead of starting more')
+    await supervisor.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function testSpawnBudgetGivesUp() {
+  console.log('\n[AIMUX 3g] the retry budget ends in an actionable failure')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-budget-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  let spawns = 0
+  let lastDetail = ''
+  const supervisor = new AimuxSupervisor({
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'gui-noprompt',
+    heartbeatIntervalMs: 5,
+    spawnGraceMs: 0,               // exercise the budget without waiting 90s per attempt
+    maxUnproductiveSpawns: 3,
+    probeConnection: async () => ({ connected: false, authError: false }),
+    spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
+    onStatus: s => { if (s.detail) lastDetail = s.detail },
+  })
+  try {
+    await supervisor.start()
+    for (let i = 0; i < 300 && spawns < 3; i += 1) await delay(5)
+    ok(spawns === 3, 'spawns up to the budget')
+    await delay(150)
+    ok(spawns === 3, 'and then stops — no endless stream of windows')
+    ok(lastDetail.includes('GUI 授权'), 'the failure names the thing the user can change')
     await supervisor.stop()
   } finally {
     if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
@@ -418,7 +490,10 @@ async function main() {
   await testAdoptOrSpawn()
   await testJwtRefreshViaProbe()
   await testLastTuiStopsDaemon()
-  await testUnresponsiveLiveDaemonRestarts()
+  testPidAliveErrorSemantics()
+  await testLiveDaemonIsNotRespawned()
+  await testSlowStartDoesNotStackSpawns()
+  await testSpawnBudgetGivesUp()
   await testBundleArchAndUrl()
   await testSpawnLauncher()
   testReverseConnectArgs()

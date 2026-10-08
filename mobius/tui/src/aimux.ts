@@ -431,7 +431,25 @@ export function tuiAimuxIdentifier(hostname = os.hostname(), cwd = process.cwd()
 
 // ── shared daemon runtime JSON (one reverse connect per user+workspace) ──
 const LEASE_RENEW_MS = 5_000
-const BRIDGE_FAILURE_LIMIT = 3
+/**
+ * How long a freshly spawned daemon has to put runtime state on disk before the
+ * supervisor may conclude it never started.
+ *
+ * Generous on purpose. With --enable-gui on Windows the daemon cannot write
+ * anything until a human approves the elevation prompt — `runtime_update()` runs
+ * inside bridge_client.connect, which is *after* the elevation gate — so "no pid
+ * recorded yet" is the normal shape of a start in progress, not evidence of
+ * failure. Respawning on that evidence stacks another process (and another
+ * prompt) on top of the one already waiting.
+ */
+const SPAWN_GRACE_MS = 90_000
+/**
+ * Give up after this many consecutive spawns that never produced runtime state.
+ * Each attempt may raise a system authorization prompt, so an unbounded retry
+ * turns into a stream of windows; a clear failure the user can act on is worth
+ * far more than one more attempt.
+ */
+const MAX_UNPRODUCTIVE_SPAWNS = 3
 
 const aimuxRuntimeDir = () => path.join(mobiusHome(), 'aimux-runtime')
 const runtimePath = (hash: string) => path.join(aimuxRuntimeDir(), `${hash}.json`)
@@ -467,8 +485,20 @@ async function touchWatchdog(hash: string): Promise<void> {
   } catch { /* directory not writable; nothing useful to do here */ }
 }
 
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true } catch { return false }
+/**
+ * Is `pid` still running? `process.kill(pid, 0)` is the only portable probe, and
+ * its *error* carries the answer: ESRCH means gone, EPERM means the process is
+ * there and simply not ours to signal. EPERM is the normal case now that
+ * --enable-gui makes the daemon an elevated process while the TUI stays
+ * unelevated (and it is the classic cross-user case on POSIX). Reading EPERM as
+ * dead is what made the supervisor kill and respawn healthy daemons on every
+ * bridge hiccup.
+ */
+export function pidAlive(
+  pid: number,
+  probe: (pid: number, signal: number) => void = (p, s) => process.kill(p, s),
+): boolean {
+  try { probe(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' }
 }
 
 
@@ -602,6 +632,10 @@ interface SupervisorOptions {
   /** Re-authenticate after AIMUX reports an expired/invalid bridge JWT. */
   refreshToken?: () => Promise<string | null>
   heartbeatIntervalMs?: number
+  /** Grace before a spawn that produced no runtime state counts as failed (tests shrink this). */
+  spawnGraceMs?: number
+  /** Spawns allowed before giving up (tests shrink this). */
+  maxUnproductiveSpawns?: number
   retryBaseMs?: number
   probeConnection?: () => Promise<boolean | AimuxBridgeProbe>
   spawnProcess?: (token: string) => ChildProcess
@@ -623,6 +657,12 @@ export class AimuxSupervisor {
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null
   private probeTimer: ReturnType<typeof setTimeout> | null = null
   private bridgeFailures = 0
+  /** When this supervisor last started a daemon (0 = it has not started any). */
+  private spawnedAt = 0
+  /** Spawns in a row that never reached runtime state — see MAX_UNPRODUCTIVE_SPAWNS. */
+  private unproductiveSpawns = 0
+  /** Set once the retry budget is spent: keep probing (so a late approval still recovers) but stop spawning. */
+  private gaveUp = false
   private opts: SupervisorOptions
   private hash: string
   constructor(opts: SupervisorOptions) { this.opts = opts; this.hash = aimuxWorkspaceHash() }
@@ -659,6 +699,9 @@ export class AimuxSupervisor {
       const child = this.opts.spawnProcess?.(token) ?? spawnDetachedDaemon({ kind: 'exe', path: aimuxExe() }, reverseConnectArgs(server, identifier, token, process.platform, null, runtimePath(this.hash), gui.enableGui, gui.guiNoElevate))
       child.on('error', (e: Error) => { appendAimuxLog(installLogQueue, `\n[aimux spawn error] ${e.stack || e.message}\n`) })
       child.unref?.()
+      this.spawnedAt = Date.now()
+      this.unproductiveSpawns += 1
+      appendAimuxLog(installLogQueue, `\n[aimux spawn] at=${new Date(this.spawnedAt).toISOString()} workspace=${this.hash} cwd=${process.cwd()} pid=${process.pid} gui=${gui.enableGui ? (gui.guiNoElevate ? 'no-elevate' : 'elevate') : 'off'} attempt=${this.unproductiveSpawns}\n`)
       this.reconnectAttempt = 0
   }
 
@@ -678,7 +721,7 @@ export class AimuxSupervisor {
     this.probeTimer = setTimeout(() => void this.checkDaemon(), this.opts.heartbeatIntervalMs ?? 5_000)
   }
 
-  /** Probe the bridge; refresh on auth error, respawn only when the daemon died. */
+  /** Probe the bridge; refresh on auth error, respawn only when the daemon is gone. */
   private async checkDaemon(): Promise<void> {
     if (this.stopping) return
       const raw = await (this.opts.probeConnection?.() ?? probeAimuxBridge(this.opts.server, this.opts.token, this.opts.identifier))
@@ -689,6 +732,8 @@ export class AimuxSupervisor {
         await this.refreshCredentials('JWT 已过期')
     } else if (probe.connected) {
       this.reconnectAttempt = 0
+      this.gaveUp = false
+      this.unproductiveSpawns = 0
       this.opts.onStatus({ state: 'connected', phase: 'connected', detail: `心跳正常 · ${this.opts.identifier}`, identifier: this.opts.identifier })
       this.bridgeFailures = 0
     } else {
@@ -696,15 +741,42 @@ export class AimuxSupervisor {
       await this.updateRuntimeHealth(false)
       const runtime = await readRuntime(this.hash)
       const pid = runtime?.pid ?? null
-      if (pid === null || !pidAlive(pid) || this.bridgeFailures >= BRIDGE_FAILURE_LIMIT) {
+      const alive = pid !== null && pidAlive(pid)
+      // Runtime state on disk means the daemon got past its own start — which on
+      // Windows may have meant an elevation prompt — so the attempt produced
+      // something and the retry budget is not the thing to withhold.
+      if (pid !== null) this.unproductiveSpawns = 0
+      if (alive) {
+        // The daemon owns reconnection — it retries with backoff and re-registers
+        // on its own. Killing a live daemon cannot fix a bridge problem, and on
+        // Windows the replacement costs a UAC prompt; worse, the two then take
+        // turns evicting each other through --replace, which drops the stream
+        // again. So a live daemon is left alone no matter how long it takes.
+        this.opts.onStatus({ state: 'starting', phase: 'heartbeat', detail: '等待 bridge 心跳确认…', identifier: this.opts.identifier })
+      } else if (pid === null && this.unproductiveSpawns >= (this.opts.maxUnproductiveSpawns ?? MAX_UNPRODUCTIVE_SPAWNS)) {
+        // Stop rather than keep stacking attempts the user cannot act on. The
+        // actionable cause is almost always a system authorization prompt that
+        // was never shown (a remote or locked session) or never answered, and
+        // the daemon cannot reach its watchdog until the prompt is dealt with.
+        this.opts.onStatus({
+          state: 'failed', phase: 'idle',
+          detail: `AIMUX 连续 ${this.unproductiveSpawns} 次启动失败。若系统授权弹窗看不到或点不了（远程/锁屏会话），请在向导里把 GUI 授权改为「低权限」或「纯命令行」。日志: ${aimuxLogPath()}`,
+          identifier: this.opts.identifier,
+        })
+        this.gaveUp = true
+      } else if (pid === null && Date.now() - this.spawnedAt < (this.opts.spawnGraceMs ?? SPAWN_GRACE_MS)) {
+        // Nothing on disk yet. With --enable-gui on Windows the daemon cannot
+        // write runtime state until a human approves the elevation prompt, so
+        // this is the normal shape of a start in progress — respawning here
+        // stacks another prompt every probe interval. Wait it out.
+        this.opts.onStatus({ state: 'starting', phase: 'connecting', detail: '等待 AIMUX 守护进程就绪（若弹出系统授权请点击确认）…', identifier: this.opts.identifier })
+      } else if (!this.gaveUp) {
+        // No runtime state and our own spawn is long past, or the recorded pid is
+        // genuinely gone (ESRCH) — nothing to reconnect, so start one.
         this.reconnectAttempt += 1
-        this.opts.onStatus({ state: 'failed', phase: 'retrying', detail: `AIMUX bridge 无响应，重启连接中（第 ${this.reconnectAttempt} 次）…`, identifier: this.opts.identifier, attempt: this.reconnectAttempt })
-        if (pid !== null && pidAlive(pid)) { try { process.kill(pid, 'SIGTERM') } catch {} }
+        this.opts.onStatus({ state: 'failed', phase: 'retrying', detail: `AIMUX 守护进程未响应，重启连接中（第 ${this.reconnectAttempt} 次）…`, identifier: this.opts.identifier, attempt: this.reconnectAttempt })
         this.bridgeFailures = 0
         await this.spawnDaemon()
-      } else {
-        // Daemon alive but stream down → transient; its own reconnect handles it.
-        this.opts.onStatus({ state: 'starting', phase: 'heartbeat', detail: '等待 bridge 心跳确认…', identifier: this.opts.identifier })
       }
     }
     this.scheduleProbe()
@@ -869,9 +941,14 @@ async function stopDaemonFromRuntime(): Promise<void> {
   const hash = aimuxWorkspaceHash()
   const pid = (await readRuntime(hash))?.pid ?? null
   if (pid !== null && pidAlive(pid)) {
-    try { process.kill(pid, 'SIGTERM') } catch { /* 已经退了 */ }
-    for (let i = 0; i < 30 && pidAlive(pid); i++) await new Promise(r => setTimeout(r, 100))
-    if (pidAlive(pid)) { try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ } }
+    // EPERM means the daemon is elevated and not ours to signal; waiting for it
+    // to die would just stall the caller, so leave it to its own watchdog.
+    let ours = true
+    try { process.kill(pid, 'SIGTERM') } catch (e: any) { ours = e?.code !== 'EPERM' }
+    if (ours) {
+      for (let i = 0; i < 30 && pidAlive(pid); i++) await new Promise(r => setTimeout(r, 100))
+      if (pidAlive(pid)) { try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ } }
+    }
   }
   try { await fs.unlink(runtimePath(hash)) } catch { /* 本来就没有 */ }
 }
