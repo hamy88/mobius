@@ -8,6 +8,7 @@ import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
 import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest } from '../src/aimux.js'
+import { parseElevatedGroups } from '../src/lib/windows-admin.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 let pass = 0, fail = 0
@@ -316,6 +317,28 @@ async function testGuiModes() {
   }
 }
 
+function testElevationDetection() {
+  console.log('\n[AIMUX 6f] administrator-token detection (whoami /groups)')
+  // Elevated: the mandatory label is High (UAC) or System (service).
+  const high = `Group Name  Type  SID  Attributes
+=================================
+BUILTIN\\Administrators  Alias  S-1-5-32-544  Enabled group
+Mandatory Label\\High Mandatory Level  Label  S-1-16-12288`
+  ok(parseElevatedGroups(high) === true, 'a High mandatory label reads as elevated')
+  ok(parseElevatedGroups('Mandatory Label\\System Mandatory Level  Label  S-1-16-16384') === true, 'a System mandatory label reads as elevated')
+  // Not elevated: Medium, and the Administrators group alone must not count —
+  // a normal Windows account is *in* that group with a filtered token, which is
+  // exactly the case that must not be mistaken for an elevated shell.
+  const medium = `Group Name  Type  SID  Attributes
+BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group, Enabled by default, Enabled group
+Mandatory Label\\Medium Mandatory Level  Label  S-1-16-8192`
+  ok(parseElevatedGroups(medium) === false, 'a filtered administrator token (Medium) is not elevated')
+  ok(parseElevatedGroups('BUILTIN\\Administrators  Alias  S-1-5-32-544') === false, 'the Administrators group alone is not elevation')
+  // Localized output keeps the SID, so the match must not depend on the label text.
+  ok(parseElevatedGroups('强制标签\\高强制级别  Label  S-1-16-12288') === true, 'a localized label is still detected by SID')
+  ok(parseElevatedGroups('') === false, 'empty output falls back to not-elevated')
+}
+
 function testVersionAtLeast() {
   console.log('\n[AIMUX 6e] aimux pin is a floor, not an exact match')
   // /upgrade 装的是 PyPI 最新版，通常比 pin 新；不能被 pin 校验判成"没装好"又拽回去。
@@ -402,6 +425,7 @@ async function main() {
   testPickSilentFlag()
   await testGuiAuthorization()
   await testGuiModes()
+  testElevationDetection()
   testVersionAtLeast()
   testAimuxIdentifierScopesWorkspace()
   testBundleHealthCheck()

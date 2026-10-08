@@ -16,6 +16,7 @@ import { Box, Text } from 'ink'
 import { Select, TextInput, type SelectItem } from './primitives.js'
 import { MobiusClient } from '../api.js'
 import { restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
+import { windowsElevated } from '../lib/windows-admin.js'
 import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
@@ -40,14 +41,19 @@ export interface ReadyState {
   prefs: IssuePreference
 }
 
-export function PrepScreen({ client, onReady, onQuit, platform = process.platform }: {
+export function PrepScreen({ client, onReady, onQuit, platform = process.platform, elevated = windowsElevated() }: {
   client: MobiusClient
   onReady: (st: ReadyState) => void
   onQuit?: () => void
   /** Overridable so tests can exercise the platform-gated GUI step anywhere. */
   platform?: NodeJS.Platform
+  /** Overridable so tests can exercise the elevated branch anywhere. */
+  elevated?: boolean
 }) {
   const stepOrder = stepOrderFor(platform)
+  const isWin = platform === 'win32'
+  /** A UAC prompt appears only when Windows must be asked for rights we lack. */
+  const willPromptForElevation = () => isWin && !elevated
   const [phase, setPhase] = useState<'loading' | 'project' | 'pref' | 'done'>('loading')
   const [projects, setProjects] = useState<Project[]>([])
   const [project, setProject] = useState<Project | null>(null)
@@ -260,37 +266,46 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
               ? [{
                   label: `授权使用图形界面（低权限）${markGuiMode('no-elevate')}`,
                   value: 'no-elevate',
-                  desc: '不弹 UAC；能操作普通窗口，管理员窗口不行',
+                  // On an elevated terminal this cannot actually drop rights —
+                  // --gui-no-elevate only skips a request for rights we already
+                  // have, since children inherit the token.
+                  desc: elevated
+                    ? '不弹 UAC（终端已是管理员，权限无法再降）'
+                    : '不弹 UAC；能操作普通窗口，管理员窗口不行',
                 }]
               : []),
             {
               label: `授权使用图形界面（高权限）${markGuiMode('elevate')}`,
               value: 'elevate',
-              desc: platform === 'win32' ? '每次启动 aimux 弹一次 UAC；可操作管理员窗口' : '启用界面操作工具',
+              desc: !isWin ? '启用界面操作工具'
+                : elevated ? '已是管理员，不会弹 UAC；可操作管理员窗口'
+                : '每次启动 aimux 弹一次 UAC；可操作管理员窗口',
             },
           ]}
           onSelect={v => {
-            if (v === 'elevate') {
+            if (v === 'elevate' && willPromptForElevation()) {
               // 先停在确认屏: 让用户对即将出现的系统授权弹窗有预期, 不做突袭
               // Pause on the confirm screen first so the OS prompt never
-              // ambushes the user. The other two choices raise no prompt.
+              // ambushes the user. The other choices — and this one from an
+              // already-elevated terminal — raise no prompt, so they go
+              // straight through.
               setGuiConfirm(true)
               return
             }
-            applyGuiMode(v === 'no-elevate' ? 'no-elevate' : 'off')
+            applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off')
           }} />
       : null}
     {step === 'gui' && guiConfirm
       ? <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
           <Text bold color="yellow">⚠ 即将授权操作图形界面</Text>
-          <Text color="yellow">确认后{platform === 'win32' ? '系统会弹出 UAC 管理员授权窗口' : '将启用界面操作工具'}，请留意屏幕上的弹窗并点击确认。</Text>
-          <Text color="yellow">授权后本机以 gui- 前缀注册，智能体可以操作本机图形界面（含{platform === 'win32' ? '管理员' : ''}窗口）。</Text>
+          <Text color="yellow">确认后系统会弹出 UAC 管理员授权窗口，请留意屏幕上的弹窗并点击确认。</Text>
+          <Text color="yellow">授权后本机以 gui- 前缀注册，智能体可以操作本机图形界面（含管理员窗口）。</Text>
           <Text color="gray">不想看到 UAC 就返回上一题选「授权使用图形界面（低权限）」。</Text>
           <Box marginTop={1}>
             <Select
               title="继续吗？"
               items={[
-                { label: '继续并授权', value: 'go', desc: platform === 'win32' ? '回车后请到 UAC 弹窗点击"是"' : '启用界面操作' },
+                { label: '继续并授权', value: 'go', desc: '回车后请到 UAC 弹窗点击"是"' },
                 { label: '取消', value: 'cancel', desc: '返回上一题，不做任何改动' },
               ]}
               onSelect={v => {

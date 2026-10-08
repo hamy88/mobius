@@ -540,6 +540,21 @@ async function testPrepGuiStep() {
     ok(frame.includes('授权使用图形界面（高权限）'), 'macOS still sees the GUI step')
     ok(!frame.includes('（低权限）'), 'macOS is not offered the elevation-skipping choice')
     mac.unmount()
+
+    // An already-elevated terminal is never asked for rights it already has, so
+    // the wizard must not warn about a prompt or pause on a confirm screen.
+    seedPrefs()
+    const adm = render(<PrepScreen client={client} onReady={() => {}} platform="win32" elevated={true} />)
+    await delay(160)
+    adm.stdin.write('\x1b[B'); await delay(15)
+    adm.stdin.write('\x1b[B'); await delay(20)   // → 高权限 (focused row shows its desc)
+    frame = adm.lastFrame() ?? ''
+    ok(frame.includes('已是管理员，不会弹 UAC'), 'an elevated terminal is told no UAC will appear')
+    adm.stdin.write('\r'); await delay(120)
+    frame = adm.lastFrame() ?? ''
+    ok(!frame.includes('即将授权操作图形界面'), 'an elevated terminal is not asked to confirm a prompt that cannot appear')
+    ok(readMode().mode === 'elevate', 'high privilege from an elevated terminal is stored directly')
+    adm.unmount()
   } finally { restoreFetch() }
 
   for (const f of ['dir2project.json', 'dir2project_preference.json', 'tui-gui-authorized.json']) {
