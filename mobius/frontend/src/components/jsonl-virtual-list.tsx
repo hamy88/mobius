@@ -7,7 +7,9 @@ const DEFAULT_MIN_BLOCKS = 80
 const DEFAULT_OVERSCAN_PX = 900
 const DEFAULT_ESTIMATED_HEIGHT = 42
 
-function findScrollParent(node: HTMLElement | null): HTMLElement | null {
+// 从任意节点向上找可滚动祖先 (视图侧判断"当前停在哪个分组"要用同一个容器口径).
+// Walk up to the nearest scrollable ancestor; the view reuses it to detect the visible group.
+export function findScrollParent(node: HTMLElement | null): HTMLElement | null {
   let cur = node?.parentElement || null
   while (cur && cur !== document.body && cur !== document.documentElement) {
     const style = window.getComputedStyle(cur)

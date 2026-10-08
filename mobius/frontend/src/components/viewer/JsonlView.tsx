@@ -10,7 +10,7 @@
  *  - lineNo 是跨组唯一的全局序号 (组基址 + 组内序), 搜索跳转/强制展开靠它精确定位.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { VirtualizedBlockList } from '../jsonl-virtual-list'
+import { VirtualizedBlockList, findScrollParent } from '../jsonl-virtual-list'
 import type { AnyEntry, JsonlViewItem, JsonlRenderBlock, Round, RoundHiddenGap } from './types'
 import { mergeBashToolResultItems } from './entry-extract'
 import { collectResolvedCallIds } from './tool-status'
@@ -370,16 +370,150 @@ export function JsonlView({
   const headerTitle = title === undefined ? 'JSONL' : title
   const loadedGroups = rounds.filter((r) => r.entries.length > 0).length
   const totalEntryCount = groups.reduce((sum, g) => sum + (g.entry_count || 0), 0)
-  // 末轮摘要: 直接用组元数据 (不再从条目派生).
-  const lastRoundUserSummary = groups.length > 0 ? (groups[groups.length - 1].user_summary || '') : ''
   const onlyGroup = groups.length === 1
 
-  // 点击 header "末轮" 摘要 -> 跳转到最后一个组.
+  // 头部摘要跟随视口: 停在最后一组显示"末轮", 向上翻到历史组显示"第 N 轮".
+  // The header summary tracks the viewport: "末轮" at the tail, "第N轮" once scrolled back.
   const headerRef = useRef<HTMLDivElement>(null)
   const [internalTarget, setInternalTarget] = useState<{ key: string; offset: number } | null>(null)
-  const jumpToLastRound = () => {
-    if (groups.length === 0) return
-    setInternalTarget({ key: roundKeyOf(groups[groups.length - 1].id), offset: headerRef.current?.offsetHeight ?? 0 })
+  const [activeGroupIndex, setActiveGroupIndex] = useState<number | null>(null)
+  const lastIndex = Math.max(0, groups.length - 1)
+  const activeIndex = Math.min(activeGroupIndex ?? lastIndex, lastIndex)
+  const activeGroup = groups[activeIndex]
+  const activeSummary = activeGroup?.user_summary || ''
+  const activeLabel = activeIndex === lastIndex ? '末轮' : `第 ${activeGroup?.seq ?? activeIndex + 1} 轮`
+  const hasGroups = groups.length > 0
+
+  // 视口顶部 (sticky header 之下) 压着的那一组 = 用户正在看的一轮.
+  // The group sitting right under the sticky header is the round the user is reading.
+  useEffect(() => {
+    const headerEl = headerRef.current
+    const root = headerEl?.parentElement
+    if (!headerEl || !root || !hasGroups) return
+    const scrollParent = findScrollParent(headerEl)
+    if (!scrollParent) return
+    let raf = 0
+    const measure = () => {
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        const probe = headerEl.getBoundingClientRect().bottom
+        const indexByKey = new Map(groups.map((g, i) => [roundKeyOf(g.id), i]))
+        // 末轮常比一屏矮, 贴底时它压不到 header 之下 —— 贴底一律算"末轮", 与旧行为一致
+        // The last round can be shorter than the viewport, so pin the tail state to 末轮
+        const atBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 4
+        // 组按 seq 升序排列, DOM 里第一个"底边仍在 header 之下"的组就是当前这轮
+        // The first group whose bottom is still below the header is the one on screen
+        let next = groups.length - 1
+        if (!atBottom) {
+          for (const node of root.querySelectorAll<HTMLElement>('[data-block-key^="round:"]')) {
+            const index = indexByKey.get(node.dataset.blockKey || '')
+            if (index === undefined) continue
+            if (node.getBoundingClientRect().bottom > probe + 1) { next = index; break }
+          }
+        }
+        setActiveGroupIndex((prev) => (prev === next ? prev : next))
+      })
+    }
+    measure()
+    scrollParent.addEventListener('scroll', measure, { passive: true })
+    window.addEventListener('resize', measure)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      scrollParent.removeEventListener('scroll', measure)
+      window.removeEventListener('resize', measure)
+    }
+  }, [hasGroups, groups])
+
+  // 组块的头/底在滚动内容坐标系里的位置; 块未挂载 (虚拟化窗口外) 返回 null.
+  // The group block's head/tail in scroll-content coordinates; null when it is not mounted.
+  const groupEdgeOf = (index: number, edge: 'start' | 'end'): number | null => {
+    const headerEl = headerRef.current
+    const root = headerEl?.parentElement
+    const meta = groups[index]
+    if (!headerEl || !root || !meta) return null
+    const node = root.querySelector<HTMLElement>(`[data-block-key="${roundKeyOf(meta.id)}"]`)
+    if (!node) return null
+    const scrollParent = findScrollParent(headerEl)
+    if (!scrollParent) return null
+    const rect = node.getBoundingClientRect()
+    return (edge === 'start' ? rect.top : rect.bottom) + scrollParent.scrollTop - scrollParent.getBoundingClientRect().top
+  }
+
+  // 摘要与三角共用的跳转骨架: 目标位置解析得出来就平滑滚过去; 目标块还没挂载时先瞬间带进
+  // 视口, 随后逐帧重试平滑落位. 全程走 scrollTo({behavior:'smooth'}), 不走 scrollToKey ——
+  // 那条路是 instant 且会随内容尺寸变化逐帧重滚, 平滑动画会被它按回去.
+  // Shared jump skeleton: smooth-scroll as soon as the target resolves; when the block is not
+  // mounted yet, land it in the virtual window first and retry per frame. Always through
+  // scrollTo({behavior:'smooth'}) — scrollToKey is instant and re-pins on every resize.
+  const jumpToGroup = (resolveY: () => number | null, fallbackIndex: number) => {
+    const headerEl = headerRef.current
+    if (!headerEl || !groups[fallbackIndex]) return
+    const scrollParent = findScrollParent(headerEl)
+    if (!scrollParent) return
+    const land = (): boolean => {
+      const y = resolveY()
+      if (y === null) return false
+      // ✨ 核心行: 平滑滚到解析出的坐标
+      // ✨ Key line: smooth-scroll to the resolved position
+      scrollParent.scrollTo({ top: Math.max(0, y), behavior: 'smooth' })
+      // 落位后撤掉 scrollToKey 自校正, 否则它下一帧会把视野按回上一处
+      // Drop the self-correcting target, or it would pull the view back next frame
+      setInternalTarget(null)
+      return true
+    }
+    if (land()) return
+    // 目标块在虚拟化窗口外: 先瞬间把它带进视口, 再逐帧重试平滑落位.
+    // Outside the virtual window: bring it into view first, then retry the smooth landing.
+    setInternalTarget({ key: roundKeyOf(groups[fallbackIndex].id), offset: headerEl.offsetHeight })
+    let attempts = 0
+    const retry = () => {
+      if (++attempts > 30) return
+      if (land()) return
+      requestAnimationFrame(retry)
+    }
+    requestAnimationFrame(retry)
+  }
+
+  // 点击 header 摘要 -> 平滑跳到当前这一轮的开头 (停在 sticky header 正下方).
+  // Clicking the summary smooth-scrolls to the top of the round it names.
+  const jumpToGroupStart = (index: number) => {
+    const headerEl = headerRef.current
+    if (!headerEl) return
+    const offset = headerEl.offsetHeight
+    jumpToGroup(() => {
+      const top = groupEdgeOf(index, 'start')
+      return top === null ? null : top - offset
+    }, index)
+  }
+
+  // 三角跳转: 沿方向取第一个"结尾还在视口另一侧"的相邻组, 把它结尾贴到视口底部.
+  // 短组 (未展开的元数据头) 一屏能放下好几个, 直接取紧邻组会把视口往回滚, 必须跳过.
+  // Triangle jump: take the nearest neighbour whose tail is still past the fold and park that
+  // tail at the viewport bottom. Short groups fill one screen, so neighbours already in view
+  // must be skipped or the viewport would scroll backwards.
+  const jumpToGroupEnd = (fromIndex: number, dir: 1 | -1) => {
+    const headerEl = headerRef.current
+    if (!headerEl) return
+    const scrollParent = findScrollParent(headerEl)
+    if (!scrollParent) return
+    const resolveTarget = (): number => {
+      const viewBottom = scrollParent.scrollTop + scrollParent.clientHeight
+      for (let i = fromIndex; i >= 0 && i < groups.length; i += dir) {
+        const tail = groupEdgeOf(i, 'end')
+        if (tail === null) break
+        if (dir > 0 ? tail > viewBottom : tail < viewBottom) return i
+      }
+      return -1
+    }
+    jumpToGroup(() => {
+      const target = resolveTarget()
+      if (target < 0) return null
+      const tail = groupEdgeOf(target, 'end')
+      // 目标组底边贴视口底部, 即"跳到该组结尾"
+      // Align the group's bottom edge with the viewport bottom
+      return tail === null ? null : tail - scrollParent.clientHeight
+    }, Math.max(0, Math.min(groups.length - 1, fromIndex)))
   }
 
   // 搜索结果跳转: 已加载 → 定位; 未加载 → 按 opener_ts 区间找所属组先 ②
@@ -558,15 +692,33 @@ export function JsonlView({
         {loadedGroups < groups.length && (
           <span className="text-[var(--text-muted)] text-[length:var(--fs-sm)]" title="展开对应轮次时按需加载明细">已载 {loadedGroups}/{groups.length} 轮 · 共 {totalEntryCount} 条</span>
         )}
-        {lastRoundUserSummary && (
-          <button
-            type="button"
-            onClick={jumpToLastRound}
-            className="min-w-0 flex-1 truncate text-[length:var(--fs-sm)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-0 p-0 cursor-pointer text-left transition-colors"
-            title={`点击跳转到末轮：${lastRoundUserSummary}`}
-          >
-            <span className="opacity-60">末轮 ·</span> {lastRoundUserSummary}
-          </button>
+        {activeSummary && (
+          <>
+            <button
+              type="button"
+              onClick={() => jumpToGroupEnd(activeIndex - 1, -1)}
+              disabled={activeIndex <= 0}
+              aria-label="跳到上一轮结尾"
+              title="跳到上一轮结尾"
+              className="flex-shrink-0 leading-none bg-transparent border-0 px-0.5 text-[length:var(--fs-sm)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] cursor-pointer disabled:opacity-25 disabled:cursor-default transition-colors"
+            >▲</button>
+            <button
+              type="button"
+              onClick={() => jumpToGroupEnd(activeIndex + 1, 1)}
+              disabled={activeIndex >= lastIndex}
+              aria-label="跳到下一轮结尾"
+              title="跳到下一轮结尾"
+              className="flex-shrink-0 leading-none bg-transparent border-0 px-0.5 text-[length:var(--fs-sm)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] cursor-pointer disabled:opacity-25 disabled:cursor-default transition-colors"
+            >▼</button>
+            <button
+              type="button"
+              onClick={() => jumpToGroupStart(activeIndex)}
+              className="min-w-0 flex-1 truncate text-[length:var(--fs-sm)] text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-0 p-0 cursor-pointer text-left transition-colors"
+              title={`点击跳转到${activeLabel}：${activeSummary}`}
+            >
+              <span className="opacity-60">{activeLabel} ·</span> {activeSummary}
+            </button>
+          </>
         )}
       </div>
       <VirtualizedBlockList
