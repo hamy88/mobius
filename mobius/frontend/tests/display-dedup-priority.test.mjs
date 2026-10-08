@@ -202,6 +202,51 @@ test('非 user 类型的 mobius 卡 (task_state / error) 不是开轮卡', () =>
   assert.deepEqual(uuids(out), ['ts', 'native'])
 })
 
+// ── 双轨正文只差空白: 仍是同一条消息 ───────────────────────────────────────
+// Mobius 原样保留用户输入 (Tab / 尾部换行), 原生转录把它展开 (Tab → 4 空格) 或补首部换行,
+// 逐字节比较会漏掉这些孪生卡, 用户就看到两张一样的卡.
+test('空白差异: 开轮卡的 Tab 与原生卡的 4 空格视为同一条', () => {
+  const out = filterDisplayDuplicates([
+    mobiusCard('opener', '高权限\t--enable-gui 是否也能避免弹窗'),
+    nativeCard('native', '高权限    --enable-gui 是否也能避免弹窗'),
+  ])
+  assert.deepEqual(uuids(out), ['opener'])
+})
+
+test('空白差异: 原生卡多出的首部换行不影响判定', () => {
+  const out = filterDisplayDuplicates([mobiusCard('opener', 'go'), nativeCard('native', '\ngo')])
+  assert.deepEqual(uuids(out), ['opener'])
+})
+
+test('空白差异: 开轮卡多出的尾部换行不影响判定', () => {
+  const out = filterDisplayDuplicates([
+    mobiusCard('opener', '贴一段配置：\n\n"key": "value"\n'),
+    nativeCard('native', '贴一段配置：\n\n"key": "value"'),
+  ])
+  assert.deepEqual(uuids(out), ['opener'])
+})
+
+test('空白差异: 超出空白的差异仍旧不误伤', () => {
+  const out = filterDisplayDuplicates([
+    mobiusCard('opener', '高权限\t--enable-gui 是否也能避免弹窗'),
+    nativeCard('native', '高权限    --enable-gui 是否也能避免提示'),
+  ])
+  assert.deepEqual(uuids(out), ['opener', 'native'])
+})
+
+test('空白差异: 非开轮的监控通知卡同样按归一后文本让位', () => {
+  const out = filterDisplayDuplicates([
+    mobiusCard('notice', 'It seems that the running flag is still present\there', false),
+    nativeCard('native', 'It seems that the running flag is still present    here'),
+  ])
+  assert.deepEqual(uuids(out), ['native'])
+})
+
+test('空白差异: codex 镜像的空白差异同样被识别', () => {
+  const out = filterDisplayDuplicates([codexMirror('mirror', '问题A '), mobiusCard('opener', '问题A')])
+  assert.deepEqual(uuids(out), ['opener'])
+})
+
 // ── 存量数据的旧 kind 兼容 ─────────────────────────────────────────────────
 test('来源枚举之前的老卡 (kind=user_input) 仍被认作开轮卡', () => {
   const legacy = { ...mobiusCard('old', '问题A'), mobius: { kind: 'user_input' } }

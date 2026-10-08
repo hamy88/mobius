@@ -13,6 +13,10 @@
  *   1. 连续重复条目折叠 (claude-code 偶发逐字节重写)
  *   2. codex event_msg.user_message 镜像已见过的 user 卡 → 藏镜像
  *   3. 非开轮的 mobius 原文卡 (系统提醒等) 与原生 user 卡同文 → 藏 mobius 卡
+ *
+ * "同文"一律指 comparableUserKey 归一后相等, 不是逐字节相等 —— 同一条消息在两条轨上
+ * 的正文常只差空白: Mobius 发送链路原样保留用户输入 (Tab / 尾部换行), 原生转录把它展开
+ * (Tab → 4 空格) 或补一个首部换行. 逐字节比较会漏掉这些孪生卡, 用户就看到两张一样的卡.
  */
 import type { AnyEntry } from './types'
 import { isRoundOpenerEntry } from './utils'
@@ -73,6 +77,18 @@ function userContentOf(entry: any): string | null {
 }
 
 /*
+ * Comparison key for "the same user message in another form". Whitespace runs (tabs, newlines,
+ * runs of spaces) all collapse to one space and the ends are trimmed, so the Mobius original with
+ * a literal Tab matches the agent transcript's tab-expanded copy, and a trailing/leading newline
+ * difference disappears. Anything beyond whitespace still counts as different text.
+ */
+function comparableUserKey(text: string): string {
+  // 空白差异不算内容差异: Tab 展开、首尾换行都是转录侧的正常加工
+  // Whitespace is not content: tab expansion and edge newlines are normal transcript processing
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/*
  * True when the entry was written by the Mobius send path (it carries the "mobius" block),
  * which distinguishes the sidecar original from the agent's own copy of the same message.
  */
@@ -91,20 +107,20 @@ function entryHasMobiusField(entry: any): boolean {
 export function filterDisplayDuplicates(entries: AnyEntry[]): AnyEntry[] {
   // 先全量收集文本，双卡可能乱序到达
   // Collect the texts up front, the twin cards may arrive in either order
-  const openerContents = new Set<string>()
-  const plainUserContents = new Set<string>()
+  const openerKeys = new Set<string>()
+  const plainUserKeys = new Set<string>()
   for (const entry of entries) {
     if (entry?.type !== 'user') continue
     const content = userContentOf(entry)
     if (content === null) continue
     // 开轮卡文本优先级最高，其余算作原生卡文本
     // Opener texts rank first, every other user card counts as a native card
-    if (isRoundOpenerEntry(entry)) openerContents.add(content)
-    else if (!entryHasMobiusField(entry)) plainUserContents.add(content)
+    if (isRoundOpenerEntry(entry)) openerKeys.add(comparableUserKey(content))
+    else if (!entryHasMobiusField(entry)) plainUserKeys.add(comparableUserKey(content))
   }
 
   const out: AnyEntry[] = []
-  const seenUserMessages = new Set<string>()
+  const seenUserKeys = new Set<string>()
   let prevSignature: string | null = null
   for (const entry of entries) {
     const signature = duplicateSignature(entry)
@@ -117,23 +133,26 @@ export function filterDisplayDuplicates(entries: AnyEntry[]): AnyEntry[] {
     // A codex mirror repeating an opener or an already-seen text is hidden
     if (entry?.type === 'event_msg') {
       const message = entry?.payload?.message
-      if (typeof message === 'string' && (openerContents.has(message) || seenUserMessages.has(message))) continue
+      if (typeof message === 'string') {
+        const key = comparableUserKey(message)
+        if (openerKeys.has(key) || seenUserKeys.has(key)) continue
+      }
     }
     // 与开轮卡同文的其它 user 卡一律让位，Web 与 TUI 保持同一优先级
     // Every other user card sharing the opener's text gives way, matching the TUI rule
     if (entry?.type === 'user' && !isRoundOpenerEntry(entry)) {
       const content = userContentOf(entry)
-      if (content !== null && openerContents.has(content)) continue
+      if (content !== null && openerKeys.has(comparableUserKey(content))) continue
     }
     // 非开轮的 mobius 卡（系统提醒等）沿用旧规则：同文则藏它
     // A non-opener mobius card (system reminders) still hides itself on a text twin
     if (entry?.type === 'user' && entryHasMobiusField(entry) && !isRoundOpenerEntry(entry)) {
       const content = userContentOf(entry)
-      if (content !== null && plainUserContents.has(content)) continue
+      if (content !== null && plainUserKeys.has(comparableUserKey(content))) continue
     }
 
     const userMessage = userContentOf(entry)
-    if (userMessage !== null) seenUserMessages.add(userMessage)
+    if (userMessage !== null) seenUserKeys.add(comparableUserKey(userMessage))
     // ✨ 核心：通过全部规则后输出这一条，保持原顺序
     // ✨ Core: emit the entry once every rule lets it through, order preserved
     out.push(entry)
