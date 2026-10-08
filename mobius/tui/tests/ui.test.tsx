@@ -461,6 +461,93 @@ async function testPrepSearch() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// TEST 5c — GUI authorization step: three choices, UAC only behind the third
+// ════════════════════════════════════════════════════════════════════════════
+async function testPrepGuiStep() {
+  console.log('\n[UI 5c] GUI authorization step (windows)')
+  const client = new MobiusClient('http://mock.local', 'mock-jwt-token')
+  installMock((url) => {
+    if (url.includes('/api/projects') && !url.includes('/issues') && !url.includes('/skills') && !url.includes('/memories')) {
+      return jsonResponse([{ id: 'p9', name: '界面项目' }])
+    }
+    if (url.includes('/issues')) return jsonResponse([{ id: 'i9', project_id: 'p9', title: '授权任务' }])
+    if (url.includes('/sessions/model-options')) return jsonResponse([])
+    if (url.includes('/sessions/default-model')) return jsonResponse({ model: 'codex' })
+    if (url.includes('/memories')) return jsonResponse([])
+    // One skill, so the step after GUI keeps its title instead of auto-skipping.
+    if (url.includes('/skills')) return jsonResponse([{ id: 's1', name: '演示技能', description: '示例' }])
+    return jsonResponse({ error: 'no mock' }, 404)
+  })
+  // Pre-seed the cwd binding + preferences so the wizard resumes right at the
+  // GUI step instead of walking project → issue → model → language first.
+  const HOME = process.env.MOBIUS_TUI_HOME as string
+  const cwd = process.cwd()
+  fs.writeFileSync(path.join(HOME, 'dir2project.json'), JSON.stringify({ [cwd]: 'p9' }))
+  fs.writeFileSync(path.join(HOME, 'dir2project_preference.json'), JSON.stringify({
+    [cwd]: { issueId: 'i9', prefs: { i9: { excluded_skill_ids: [], excluded_memory_ids: [], done: ['model', 'language'] } } },
+  }))
+  const readMode = () => JSON.parse(fs.readFileSync(path.join(HOME, 'tui-gui-authorized.json'), 'utf8'))
+  /** Steps the wizard has recorded as done for the seeded issue. */
+  const doneSteps = (): string[] =>
+    JSON.parse(fs.readFileSync(path.join(HOME, 'dir2project_preference.json'), 'utf8'))[cwd].prefs.i9.done ?? []
+  const seedPrefs = () => fs.writeFileSync(path.join(HOME, 'dir2project_preference.json'), JSON.stringify({
+    [cwd]: { issueId: 'i9', prefs: { i9: { excluded_skill_ids: [], excluded_memory_ids: [], done: ['model', 'language'] } } },
+  }))
+  try {
+    const { lastFrame, stdin, unmount } = render(<PrepScreen client={client} onReady={() => {}} platform="win32" />)
+    await delay(160)
+    let frame = lastFrame() ?? ''
+    ok(frame.includes('授权使用图形界面'), 'the GUI step is offered on windows')
+    ok(frame.includes('使用纯命令行操作（推荐）'), 'option 1: command line only, marked recommended')
+    ok(frame.includes('授权使用图形界面（低权限）'), 'option 2: GUI without elevation')
+    ok(frame.includes('授权使用图形界面（高权限）'), 'option 3: GUI with elevation')
+
+    // Low privilege must take effect immediately — no confirm screen, because
+    // nothing will interrupt the user's screen.
+    stdin.write('\x1b[B'); await delay(20)   // → 低权限 (only the focused row shows its desc)
+    ok((lastFrame() ?? '').includes('不弹 UAC'), 'the low-privilege choice advertises that it raises no UAC prompt')
+    stdin.write('\r'); await delay(120)
+    frame = lastFrame() ?? ''
+    ok(!frame.includes('即将授权操作图形界面'), 'the low-privilege choice skips the UAC confirm screen')
+    ok(doneSteps().includes('gui') && !frame.includes('授权使用图形界面（低权限）'), 'choosing low privilege advances past the GUI step')
+    ok(readMode().mode === 'no-elevate' && readMode().gui === true, 'low privilege is stored as no-elevate (legacy gui flag still true)')
+    unmount()
+
+    // Elevation is the only choice that interrupts the desktop, so it is the
+    // only one that pauses on the confirm screen first.
+    seedPrefs()
+    const high = render(<PrepScreen client={client} onReady={() => {}} platform="win32" />)
+    await delay(160)
+    high.stdin.write('\x1b[B'); await delay(15)   // → 低权限
+    high.stdin.write('\x1b[B'); await delay(15)   // → 高权限
+    high.stdin.write('\r'); await delay(80)
+    frame = high.lastFrame() ?? ''
+    ok(frame.includes('即将授权操作图形界面'), 'the high-privilege choice pauses on the confirm screen')
+    ok(frame.includes('UAC'), 'the confirm screen warns about the UAC prompt')
+    ok(readMode().mode === 'no-elevate', 'nothing is stored until the user confirms')
+    high.stdin.write('\r'); await delay(120)      // 继续并授权
+    frame = high.lastFrame() ?? ''
+    ok(doneSteps().includes('gui') && !frame.includes('授权使用图形界面（高权限）'), 'confirming elevation advances past the GUI step')
+    ok(readMode().mode === 'elevate', 'high privilege is stored as elevate')
+    high.unmount()
+
+    // Off Windows the middle choice would be identical to the last one (there
+    // is no elevation request to skip), so it must not be offered.
+    seedPrefs()
+    const mac = render(<PrepScreen client={client} onReady={() => {}} platform="darwin" />)
+    await delay(160)
+    frame = mac.lastFrame() ?? ''
+    ok(frame.includes('授权使用图形界面（高权限）'), 'macOS still sees the GUI step')
+    ok(!frame.includes('（低权限）'), 'macOS is not offered the elevation-skipping choice')
+    mac.unmount()
+  } finally { restoreFetch() }
+
+  for (const f of ['dir2project.json', 'dir2project_preference.json', 'tui-gui-authorized.json']) {
+    try { fs.rmSync(path.join(HOME, f), { force: true }) } catch { /* ignore */ }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // TEST 6 — Select viewport: a long list must not overflow the terminal
 // ════════════════════════════════════════════════════════════════════════════
 async function testSelectViewport() {
@@ -1299,6 +1386,7 @@ async function main() {
   testFirstUserEntryDedupe()
   await testPrepRender()
   await testPrepSearch()
+  await testPrepGuiStep()
   await testSelectViewport()
   await testProjectPickerEscQuit()
   await testTextInputBackspace()

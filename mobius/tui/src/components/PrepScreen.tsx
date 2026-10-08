@@ -15,20 +15,24 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Select, TextInput, type SelectItem } from './primitives.js'
 import { MobiusClient } from '../api.js'
-import { restartAimuxConnectionForGuiChange, setTuiGuiAuthorized, tuiGuiAuthorized } from '../aimux.js'
+import { restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
 import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
 } from '../config.js'
 import type { Issue, Memory, Project, SessionModelOption, Skill } from '../types.js'
 
-type PrefStep = 'issue' | 'model' | 'language' | 'gui' | 'skills' | 'memories'
+export type PrefStep = 'issue' | 'model' | 'language' | 'gui' | 'skills' | 'memories'
 // GUI authorization is only meaningful where a computer-use helper exists
 // (Windows/macOS in this release); other platforms never see the step.
 const GUI_STEP_PLATFORMS: NodeJS.Platform[] = ['win32', 'darwin']
-const STEP_ORDER: PrefStep[] = GUI_STEP_PLATFORMS.includes(process.platform)
-  ? ['model', 'language', 'gui', 'skills', 'memories']
-  : ['model', 'language', 'skills', 'memories']
+/** A function rather than a constant so tests can reach the platform-gated
+ *  GUI step on any host (they pass `platform` to PrepScreen). */
+export function stepOrderFor(platform: NodeJS.Platform): PrefStep[] {
+  return GUI_STEP_PLATFORMS.includes(platform)
+    ? ['model', 'language', 'gui', 'skills', 'memories']
+    : ['model', 'language', 'skills', 'memories']
+}
 
 export interface ReadyState {
   project: Project
@@ -36,11 +40,14 @@ export interface ReadyState {
   prefs: IssuePreference
 }
 
-export function PrepScreen({ client, onReady, onQuit }: {
+export function PrepScreen({ client, onReady, onQuit, platform = process.platform }: {
   client: MobiusClient
   onReady: (st: ReadyState) => void
   onQuit?: () => void
+  /** Overridable so tests can exercise the platform-gated GUI step anywhere. */
+  platform?: NodeJS.Platform
 }) {
+  const stepOrder = stepOrderFor(platform)
   const [phase, setPhase] = useState<'loading' | 'project' | 'pref' | 'done'>('loading')
   const [projects, setProjects] = useState<Project[]>([])
   const [project, setProject] = useState<Project | null>(null)
@@ -115,7 +122,7 @@ export function PrepScreen({ client, onReady, onQuit }: {
 
   function computeStep(p: IssuePreference): PrefStep | null {
     const done = new Set(p.done ?? [])
-    for (const s of STEP_ORDER) if (!done.has(s)) return s
+    for (const s of stepOrder) if (!done.has(s)) return s
     return null
   }
 
@@ -179,6 +186,24 @@ export function PrepScreen({ client, onReady, onQuit }: {
     onReady({ project, issue: iss, prefs: p })
   }
 
+  /** Suffix marking the option this machine is currently set to. */
+  function markGuiMode(mode: GuiMode): string {
+    return tuiGuiMode() === mode ? ' · 当前' : ''
+  }
+
+  /** Commit the wizard's GUI choice, then swap the daemon when it changed.
+   *  Both the identifier (tui-⇄gui-) and the reverse-connect flags differ per
+   *  mode, and the old daemon cannot be retargeted in place. */
+  function applyGuiMode(mode: GuiMode) {
+    if (tuiGuiMode() !== mode) {
+      setTuiGuiMode(mode)
+      // In elevate mode the replacement daemon is what raises the Windows UAC
+      // prompt; in no-elevate mode it is what removes it.
+      void restartAimuxConnectionForGuiChange()
+    }
+    completeStep('gui', {})
+  }
+
   // ── lazy-load lists for the active step ──────────────────────────────────
   useEffect(() => {
     if (phase !== 'pref' || !step) return
@@ -227,46 +252,51 @@ export function PrepScreen({ client, onReady, onQuit }: {
       ? <Select
           title="是否授权操作图形界面 (GUI/computer use)"
           items={[
-            { label: `否（默认）`, value: 'no', desc: '仅命令行/文件方式操作本机' },
-            { label: `是`, value: 'yes', desc: '以 gui- 前缀注册 bridge client 并启用界面操作工具' },
+            { label: `使用纯命令行操作（推荐）${markGuiMode('off')}`, value: 'off', desc: '仅命令行/文件方式操作本机' },
+            // No elevation request to skip off Windows, so the middle choice
+            // would be the same as the last one; only offer it where it means
+            // something.
+            ...(platform === 'win32'
+              ? [{
+                  label: `授权使用图形界面（低权限）${markGuiMode('no-elevate')}`,
+                  value: 'no-elevate',
+                  desc: '不弹 UAC；能操作普通窗口，管理员窗口不行',
+                }]
+              : []),
+            {
+              label: `授权使用图形界面（高权限）${markGuiMode('elevate')}`,
+              value: 'elevate',
+              desc: platform === 'win32' ? '每次启动 aimux 弹一次 UAC；可操作管理员窗口' : '启用界面操作工具',
+            },
           ]}
           onSelect={v => {
-            if (v === 'yes') {
+            if (v === 'elevate') {
               // 先停在确认屏: 让用户对即将出现的系统授权弹窗有预期, 不做突袭
               // Pause on the confirm screen first so the OS prompt never
-              // ambushes the user.
+              // ambushes the user. The other two choices raise no prompt.
               setGuiConfirm(true)
               return
             }
-            if (tuiGuiAuthorized()) {
-              setTuiGuiAuthorized(false)
-              void restartAimuxConnectionForGuiChange()
-            }
-            completeStep('gui', {})
+            applyGuiMode(v === 'no-elevate' ? 'no-elevate' : 'off')
           }} />
       : null}
     {step === 'gui' && guiConfirm
       ? <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
           <Text bold color="yellow">⚠ 即将授权操作图形界面</Text>
-          <Text color="yellow">确认后{process.platform === 'win32' ? '系统会弹出 UAC 管理员授权窗口' : '将启用界面操作工具'}，请留意屏幕上的弹窗并点击确认。</Text>
-          <Text color="yellow">授权后本机以 gui- 前缀注册，智能体可以操作本机图形界面（含{process.platform === 'win32' ? '管理员' : ''}窗口）。</Text>
+          <Text color="yellow">确认后{platform === 'win32' ? '系统会弹出 UAC 管理员授权窗口' : '将启用界面操作工具'}，请留意屏幕上的弹窗并点击确认。</Text>
+          <Text color="yellow">授权后本机以 gui- 前缀注册，智能体可以操作本机图形界面（含{platform === 'win32' ? '管理员' : ''}窗口）。</Text>
+          <Text color="gray">不想看到 UAC 就返回上一题选「授权使用图形界面（低权限）」。</Text>
           <Box marginTop={1}>
             <Select
               title="继续吗？"
               items={[
-                { label: '继续并授权', value: 'go', desc: process.platform === 'win32' ? '回车后请到 UAC 弹窗点击"是"' : '启用界面操作' },
+                { label: '继续并授权', value: 'go', desc: platform === 'win32' ? '回车后请到 UAC 弹窗点击"是"' : '启用界面操作' },
                 { label: '取消', value: 'cancel', desc: '返回上一题，不做任何改动' },
               ]}
               onSelect={v => {
                 if (v !== 'go') { setGuiConfirm(false); return }
-                setTuiGuiAuthorized(true)
-                // 标识符在 tui-⇄gui- 间切换, 旧守护进程必须换掉才能带上 --enable-gui
-                // (Windows 下新客户端启动时会请求管理员权限 → UAC 弹窗)
-                // The identifier flips tui-⇄gui-, so the daemon restarts with
-                // --enable-gui (which triggers the UAC request on Windows).
-                void restartAimuxConnectionForGuiChange()
                 setGuiConfirm(false)
-                completeStep('gui', {})
+                applyGuiMode('elevate')
               }} />
           </Box>
         </Box>

@@ -366,29 +366,56 @@ export function aimuxWorkspaceHash(username = currentUsername(), cwd = process.c
 }
 
 // ── GUI (computer use) authorization ─────────────────────────────────────
-// Machine-level choice made in the first-run wizard: when true the reverse
-// client registers as gui-<host>-<hash> and connects with --enable-gui, so
-// the remote exposes the remote_gui_* (computer use) toolset.
-const GUI_AUTH_FILE = 'tui-gui-authorized.json'
-let guiAuthorizedCache: boolean | undefined = undefined
+// Machine-level choice made in the first-run wizard. It has three states
+// because "let the agent drive my screen" and "let aimux ask Windows for
+// administrator rights" are separate decisions: elevation is what puts a UAC
+// prompt on screen every time the daemon starts, and plenty of people want the
+// tool without the popup.
+//   off        no GUI helper at all; registers as tui-<host>-<hash>
+//   no-elevate GUI helper, stays unelevated (--gui-no-elevate): no UAC, but
+//              Windows UIPI then blocks input into elevated windows
+//   elevate    GUI helper + one UAC prompt per daemon start; the only mode
+//              that can drive administrator windows
+// Either authorized mode registers as gui-<host>-<hash>.
+export type GuiMode = 'off' | 'no-elevate' | 'elevate'
 
-export function tuiGuiAuthorized(): boolean {
-  if (guiAuthorizedCache === undefined) {
-    try {
-      const raw = readFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), 'utf8')
-      guiAuthorizedCache = (JSON.parse(raw) as { gui?: boolean })?.gui === true
-    } catch { guiAuthorizedCache = false }
-  }
-  return guiAuthorizedCache
+const GUI_AUTH_FILE = 'tui-gui-authorized.json'
+let guiModeCache: GuiMode | undefined = undefined
+
+/** Read the stored mode, also accepting the `{gui: boolean}` file written by <=0.3.66. */
+function readGuiMode(): GuiMode {
+  try {
+    const raw = JSON.parse(readFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), 'utf8')) as { mode?: unknown; gui?: unknown }
+    if (raw?.mode === 'off' || raw?.mode === 'no-elevate' || raw?.mode === 'elevate') return raw.mode
+    return raw?.gui === true ? 'elevate' : 'off'
+  } catch { return 'off' }
 }
 
-export function setTuiGuiAuthorized(value: boolean): void {
-  guiAuthorizedCache = value
+export function tuiGuiMode(): GuiMode {
+  if (guiModeCache === undefined) guiModeCache = readGuiMode()
+  return guiModeCache
+}
+
+/** test-only: read the stored mode straight from disk, bypassing the module cache. */
+export const readGuiModeForTest = readGuiMode
+
+export function setTuiGuiMode(mode: GuiMode): void {
+  guiModeCache = mode
   try {
     mkdirSync(mobiusHome(), { recursive: true })
-    writeFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), JSON.stringify({ gui: value }), { mode: 0o600 })
+    // `gui` is written alongside `mode` so that a downgrade to <=0.3.66 still
+    // reads the right boolean instead of silently dropping the authorization.
+    writeFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), JSON.stringify({ mode, gui: mode !== 'off' }), { mode: 0o600 })
   } catch { /* unwritable home: the in-memory cache still holds this session */ }
 }
+
+/** Authorized in either mode — this is what flips the gui- identifier prefix. */
+export function tuiGuiAuthorized(): boolean { return tuiGuiMode() !== 'off' }
+
+/** Only this mode makes aimux request elevation, i.e. show a UAC prompt. */
+export function tuiGuiNoElevate(): boolean { return tuiGuiMode() === 'no-elevate' }
+
+export function setTuiGuiAuthorized(value: boolean): void { setTuiGuiMode(value ? 'elevate' : 'off') }
 
 export function tuiAimuxIdentifier(hostname = os.hostname(), cwd = process.cwd(), username = currentUsername(), guiEnabled = tuiGuiAuthorized()): string {
   const host = hostname.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
@@ -465,6 +492,7 @@ export function reverseConnectArgs(
   silentFlag: string | null = null,
   runtimeFile: string | null = null,
   enableGui = false,
+  guiNoElevate = false,
 ): string[] {
   return [
     'reverse', 'connect', `${server.replace(/\/$/, '')}/aimux_bridge`,
@@ -474,6 +502,9 @@ export function reverseConnectArgs(
     ...(runtimeFile ? ['--runtime', runtimeFile, '--watchdog', runtimeFile] : []),
     ...(platform === 'win32' && silentFlag ? [silentFlag] : []),
     ...(enableGui ? ['--enable-gui'] : []),
+    // Only meaningful next to --enable-gui: it skips that flag's elevation
+    // request, and without --enable-gui there is no request to skip.
+    ...(enableGui && guiNoElevate ? ['--gui-no-elevate'] : []),
   ]
 }
 
@@ -515,6 +546,15 @@ export function pickSilentFlag(helpText: string, platform: NodeJS.Platform = pro
  */
 export function pickEnableGuiFlag(helpText: string): boolean {
   return /--enable-gui\b/.test(helpText)
+}
+
+/**
+ * Does this aimux build advertise --gui-no-elevate? It landed in the same
+ * 0.3.64 release as --enable-gui, but probe it separately: sending it to a
+ * build that lacks it is the same "No such option" crash-loop.
+ */
+export function pickGuiNoElevateFlag(helpText: string): boolean {
+  return /--gui-no-elevate\b/.test(helpText)
 }
 
 /** Result of a bridge heartbeat: is the stream up, and did the JWT just get rejected? */
@@ -615,7 +655,8 @@ export class AimuxSupervisor {
       if (pid !== null && pidAlive(pid)) { await touchWatchdog(this.hash); return }
       const { server, token, identifier, onStatus } = this.opts
       onStatus({ state: 'starting', phase: 'connecting', detail: '正在启动 AIMUX 守护进程…', identifier, attempt: this.reconnectAttempt })
-      const child = this.opts.spawnProcess?.(token) ?? spawnDetachedDaemon({ kind: 'exe', path: aimuxExe() }, reverseConnectArgs(server, identifier, token, process.platform, null, runtimePath(this.hash), tuiGuiAuthorized()))
+      const gui = resolvedGuiArgs()
+      const child = this.opts.spawnProcess?.(token) ?? spawnDetachedDaemon({ kind: 'exe', path: aimuxExe() }, reverseConnectArgs(server, identifier, token, process.platform, null, runtimePath(this.hash), gui.enableGui, gui.guiNoElevate))
       child.on('error', (e: Error) => { appendAimuxLog(installLogQueue, `\n[aimux spawn error] ${e.stack || e.message}\n`) })
       child.unref?.()
       this.reconnectAttempt = 0
@@ -743,6 +784,15 @@ let cachedSilentFlag: string | null | undefined = undefined
 // Same caching for --enable-gui support (aimux 0.3.64+): sending it to an older
 // build crashes the supervisor with "No such option".
 let cachedEnableGui: boolean | undefined = undefined
+// --gui-no-elevate shipped in that same release, so it is probed from the same
+// help text and only consulted while --enable-gui is being sent.
+let cachedGuiNoElevate: boolean | undefined = undefined
+
+/** GUI flags to actually send: the user authorized GUI *and* this aimux build advertises them. */
+function resolvedGuiArgs(): { enableGui: boolean; guiNoElevate: boolean } {
+  const enableGui = tuiGuiAuthorized() && cachedEnableGui === true
+  return { enableGui, guiNoElevate: enableGui && tuiGuiNoElevate() && cachedGuiNoElevate === true }
+}
 
 export async function startAimuxConnection(opts: StartOptions): Promise<void> {
   const onStatus = opts.onStatus ?? (() => {})
@@ -777,14 +827,16 @@ export async function startAimuxConnection(opts: StartOptions): Promise<void> {
       }
       if (needGuiFlag && cachedEnableGui === undefined) {
         cachedEnableGui = pickEnableGuiFlag(help)
-        logInstall(`reverse-connect --enable-gui probe → ${cachedEnableGui ? 'supported' : 'NOT supported (skipping; upgrade aimux to 0.3.64+)'}\n`)
+        cachedGuiNoElevate = pickGuiNoElevateFlag(help)
+        logInstall(`reverse-connect --enable-gui probe → ${cachedEnableGui ? 'supported' : 'NOT supported (skipping; upgrade aimux to 0.3.64+)'} · --gui-no-elevate ${cachedGuiNoElevate ? 'supported' : 'NOT supported'}\n`)
       }
     }
     const silentFlag = cachedSilentFlag
-    const enableGui = needGuiFlag && cachedEnableGui === true
+    const gui = resolvedGuiArgs()
+    logInstall(`GUI mode ${tuiGuiMode()} → ${gui.enableGui ? (gui.guiNoElevate ? '--enable-gui --gui-no-elevate (no UAC)' : '--enable-gui (UAC on Windows)') : 'no GUI flags'}\n`)
     supervisor = new AimuxSupervisor({
       server: opts.server, token: opts.token, identifier, onStatus, refreshToken: opts.refreshToken,
-      spawnProcess: token => spawnDetachedDaemon(launcher, reverseConnectArgs(opts.server, identifier, token, process.platform, silentFlag, runtimePath(aimuxWorkspaceHash()), enableGui)),
+      spawnProcess: token => spawnDetachedDaemon(launcher, reverseConnectArgs(opts.server, identifier, token, process.platform, silentFlag, runtimePath(aimuxWorkspaceHash()), gui.enableGui, gui.guiNoElevate)),
     })
     await supervisor.start()
   })().finally(() => { installing = null })
@@ -797,11 +849,12 @@ export async function stopAimuxConnection(): Promise<void> {
 }
 
 /**
- * Re-do the reverse connection after the GUI authorization choice changed:
- * the identifier flips tui-⇄gui-, so the old daemon must die first (its
- * runtime JSON is keyed by workspace hash, not identifier) and a fresh one
- * spawns with/without --enable-gui. No-op when no connection is up yet —
- * the next startAimuxConnection picks the new flag up anyway.
+ * Re-do the reverse connection after the GUI authorization choice changed.
+ * The old daemon must die first (its runtime JSON is keyed by workspace hash,
+ * not by the identifier or flags) and a fresh one spawns with the new set:
+ * the identifier flips tui-⇄gui- on off⇄authorized, and the flags differ
+ * between no-elevate and elevate. No-op when no connection is up yet — the
+ * next startAimuxConnection picks the new mode up anyway.
  */
 export async function restartAimuxConnectionForGuiChange(): Promise<void> {
   const opts = lastStartOpts

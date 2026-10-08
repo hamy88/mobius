@@ -2,12 +2,12 @@
 import React from 'react'
 import { EventEmitter } from 'node:events'
 import { spawn } from 'node:child_process'
-import { promises as fs, existsSync } from 'node:fs'
+import { promises as fs, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest } from '../src/aimux.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 let pass = 0, fail = 0
@@ -226,8 +226,14 @@ function testPickSilentFlag() {
   ok(pickSilentFlag('  --silent-v2  Hide console.', 'linux') === null, 'off-Windows → always null')
 }
 
-function testGuiAuthorization() {
+async function testGuiAuthorization() {
   console.log('\n[AIMUX 6c] GUI authorization: identifier prefix + --enable-gui args')
+  // Hermetic home: setTuiGuiMode writes a file, and running the suite must not
+  // change this machine's real computer-use setting.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-gui-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  try {
   // Default (flag off): classic tui- prefix, no --enable-gui.
   ok(tuiAimuxIdentifier('host-a', '/w', 'alice', false).startsWith('tui-host-a-'), 'flag off keeps the tui- prefix')
   // Authorized: gui- prefix on the same host/hash — the capability shows in the remote name.
@@ -241,10 +247,20 @@ function testGuiAuthorization() {
   const gui = reverseConnectArgs('https://mobius.test/', 'gui-x', 't', 'linux', null, null, true)
   ok(!plain.includes('--enable-gui'), 'flag off sends no --enable-gui')
   ok(gui.includes('--enable-gui'), 'authorized connection passes --enable-gui')
+  ok(!gui.includes('--gui-no-elevate'), 'plain authorization still asks for elevation')
+  // no-elevate: same --enable-gui, plus the flag that skips aimux's UAC request.
+  const quiet = reverseConnectArgs('https://mobius.test/', 'gui-x', 't', 'win32', null, null, true, true)
+  ok(quiet.includes('--enable-gui') && quiet.includes('--gui-no-elevate'), 'no-elevate keeps GUI on and adds --gui-no-elevate')
+  // --gui-no-elevate alone is meaningless: it only skips *another* flag's
+  // elevation request, so it must never be sent without --enable-gui.
+  const orphan = reverseConnectArgs('https://mobius.test/', 'tui-x', 't', 'win32', null, null, false, true)
+  ok(!orphan.includes('--gui-no-elevate'), 'no-elevate is not sent when GUI is off')
   // Probe gates on what aimux advertises (0.3.64+), mirroring pickSilentFlag.
   ok(pickEnableGuiFlag('  --enable-gui  Start the GUI helper.') === true, 'probe sees --enable-gui when advertised')
   ok(pickEnableGuiFlag('  --silent-v2  Hide console.') === false, 'probe stays false without --enable-gui')
-  // setTuiGuiAuthorized flips the module cache and the default identifier prefix with it.
+  ok(pickGuiNoElevateFlag('  --enable-gui  Start. --gui-no-elevate  Stay unelevated.') === true, 'probe sees --gui-no-elevate when advertised')
+  ok(pickGuiNoElevateFlag('  --enable-gui  Start the GUI helper.') === false, 'probe stays false without --gui-no-elevate')
+  // setTuiGuiMode flips the module cache and the default identifier prefix with it.
   const before = tuiAimuxIdentifier('host-b', '/w2', 'bob')
   setTuiGuiAuthorized(true)
   const after = tuiAimuxIdentifier('host-b', '/w2', 'bob')
@@ -252,10 +268,56 @@ function testGuiAuthorization() {
   ok(tuiGuiAuthorized() === true, 'flag reads back true after write')
   setTuiGuiAuthorized(false)
   ok(tuiAimuxIdentifier('host-b', '/w2', 'bob').startsWith('tui-'), 'clearing the flag restores the tui- prefix')
+  } finally {
+    setTuiGuiMode('off')   // back to the temp file, so the real home is never written
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME
+    else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+async function testGuiModes() {
+  console.log('\n[AIMUX 6d] GUI modes: off / no-elevate / elevate persist and read back')
+  // Hermetic: never touch the developer's real ~/.mobius/tui-gui-authorized.json
+  // — running the suite must not change this machine's computer-use setting.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-gui-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  const file = path.join(home, 'tui-gui-authorized.json')
+  process.env.MOBIUS_TUI_HOME = home
+  try {
+    setTuiGuiMode('off')
+    ok(tuiGuiMode() === 'off' && tuiGuiAuthorized() === false && tuiGuiNoElevate() === false, 'off: nothing authorized')
+    setTuiGuiMode('no-elevate')
+    ok(tuiGuiMode() === 'no-elevate', 'no-elevate round-trips')
+    ok(tuiGuiAuthorized() === true, 'no-elevate still counts as authorized (gui- identifier prefix)')
+    ok(tuiGuiNoElevate() === true, 'no-elevate is the only mode that skips the UAC request')
+    ok(tuiAimuxIdentifier('host-c', '/w3', 'carol').startsWith('gui-'), 'no-elevate registers under the gui- prefix')
+    setTuiGuiMode('elevate')
+    ok(tuiGuiAuthorized() === true && tuiGuiNoElevate() === false, 'elevate authorizes without skipping elevation')
+    // The on-disk shape must stay readable by <=0.3.66, which only knows `gui`.
+    const written = JSON.parse(readFileSync(file, 'utf8'))
+    ok(written.mode === 'elevate' && written.gui === true, 'elevate writes both mode and the legacy gui flag')
+    setTuiGuiMode('off')
+    ok(JSON.parse(readFileSync(file, 'utf8')).gui === false, 'off writes gui:false too, so a downgrade reads it back as off')
+    // A file written before modes existed must not lose the authorization.
+    writeFileSync(file, JSON.stringify({ gui: true }))
+    ok(readGuiModeForTest() === 'elevate', 'a legacy {gui:true} file reads back as elevate')
+    writeFileSync(file, JSON.stringify({ gui: false }))
+    ok(readGuiModeForTest() === 'off', 'a legacy {gui:false} file reads back as off')
+    writeFileSync(file, 'not json at all')
+    ok(readGuiModeForTest() === 'off', 'an unreadable file falls back to off rather than throwing')
+  } finally {
+    // Re-point the cache at the temp file before it disappears, so the real
+    // home is never written on the way out.
+    setTuiGuiMode('off')
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME
+    else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 function testVersionAtLeast() {
-  console.log('\n[AIMUX 6c] aimux pin is a floor, not an exact match')
+  console.log('\n[AIMUX 6e] aimux pin is a floor, not an exact match')
   // /upgrade 装的是 PyPI 最新版，通常比 pin 新；不能被 pin 校验判成"没装好"又拽回去。
   ok(versionAtLeast('0.3.62', '0.3.61'), 'newer aimux satisfies the pinned floor')
   ok(versionAtLeast('0.3.61', '0.3.61'), 'exactly the pinned version satisfies the floor')
@@ -338,7 +400,8 @@ async function main() {
   await testSpawnLauncher()
   testReverseConnectArgs()
   testPickSilentFlag()
-  testGuiAuthorization()
+  await testGuiAuthorization()
+  await testGuiModes()
   testVersionAtLeast()
   testAimuxIdentifierScopesWorkspace()
   testBundleHealthCheck()
