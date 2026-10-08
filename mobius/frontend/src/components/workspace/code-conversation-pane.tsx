@@ -57,6 +57,7 @@ type CodeConversationPaneProps = {
 }
 
 type FileSource = 'hub' | 'local' | 'remote'
+type OpenFileRequest = { projectId: string; sessionId?: string; path: string; remote?: string; root?: string }
 
 type ProjectRemoteFileSource = {
   name: string
@@ -236,6 +237,7 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
   // ----- 代码浏览/编辑状态 (多 Tab) -----
   const [tabs, setTabs] = useState<EditorTab[]>([])
   const [activeKey, setActiveKey] = useState('')
+  const [openRequest, setOpenRequest] = useState<OpenFileRequest | null>(null)
   // tabs 镜像: 异步流程 (保存/重命名前自动保存) 里读最新 doc, 不受闭包过期影响.
   const tabsRef = useRef<EditorTab[]>([])
   tabsRef.current = tabs
@@ -525,6 +527,64 @@ export function CodeConversationPane({ projectId, bindPath, vscodeWebUrl, sessio
       openingRef.current.delete(key)
     }
   }, [desktop, projectId, bindPath, localBindPath, remoteName, remoteRootParam, source, sessionId, patchTab])
+
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const request = (event as CustomEvent<OpenFileRequest>).detail
+      if (!request || request.projectId !== projectId || (request.sessionId && request.sessionId !== sessionId)) return
+      setOpenRequest(request)
+    }
+    window.addEventListener('mobius:open-file-in-sidebar', onOpen)
+    return () => window.removeEventListener('mobius:open-file-in-sidebar', onOpen)
+  }, [projectId, sessionId])
+
+  useEffect(() => {
+    if (!openRequest || openRequest.projectId !== projectId || (openRequest.sessionId && openRequest.sessionId !== sessionId)) return
+    const nextSource: FileSource = openRequest.remote ? 'remote' : 'hub'
+    const targetRemote = openRequest.remote || ''
+    const needsSourceChange = nextSource !== source || (nextSource === 'remote' && targetRemote !== remoteName)
+    if (anyDirty && needsSourceChange && !window.confirm('有未保存的修改，切换文件来源将丢弃。确定切换？')) {
+      setOpenRequest(null)
+      return
+    }
+    if (anyDirty && needsSourceChange) clearEditorState()
+    if (nextSource !== source) {
+      setSourceState(nextSource)
+      try { localStorage.setItem(fileSourceStorageKey(projectId), nextSource) } catch { /* 静默 */ }
+      return
+    }
+    if (nextSource === 'remote' && targetRemote !== remoteName) {
+      setRemoteName(targetRemote)
+      try { localStorage.setItem(remoteMachineStorageKey(projectId), targetRemote) } catch { /* 静默 */ }
+      return
+    }
+    if (nextSource === 'remote') {
+      const root = openRequest.root || ''
+      if (root !== remoteRoot) {
+        setRemoteRoot(root)
+        try {
+          if (root) localStorage.setItem(remoteRootStorageKey(projectId, targetRemote), root)
+          else localStorage.removeItem(remoteRootStorageKey(projectId, targetRemote))
+        } catch { /* 静默 */ }
+        return
+      }
+    }
+    setOpenRequest(null)
+    const path = openRequest.path
+    if (nextSource === 'remote' && (openRequest.path.startsWith('/') || openRequest.path.split(/[\\/]/).some(part => part === '..'))) {
+      setOpenRequest(null)
+      return
+    }
+    const entry: Entry = {
+      name: path.split('/').filter(Boolean).pop() || path,
+      type: 'file',
+      size: null,
+      modified: '',
+      abs_path: nextSource === 'remote' ? path : (path.startsWith('/') ? path : `${bindPath.replace(/\/$/, '')}/${path}`),
+      ...(nextSource === 'remote' ? { rel_path: `/${path}` } : {}),
+    }
+    void onSelectFile(entry)
+  }, [openRequest, projectId, sessionId, anyDirty, source, remoteName, remoteRoot, bindPath, onSelectFile, clearEditorState])
 
   // 关闭 Tab: 有未保存修改先确认; 关闭的是当前 Tab 时激活右侧相邻 (无则左侧) Tab.
   const closeTab = useCallback((key: string) => {

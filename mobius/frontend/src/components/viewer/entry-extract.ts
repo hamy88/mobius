@@ -1212,6 +1212,70 @@ export function entryDisplayImages(entry: AnyEntry): string[] {
   return Array.from(new Set(out))
 }
 
+export type DisplayFileRef = { path: string; remote?: string; root?: string }
+
+function collectDisplayFiles(command: string, depth: number, out: DisplayFileRef[]): void {
+  if (depth > 3) return
+  for (const seg of splitShellSegments(command)) {
+    const toks = tokenizeSegment(seg.trim())
+    if (toks.length === 0) continue
+    const base = toks[0].split('/').pop() || toks[0]
+    if (base === 'display-files') {
+      let remote = ''
+      let root = ''
+      const paths: string[] = []
+      for (let i = 1; i < toks.length; i++) {
+        const token = toks[i]
+        if (token === '--') { paths.push(...toks.slice(i + 1)); break }
+        if (token === '--remote' || token === '--root') {
+          const value = toks[++i]
+          if (value && !value.startsWith('--')) {
+            if (token === '--remote') remote = value
+            else root = value
+          }
+          continue
+        }
+        if (token.startsWith('--remote=')) { remote = token.slice(9); continue }
+        if (token.startsWith('--root=')) { root = token.slice(7); continue }
+        if (token.startsWith('-')) continue
+        paths.push(token)
+      }
+      for (const path of paths) if (path) out.push({ path, ...(remote ? { remote } : {}), ...(root ? { root } : {}) })
+      continue
+    }
+    if (base === 'bash' || base === 'sh' || base === 'zsh') {
+      const ci = toks.findIndex((tok) => tok === '-c' || /^-[^-]\S*c\S*$/.test(tok))
+      if (ci >= 0 && toks[ci + 1]) collectDisplayFiles(toks[ci + 1], depth + 1, out)
+    }
+  }
+}
+
+export function entryDisplayFiles(entry: AnyEntry): DisplayFileRef[] {
+  const commands: string[] = []
+  if (entry?.type === 'assistant' && Array.isArray(entry?.message?.content)) {
+    for (const block of entry.message.content) {
+      if (block?.type === 'tool_use' && isBashToolUseName(block?.name) && typeof block?.input?.command === 'string') commands.push(block.input.command)
+    }
+  }
+  if (entry?.type === 'response_item' && isFunctionCallPayload(entry?.payload)) {
+    const args = functionCallArguments(entry.payload)
+    const command = args?.cmd ?? args?.command ?? args?.input?.command
+    if (typeof command === 'string') commands.push(command)
+  }
+  const found = commands.flatMap(command => {
+    const rows: DisplayFileRef[] = []
+    if (command.includes('display-files')) collectDisplayFiles(command, 0, rows)
+    return rows
+  })
+  const seen = new Set<string>()
+  return found.filter(item => {
+    const key = `${item.remote || ''}\0${item.root || ''}\0${item.path}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 // 从用户消息里抽取附件图片行. 当前发送侧把图片附件拼进文本:
 // [附件]
 // - [图片] /abs/path

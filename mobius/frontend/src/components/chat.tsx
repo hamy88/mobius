@@ -2420,6 +2420,18 @@ export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easy
   const [easyFilesMounted, setEasyFilesMounted] = useState<boolean>(() => {
     try { return localStorage.getItem(EASY_FILES_OPEN_KEY) === '1' } catch { return false }
   })
+  useEffect(() => {
+    const openFile = (event: Event) => {
+      const detail = (event as CustomEvent).detail
+      if (!detail || detail.projectId !== currentProjectId || (detail.sessionId && detail.sessionId !== sessionId)) return
+      setEasyFilesMounted(true)
+      setEasyFilesOpen(true)
+      try { localStorage.setItem(EASY_FILES_OPEN_KEY, '1') } catch { /* ignore */ }
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent('mobius:open-file-in-sidebar', { detail })), 250)
+    }
+    window.addEventListener('mobius:request-open-file-in-sidebar', openFile)
+    return () => window.removeEventListener('mobius:request-open-file-in-sidebar', openFile)
+  }, [currentProjectId, sessionId])
   useEffect(() => { if (easyFilesOpen) setEasyFilesMounted(true) }, [easyFilesOpen])
   const toggleEasyFiles = useCallback(() => {
     setEasyFilesOpen(previous => {
@@ -4626,6 +4638,7 @@ export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easy
             快照订阅在面板内部 (Chat 不随每条数据重渲染); 条目驱动的自动滚底由旁边的 EntriesAutoScroll 承担. */}
         <SessionJsonlPanel
           currentProjectId={currentProjectId}
+          projectBindPath={projectForSession?.bind_path || ''}
           sessionIdentity={sessionIdForSearchHits}
           chatContainerRef={chatContainerRef}
           endRef={endRef}

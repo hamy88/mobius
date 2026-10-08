@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
+import { DisplayFileContext } from './viewer/DisplayFileContext'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
 import { PendingQueueCard } from './viewer/PendingQueueCard'
 import type { SessionHistoryStore } from '../services/agent-history-store'
@@ -54,6 +55,7 @@ export function findLatestEntryTimestamp(entries: any[]): {
 
 type SessionJsonlPanelProps = {
   currentProjectId: string
+  projectBindPath?: string
   // Stable identity for the currently displayed session. History-store
   // instances may be replaced while data is loading; search highlights must
   // survive that replacement but must be cleared when the user changes
@@ -101,6 +103,7 @@ type SessionJsonlPanelProps = {
 
 function SessionJsonlPanelInner({
   currentProjectId,
+  projectBindPath,
   sessionIdentity = '',
   chatContainerRef,
   endRef,
@@ -413,6 +416,7 @@ function SessionJsonlPanelInner({
           style={undefined}
         >
           {exclusiveContent == null ? (
+            <DisplayFileContext.Provider value={{ projectId: currentProjectId, sessionId: sessionIdentity, bindPath: projectBindPath }}>
             <VSCodeOpenProvider projectId={currentProjectId}>
               {variant === 'easy' ? (
                 <Suspense fallback={<div className="py-10 text-center text-[length:var(--fs-md)] text-[var(--text-muted)]">正在整理简易对话...</div>}>
@@ -464,6 +468,7 @@ function SessionJsonlPanelInner({
               )}
               <div ref={endRef} />
             </VSCodeOpenProvider>
+            </DisplayFileContext.Provider>
           ) : exclusiveContent}
         </div>
       </div>

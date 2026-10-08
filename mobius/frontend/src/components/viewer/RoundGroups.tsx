@@ -13,10 +13,11 @@ import type { AnyEntry, BashToolResult, JsonlViewItem, Round, RoundItem } from '
 import type { ToolStatus, ToolStatusMap } from './tool-status'
 import { deriveToolCallStatus } from './tool-status'
 import { groupExploreItems, type ExploreRenderItem } from './explore-group'
-import { entryDisplayImages, entryReadImagePaths, entryUserAttachmentImages } from './entry-extract'
+import { entryDisplayImages, entryDisplayFiles, entryReadImagePaths, entryUserAttachmentImages } from './entry-extract'
 import { buildHeaderSummary } from './header-summary'
 import { isEasyFlatEntry, isEasyMicroEntry, JsonEntryCard } from './EntryCard'
 import { DisplayImagesCard } from './DisplayImages'
+import { DisplayFilesCard } from './DisplayFiles'
 import type { TaskPlanByUuid } from './task-progress'
 import type { RoundHeaderPalette } from './round-header-palette'
 import { ASSISTANT_END_TURN_THEME } from './themes'
@@ -40,7 +41,7 @@ function toolStatusOf(entry: AnyEntry, map: ToolStatusMap | null | undefined): T
   return status
 }
 
-export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResults = [], forceOpen = false, searchHighlighted = false, parentOrderedCollapse = false, showMeta = true, dense = false, easyMode = false, easyOpenerOverride = false, toolStatus, taskPlans }: {
+export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResults = [], forceOpen = false, searchHighlighted = false, parentOrderedCollapse = false, showMeta = true, dense = false, easyMode = false, easyOpenerOverride = false, toolStatus, taskPlans, projectId, sessionId }: {
   entry: AnyEntry
   lineNo: number
   bashResults?: BashToolResult[]
@@ -58,8 +59,11 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
   toolStatus?: ToolStatus | null
   // 任务工具跨条目累积快照 (anchor uuid → PlanUpdate), 按卡片 uuid 取值透传给计划视图.
   taskPlans?: TaskPlanByUuid | null
+  projectId?: string
+  sessionId?: string
 }) {
   const displayImages = entryDisplayImages(entry)
+  const displayFiles = entryDisplayFiles(entry)
   const readImages = entryReadImagePaths(entry)
   const attachmentImages = entryUserAttachmentImages(entry)
   const imgs = Array.from(new Set([...displayImages, ...readImages, ...attachmentImages]))
@@ -74,6 +78,7 @@ export function EntryCardWithImages({ entry, lineNo, bashResults = [], readResul
     <>
       <JsonEntryCard entry={entry} lineNo={lineNo} forceOpen={forceOpen} searchHighlighted={searchHighlighted} parentOrderedCollapse={parentOrderedCollapse} showMeta={showMeta} dense={dense} easyMode={easyMode} easyOpenerOverride={easyOpenerOverride} bashResults={bashResults} readResults={readResults} toolStatus={toolStatus} taskPlan={(uuid && taskPlans) ? taskPlans.get(uuid) ?? null : null} />
       {imgs.length > 0 && <DisplayImagesCard images={imgs} lineNo={lineNo} sourceLabel={sourceLabel} easyMode={easyMode} />}
+      {displayFiles.length > 0 && <DisplayFilesCard files={displayFiles} projectId={projectId} sessionId={sessionId} easyMode={easyMode} />}
     </>
   )
 }

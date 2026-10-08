@@ -11,7 +11,6 @@ import {
   CircleDot,
   Cpu,
   FolderKanban,
-  FolderOpen,
   History,
   LayoutList,
   Loader2,
@@ -32,13 +31,6 @@ import { useStore, api } from '../store'
 import { useLayoutMode, buildNormalModeTargetUrl } from '../services/layout-mode'
 import { pollRecursive } from '../services/polling'
 import { buildRecentSessionTreeGroups } from '../services/recent-session-tree'
-import {
-  EMPTY_PROJECT_HIERARCHY_SEARCH,
-  hierarchyHitLabel,
-  type ProjectHierarchyGroup,
-  type ProjectHierarchyHit,
-  type ProjectHierarchySearchResponse,
-} from '../services/project-hierarchy-search'
 import { lazyWithRetry } from '../services/handle-stale-chunk'
 import { EasySessionChatInput } from '../components/easy-session-chat-input'
 import {
@@ -74,6 +66,9 @@ const RenameSessionModal = lazyWithRetry(() => import('../components/modals').th
 const GlobalCreateRoot = lazyWithRetry(() => import('../components/global-create').then(module => ({ default: module.GlobalCreateRoot })))
 const MemoriesManager = lazyWithRetry(() => import('../components/memories').then(module => ({ default: module.MemoriesManager })))
 const SkillsManager = lazyWithRetry(() => import('../components/skills').then(module => ({ default: module.SkillsManager })))
+// 侧栏搜索按钮与常规模式顶栏同一个弹窗, 按需下载, 不占简易模式首屏体积
+// The sidebar search button reuses the regular-mode top-bar dialog, loaded on demand
+const SearchModal = lazyWithRetry(() => import('../components/search-modal').then(module => ({ default: module.SearchModal })))
 
 type RecentSession = {
   session_id: string
@@ -220,11 +215,6 @@ export default function EasyModePage() {
   const [error, setError] = useState('')
   const [projectFilterOpen, setProjectFilterOpen] = useState(false)
   const [projectFilterQuery, setProjectFilterQuery] = useState('')
-  const [sessionQuery, setSessionQuery] = useState('')
-  const [hierarchySearch, setHierarchySearch] = useState<ProjectHierarchySearchResponse>(EMPTY_PROJECT_HIERARCHY_SEARCH)
-  const [hierarchySearchLoading, setHierarchySearchLoading] = useState(false)
-  const [hierarchySearchError, setHierarchySearchError] = useState('')
-  const [openingSearchResult, setOpeningSearchResult] = useState('')
   const [lookupFailedSessionId, setLookupFailedSessionId] = useState('')
   const [createKind, setCreateKind] = useState<CreateKind | null>(null)
   // 首屏由 URL 决定: 带 ?session= 直接落到对应会话, 不带才停在「新任务」欢迎页。
@@ -248,7 +238,7 @@ export default function EasyModePage() {
   const [createSuccessToast, setCreateSuccessToast] = useState<{ name: string } | null>(null)
   const [projectSuccessToast, setProjectSuccessToast] = useState<{ name: string } | null>(null)
   const [collapsedSessionGroups, setCollapsedSessionGroups] = useState<Set<string>>(() => new Set())
-  const [sessionSearchOpen, setSessionSearchOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   const [sessionListMode, setSessionListMode] = useState<SessionListMode>(readListMode)
   const [contextTab, setContextTab] = useState<'skills' | 'memories'>('skills')
   const [remotes, setRemotes] = useState<any[]>([])
@@ -318,10 +308,6 @@ export default function EasyModePage() {
     projectSessions.filter(session => sessionMatchesView(session, workView))
   ), [projectSessions, workView])
   const visibleSessionGroups = useMemo(() => buildRecentSessionTreeGroups(visibleSessions), [visibleSessions])
-  const normalizedSessionQuery = sessionQuery.trim().slice(0, 200)
-  const activeHierarchySearch = hierarchySearch.query === normalizedSessionQuery
-    ? hierarchySearch
-    : { ...EMPTY_PROJECT_HIERARCHY_SEARCH, query: normalizedSessionQuery }
 
   const selectedSession = sessions.find(session => session.session_id === sessionParam) || null
   const contextMatchesProject = !!selectedSession && (!effectiveProject || selectedSession.project_id === effectiveProject)
@@ -349,33 +335,6 @@ export default function EasyModePage() {
       document.removeEventListener('keydown', closeOnEscape)
     }
   }, [projectFilterOpen])
-
-  useEffect(() => {
-    if (!normalizedSessionQuery) {
-      setHierarchySearch(EMPTY_PROJECT_HIERARCHY_SEARCH)
-      setHierarchySearchLoading(false)
-      setHierarchySearchError('')
-      return
-    }
-    const controller = new AbortController()
-    setHierarchySearchLoading(true)
-    setHierarchySearchError('')
-    const timer = window.setTimeout(() => {
-      api(`/api/projects/hierarchy-search?q=${encodeURIComponent(normalizedSessionQuery)}`, { signal: controller.signal })
-        .then((result: ProjectHierarchySearchResponse) => setHierarchySearch(result))
-        .catch((err: any) => {
-          if (err?.name === 'AbortError') return
-          setHierarchySearchError('全部工作搜索暂时不可用，请稍后重试')
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setHierarchySearchLoading(false)
-        })
-    }, 300)
-    return () => {
-      window.clearTimeout(timer)
-      controller.abort()
-    }
-  }, [normalizedSessionQuery])
 
   useEffect(() => {
     if (!layoutMode || layoutMode === 'easy_mode') return
@@ -629,7 +588,6 @@ export default function EasyModePage() {
     setSearch(next)
     setProjectFilterOpen(false)
     setProjectFilterQuery('')
-    setSessionQuery('')
   }
 
   const toggleSessionGroup = (groupKey: string) => {
@@ -896,56 +854,6 @@ export default function EasyModePage() {
     })
   }
 
-  const openSearchSession = async (group: ProjectHierarchyGroup, hit: ProjectHierarchyHit) => {
-    const resultKey = `${hit.kind}:${hit.id}`
-    setOpeningSearchResult(resultKey)
-    setHierarchySearchError('')
-    try {
-      let session: RecentSession | null = null
-      if (hit.kind === 'session' || hit.kind === 'research_agent') {
-        session = await api(`/api/tasks/${encodeURIComponent(hit.id)}`)
-      } else {
-        const endpoint = hit.kind === 'research'
-          ? `/api/researches/${encodeURIComponent(hit.id)}/sessions`
-          : `/api/issues/${encodeURIComponent(hit.id)}/sessions`
-        const list = await api(endpoint)
-        session = Array.isArray(list) && list.length > 0 ? list[0] : null
-        if (!session) {
-          if (hit.kind === 'issue') {
-            setSessionQuery('')
-            selectProjectFilter(String(group.project.id))
-            openCreateSession(hit.id)
-            return
-          }
-          throw new Error('这个研究还没有可继续的智能体')
-        }
-      }
-      if (!session) throw new Error('没有可打开的会话')
-      const decorated: RecentSession = {
-        ...session,
-        session_id: session.session_id,
-        project_id: session.project_id || String(group.project.id),
-        project_name: session.project_name || group.project.name,
-        issue_id: session.issue_id || (hit.parent_kind === 'issue' ? hit.parent_id : hit.kind === 'issue' ? hit.id : null),
-        issue_title: session.issue_title || (hit.parent_kind === 'issue' ? hit.parent_title : hit.kind === 'issue' ? hit.title : null),
-        research_id: session.research_id || (hit.parent_kind === 'research' ? hit.parent_id : hit.kind === 'research' ? hit.id : null),
-        research_title: session.research_title || (hit.parent_kind === 'research' ? hit.parent_title : hit.kind === 'research' ? hit.title : null),
-        scope_type: session.scope_type || (hit.kind === 'research' || hit.kind === 'research_agent' ? 'research' : 'issue'),
-      }
-      setSessions(current => [decorated, ...current.filter(item => item.session_id !== decorated.session_id)])
-      const next = new URLSearchParams(search)
-      next.set('project', String(group.project.id))
-      next.set('session', decorated.session_id)
-      next.delete('view')
-      setSearch(next)
-      setSessionQuery('')
-    } catch (err: any) {
-      setHierarchySearchError(err?.message || '无法打开这项工作')
-    } finally {
-      setOpeningSearchResult('')
-    }
-  }
-
   const handleDeleteSession = async () => {
     if (!deletingSession) return
     const deletedSessionId = deletingSession.session_id
@@ -1039,7 +947,9 @@ export default function EasyModePage() {
                 </>
               )}
             </span>
-            <button type="button" className={sessionSearchOpen ? 'is-active' : ''} onClick={() => setSessionSearchOpen(value => !value)} title="搜索项目、任务或会话" aria-label="搜索项目、任务或会话">
+            {/* 与常规模式顶栏搜索按钮同一行为: 打开弹窗搜索, 不再内联展开侧栏输入框 */}
+            {/* Same as the regular-mode top-bar search button: opens the search dialog instead of an inline field */}
+            <button type="button" onClick={() => setSearchOpen(true)} title="搜索会话内容" aria-label="搜索会话内容">
               <SearchIcon className="h-4 w-4" />
             </button>
             <button type="button" onClick={toggleListMode} title={sessionListMode === 'grouped' ? '切换为最近会话列表' : '切换为项目任务分组'} aria-label="切换会话列表模式">
@@ -1050,46 +960,8 @@ export default function EasyModePage() {
             </button>
           </div>
 
-          {sessionSearchOpen && (
-            <label className="easy-sidebar-search">
-              <SearchIcon className="h-3.5 w-3.5 flex-shrink-0" />
-              <input
-                value={sessionQuery}
-                onChange={event => setSessionQuery(event.target.value)}
-                maxLength={200}
-                placeholder="搜索全部工作"
-                aria-label="搜索全部项目、任务或会话"
-                autoFocus
-              />
-              {hierarchySearchLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : sessionQuery ? (
-                <button type="button" onClick={() => setSessionQuery('')} aria-label="清空搜索"><X className="h-3.5 w-3.5" /></button>
-              ) : null}
-            </label>
-          )}
-
           <div className="easy-sidebar-list" data-testid="easy-recent-sessions">
-            {normalizedSessionQuery ? (
-              <div data-testid="easy-global-search-results">
-                <div className="easy-sidebar-list__meta">{hierarchySearchLoading ? '正在搜索…' : `${activeHierarchySearch.match_count} 条匹配`}</div>
-                {hierarchySearchError ? <div className="easy-sidebar-empty">{hierarchySearchError}</div> : null}
-                {!hierarchySearchLoading && !hierarchySearchError && activeHierarchySearch.projects.length === 0 ? <div className="easy-sidebar-empty">没有找到相关工作</div> : null}
-                {activeHierarchySearch.projects.map(group => (
-                  <section key={group.project.id} className="easy-search-group">
-                    <div className="easy-search-group__title"><FolderOpen className="h-3.5 w-3.5" /><span>{group.project.name || group.project.id}</span></div>
-                    {group.matches.map(hit => {
-                      const key = `${hit.kind}:${hit.id}`
-                      return (
-                        <button key={key} type="button" className="easy-search-hit" onClick={() => void openSearchSession(group, hit)} disabled={!!openingSearchResult}>
-                          <span>{hierarchyHitLabel(hit.kind)}</span>
-                          <strong>{hit.title || hit.id}</strong>
-                          {openingSearchResult === key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                        </button>
-                      )
-                    })}
-                  </section>
-                ))}
-              </div>
-            ) : loading ? (
+            {loading ? (
               <div className="easy-sidebar-empty">正在加载会话…</div>
             ) : error ? (
               <div className="easy-sidebar-empty">{error}</div>
@@ -1310,6 +1182,11 @@ export default function EasyModePage() {
             setEditingSession(null)
           }}
         />
+        </Suspense>
+      )}
+      {searchOpen && (
+        <Suspense fallback={null}>
+          <SearchModal onClose={() => setSearchOpen(false)} onNavigate={navigate} />
         </Suspense>
       )}
       {deletingSession && (
