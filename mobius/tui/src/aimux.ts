@@ -13,6 +13,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import extract from 'extract-zip'
 import { mobiusHome } from './config.js'
+import { windowsElevated } from './lib/windows-admin.js'
 
 export type AimuxState = 'starting' | 'connected' | 'failed' | 'stopped' | 'disabled'
 export type AimuxPhase = 'idle' | 'python' | 'venv' | 'install' | 'connecting' | 'heartbeat' | 'retrying' | 'connected'
@@ -366,18 +367,98 @@ export function aimuxWorkspaceHash(username = currentUsername(), cwd = process.c
 }
 
 // ── GUI (computer use) authorization ─────────────────────────────────────
-// Machine-level choice made in the first-run wizard. It has three states
-// because "let the agent drive my screen" and "let aimux ask Windows for
-// administrator rights" are separate decisions: elevation is what puts a UAC
-// prompt on screen every time the daemon starts, and plenty of people want the
-// tool without the popup.
+// Machine-level choice made in the first-run wizard.
+//
+// The daemon's privilege is decided by this TUI's own privilege, once, and is
+// never negotiated at start time. A TUI must never ask Windows for rights it
+// does not already have: aimux satisfies such a request with
+// ShellExecuteW("runas"), which is synchronous and raises its consent prompt on
+// the secure desktop — a prompt nobody answers blocks the daemon *before* it
+// writes any state or starts its watchdog, leaving an immortal process the
+// supervisor can neither see nor kill. So:
+//
+//   unelevated TUI  --enable-gui --gui-no-elevate   (nothing is ever requested)
+//   elevated TUI    --enable-gui                    (aimux sees it is already
+//                                                    administrator and stays put)
+//
+// That is also why the modes are exclusive: a child inherits the parent's token,
+// so an elevated TUI cannot produce a low-privilege daemon, and an unelevated
+// one cannot produce an elevated daemon without prompting.
+//
 //   off        no GUI helper at all; registers as tui-<host>-<hash>
-//   no-elevate GUI helper, stays unelevated (--gui-no-elevate): no UAC, but
-//              Windows UIPI then blocks input into elevated windows
-//   elevate    GUI helper + one UAC prompt per daemon start; the only mode
-//              that can drive administrator windows
+//   no-elevate GUI helper, unelevated: Windows UIPI then blocks input into
+//              elevated windows
+//   elevate    GUI helper that can also drive administrator windows
 // Either authorized mode registers as gui-<host>-<hash>.
 export type GuiMode = 'off' | 'no-elevate' | 'elevate'
+
+/** Whether a mode can be offered here, and if not, what the user must change. */
+export interface GuiModeAvailability { available: boolean; reason?: string }
+
+const ADMIN_REASON = '请用管理员模式打开 Mobius TUI'
+const NON_ADMIN_REASON = '请用非管理员模式打开 Mobius TUI'
+
+/**
+ * Which GUI modes this machine can provide. Availability follows from the
+ * exclusive rule above: exactly one of the two authorized modes is offerable,
+ * and which one is decided by the TUI's own token.
+ */
+export function guiModeAvailability(
+  elevated: boolean,
+  platform: NodeJS.Platform = process.platform,
+): Record<GuiMode, GuiModeAvailability> {
+  return {
+    off: { available: true },
+    'no-elevate': platform === 'win32' && elevated
+      ? { available: false, reason: NON_ADMIN_REASON }
+      : { available: true },
+    // Off Windows there is no elevation to speak of, so the mode is always fine.
+    elevate: platform !== 'win32' || elevated ? { available: true } : { available: false, reason: ADMIN_REASON },
+  }
+}
+
+/**
+ * The GUI authorization picker's rows. An unavailable mode stays visible with
+ * the reason in its label — the user needs to know *why* the level they want is
+ * out of reach, and what to do about it.
+ */
+export function guiModeOptions(
+  elevated: boolean,
+  platform: NodeJS.Platform = process.platform,
+): Array<{ label: string; value: GuiMode; desc?: string; disabled?: boolean }> {
+  const availability = guiModeAvailability(elevated, platform)
+  const label = (name: string, mode: GuiMode): string => {
+    const a = availability[mode]
+    return a.available ? `授权使用图形界面（${name}）` : `授权使用图形界面（${name} - 不可用，${a.reason}）`
+  }
+  const rows: Array<{ label: string; value: GuiMode; desc?: string; disabled?: boolean }> = [
+    { label: '使用纯命令行操作（推荐）', value: 'off', desc: '仅命令行/文件方式操作本机' },
+  ]
+  // Off Windows there is no elevation request to skip, so the middle choice
+  // would be identical to the last one; only offer it where it means something.
+  if (platform === 'win32') {
+    rows.push({
+      label: label('低权限', 'no-elevate'),
+      value: 'no-elevate',
+      desc: availability['no-elevate'].available ? '不弹 UAC；能操作普通窗口，管理员窗口不行' : undefined,
+      disabled: !availability['no-elevate'].available,
+    })
+  }
+  rows.push({
+    label: label('高权限', 'elevate'),
+    value: 'elevate',
+    desc: availability.elevate.available
+      ? (platform === 'win32' ? '可操作管理员窗口（TUI 已是管理员，不会弹 UAC）' : '启用界面操作工具')
+      : undefined,
+    disabled: !availability.elevate.available,
+  })
+  return rows
+}
+
+/** Platforms where a computer-use helper exists at all, so the GUI choice applies. */
+export function hasGuiSupport(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' || platform === 'darwin'
+}
 
 const GUI_AUTH_FILE = 'tui-gui-authorized.json'
 let guiModeCache: GuiMode | undefined = undefined
@@ -860,10 +941,34 @@ let cachedEnableGui: boolean | undefined = undefined
 // help text and only consulted while --enable-gui is being sent.
 let cachedGuiNoElevate: boolean | undefined = undefined
 
-/** GUI flags to actually send: the user authorized GUI *and* this aimux build advertises them. */
+/**
+ * The GUI flags to send, given the stored mode, this TUI's own privilege and
+ * what the installed aimux advertises.
+ *
+ * Pure so the rule can be tested directly. The rule is that an unelevated TUI may
+ * only ever send the pair that requests nothing; when the installed build cannot
+ * express that, it sends no GUI flags at all rather than risk a daemon start that
+ * blocks on a consent prompt the supervisor can neither see nor clean up.
+ */
+export function pickGuiArgs(
+  mode: GuiMode,
+  elevated: boolean,
+  supports: { enable: boolean; noElevate: boolean },
+  platform: NodeJS.Platform = process.platform,
+): { enableGui: boolean; guiNoElevate: boolean } {
+  if (mode === 'off' || !supports.enable) return { enableGui: false, guiNoElevate: false }
+  if (platform !== 'win32') return { enableGui: true, guiNoElevate: mode === 'no-elevate' && supports.noElevate }
+  if (elevated) return { enableGui: true, guiNoElevate: false }
+  return supports.noElevate ? { enableGui: true, guiNoElevate: true } : { enableGui: false, guiNoElevate: false }
+}
+
+/** pickGuiArgs bound to the stored mode, this process's token and the probe caches. */
 function resolvedGuiArgs(): { enableGui: boolean; guiNoElevate: boolean } {
-  const enableGui = tuiGuiAuthorized() && cachedEnableGui === true
-  return { enableGui, guiNoElevate: enableGui && tuiGuiNoElevate() && cachedGuiNoElevate === true }
+  return pickGuiArgs(
+    tuiGuiMode(),
+    windowsElevated(),
+    { enable: cachedEnableGui === true, noElevate: cachedGuiNoElevate === true },
+  )
 }
 
 export async function startAimuxConnection(opts: StartOptions): Promise<void> {

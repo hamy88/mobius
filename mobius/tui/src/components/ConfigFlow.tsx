@@ -27,7 +27,11 @@ import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
 } from '../config.js'
-import { tuiAimuxIdentifier, tuiGuiAuthorized} from '../aimux.js'
+import {
+  guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange,
+  setTuiGuiMode, tuiAimuxIdentifier, tuiGuiAuthorized, tuiGuiMode, type GuiMode,
+} from '../aimux.js'
+import { windowsElevated } from '../lib/windows-admin.js'
 import type { Issue, Project, SessionModelOption } from '../types.js'
 
 export interface ConfigResult {
@@ -133,12 +137,16 @@ export function ConfigFlow({ client, issue, onDone }: {
 
 // ── /config: full reconfigure (project → issue → model) ─────────────────────
 
-type ReconfigStep = 'projects' | 'issues' | 'models' | 'creating'
+type ReconfigStep = 'projects' | 'issues' | 'models' | 'gui' | 'creating'
 
-export function ReconfigFlow({ client, onDone, onCancel }: {
+export function ReconfigFlow({ client, onDone, onCancel, platform = process.platform, elevated = windowsElevated() }: {
   client: MobiusClient
   onDone: (r: ConfigResult) => void
   onCancel: () => void
+  /** Overridable so tests can exercise the platform-gated GUI step anywhere. */
+  platform?: NodeJS.Platform
+  /** Overridable so tests can exercise the elevated branch anywhere. */
+  elevated?: boolean
 }) {
   const [step, setStep] = useState<ReconfigStep>('projects')
   const [projects, setProjects] = useState<Project[] | null>(null)
@@ -148,6 +156,7 @@ export function ReconfigFlow({ client, onDone, onCancel }: {
   const [models, setModels] = useState<SessionModelOption[] | null>(null)
   const [defaultKey, setDefaultKey] = useState<string | null>(null)
   const [status, setStatus] = useState('')
+  const [pendingModel, setPendingModel] = useState<string | null>(null)
   const [createName, setCreateName] = useState('')
   const [createMode, setCreateMode] = useState<'project' | 'issue' | null>(null)
   const doneRef = useRef(false)
@@ -157,6 +166,10 @@ export function ReconfigFlow({ client, onDone, onCancel }: {
     // The focused TextInput owns Esc while a create form is open. Returning
     // here prevents the same raw key from also navigating the underlying step.
     if (createMode !== null) return
+    if (step === 'gui') {
+      setStep('models')
+      return
+    }
     if (step === 'models') {
       setIssue(null)
       setStep('issues')
@@ -263,8 +276,25 @@ export function ReconfigFlow({ client, onDone, onCancel }: {
     } catch (e: any) { if (!doneRef.current) setStatus(`创建任务失败: ${e?.message ?? e}`) }
   }
 
-  // ── model → session ───────────────────────────────────────────────────────
+  // ── model → gui → session ─────────────────────────────────────────────────
   async function pickModel(model: string) {
+    if (!project || !issue) return
+    // The GUI choice is machine-level and lives here so it can be revisited
+    // without re-running the first-run wizard.
+    if (hasGuiSupport(platform)) { setPendingModel(model); setStep('gui'); return }
+    await createSession(model)
+  }
+
+  /** Commit the GUI choice, then create the session the model step deferred. */
+  async function applyGuiMode(mode: GuiMode, model: string) {
+    if (tuiGuiMode() !== mode) {
+      setTuiGuiMode(mode)
+      void restartAimuxConnectionForGuiChange()
+    }
+    await createSession(model)
+  }
+
+  async function createSession(model: string) {
     if (!project || !issue) return
     setStep('creating')
     try {
@@ -398,6 +428,23 @@ export function ReconfigFlow({ client, onDone, onCancel }: {
                   />}
           </Box>
           <Text color="gray">↑↓ 选择 · 回车确认 · Esc 取消</Text>
+        </Box>
+      ) : null}
+
+      {step === 'gui' ? (
+        <Box flexDirection="column">
+          <Text bold color="cyan">AIMUX 图形界面授权</Text>
+          <Text color="gray">项目: {project?.name} · 任务: {issue?.title}</Text>
+          <Box marginTop={1}>
+            <Select
+              items={guiModeOptions(elevated, platform).map(row => ({
+                ...row,
+                label: `${row.label}${tuiGuiMode() === row.value ? ' · 当前' : ''}`,
+              }))}
+              onSelect={v => void applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off', pendingModel!)}
+            />
+          </Box>
+          <Text color="gray">↑↓ 选择 · 回车确认 · Esc 返回</Text>
         </Box>
       ) : null}
     </Box>

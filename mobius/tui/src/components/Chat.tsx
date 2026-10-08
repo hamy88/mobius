@@ -62,7 +62,7 @@ const SLASH_COMMANDS = [
   { cmd: '/compact', desc: '压缩当前会话上下文' },
   { cmd: '/resume', desc: '恢复一个历史会话' },
   { cmd: '/model', desc: '更换模型并开启新会话（保留当前任务）' },
-  { cmd: '/config', desc: '重新选择项目、任务和模型' },
+  { cmd: '/config', desc: '重新选择项目、任务、模型和 AIMUX 图形界面授权' },
   { cmd: '/logout', desc: '断开当前连接并返回登录界面' },
   { cmd: '/help', desc: '显示帮助' },
   { cmd: '/version', desc: '显示 TUI、AIMUX 和运行环境版本' },

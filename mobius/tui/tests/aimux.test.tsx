@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest, pidAlive, aimuxWorkspaceHash } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest, pidAlive, aimuxWorkspaceHash, guiModeAvailability, guiModeOptions, pickGuiArgs, hasGuiSupport } from '../src/aimux.js'
 import { parseElevatedGroups } from '../src/lib/windows-admin.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -411,6 +411,46 @@ Mandatory Label\\Medium Mandatory Level  Label  S-1-16-8192`
   ok(parseElevatedGroups('') === false, 'empty output falls back to not-elevated')
 }
 
+function testGuiModeAvailability() {
+  console.log('\n[AIMUX 6g] GUI modes available here, and the flags they imply')
+  // Availability follows from the exclusive rule: a child inherits the parent's
+  // token, so exactly one authorized mode is offerable on Windows.
+  const admin = guiModeAvailability(true, 'win32')
+  const plain = guiModeAvailability(false, 'win32')
+  ok(admin.off.available && admin.elevate.available, 'an elevated TUI can offer command-line and high privilege')
+  ok(!admin['no-elevate'].available, 'an elevated TUI cannot offer low privilege — it cannot drop the inherited token')
+  ok(admin['no-elevate'].reason?.includes('非管理员模式') === true, 'and says to reopen non-elevated')
+  ok(plain.off.available && plain['no-elevate'].available, 'an unelevated TUI can offer command-line and low privilege')
+  ok(!plain.elevate.available, 'an unelevated TUI can never offer high privilege')
+  ok(plain.elevate.reason?.includes('管理员模式') === true, 'and says to reopen as administrator')
+  ok(guiModeAvailability(false, 'darwin').elevate.available, 'off Windows there is no elevation to gate on')
+  ok(hasGuiSupport('win32') && hasGuiSupport('darwin') && !hasGuiSupport('linux'), 'the GUI choice exists only where a helper does')
+
+  // The picker rows keep the unavailable mode visible, with the reason in the label.
+  const rows = guiModeOptions(false, 'win32')
+  ok(rows.length === 3, 'three rows are offered on Windows')
+  ok(rows[0].label === '使用纯命令行操作（推荐）', 'row 1 keeps the agreed wording')
+  ok(rows[1].label === '授权使用图形界面（低权限）', 'an available mode carries no suffix')
+  ok(rows[2].label === '授权使用图形界面（高权限 - 不可用，请用管理员模式打开 Mobius TUI）', 'row 3 says exactly why it is out of reach')
+  ok(rows[2].disabled === true, 'and is marked unselectable')
+  ok(guiModeOptions(true, 'win32')[1].label === '授权使用图形界面（低权限 - 不可用，请用非管理员模式打开 Mobius TUI）', 'the mirrored case reads the same way')
+  ok(guiModeOptions(true, 'darwin').length === 2, 'macOS is offered no middle row')
+
+  // The rule that actually reaches the daemon: an unelevated TUI may only ever
+  // send the pair that asks Windows for nothing.
+  const canBoth = { enable: true, noElevate: true }
+  ok(pickGuiArgs('off', false, canBoth, 'win32').enableGui === false, 'command-line mode sends no GUI flags')
+  ok(pickGuiArgs('elevate', true, canBoth, 'win32').guiNoElevate === false, 'elevated + high privilege sends the bare flag')
+  ok(pickGuiArgs('no-elevate', false, canBoth, 'win32').guiNoElevate === true, 'unelevated + low privilege sends --gui-no-elevate')
+  const stored = pickGuiArgs('elevate', false, canBoth, 'win32')
+  ok(stored.enableGui === true && stored.guiNoElevate === true, 'a stored high-privilege choice is downgraded when this TUI is not elevated')
+  const noSupport = pickGuiArgs('elevate', false, { enable: true, noElevate: false }, 'win32')
+  ok(noSupport.enableGui === false, 'without --gui-no-elevate the unelevated TUI sends nothing rather than risk a blocking prompt')
+  ok(pickGuiArgs('elevate', true, { enable: true, noElevate: false }, 'win32').enableGui === true, 'the elevated TUI is unaffected by that gap')
+  ok(pickGuiArgs('elevate', false, { enable: false, noElevate: true }, 'win32').enableGui === false, 'an aimux without --enable-gui gets no GUI flags at all')
+  ok(pickGuiArgs('elevate', false, canBoth, 'darwin').guiNoElevate === false, 'macOS has no elevation request, so it stays on the bare flag')
+}
+
 function testVersionAtLeast() {
   console.log('\n[AIMUX 6e] aimux pin is a floor, not an exact match')
   // /upgrade 装的是 PyPI 最新版，通常比 pin 新；不能被 pin 校验判成"没装好"又拽回去。
@@ -501,6 +541,7 @@ async function main() {
   await testGuiAuthorization()
   await testGuiModes()
   testElevationDetection()
+  testGuiModeAvailability()
   testVersionAtLeast()
   testAimuxIdentifierScopesWorkspace()
   testBundleHealthCheck()

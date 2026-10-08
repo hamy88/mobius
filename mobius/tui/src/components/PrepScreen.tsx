@@ -15,7 +15,7 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Select, TextInput, type SelectItem } from './primitives.js'
 import { MobiusClient } from '../api.js'
-import { restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
+import { guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
 import { windowsElevated } from '../lib/windows-admin.js'
 import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
@@ -24,13 +24,10 @@ import {
 import type { Issue, Memory, Project, SessionModelOption, Skill } from '../types.js'
 
 export type PrefStep = 'issue' | 'model' | 'language' | 'gui' | 'skills' | 'memories'
-// GUI authorization is only meaningful where a computer-use helper exists
-// (Windows/macOS in this release); other platforms never see the step.
-const GUI_STEP_PLATFORMS: NodeJS.Platform[] = ['win32', 'darwin']
 /** A function rather than a constant so tests can reach the platform-gated
  *  GUI step on any host (they pass `platform` to PrepScreen). */
 export function stepOrderFor(platform: NodeJS.Platform): PrefStep[] {
-  return GUI_STEP_PLATFORMS.includes(platform)
+  return hasGuiSupport(platform)
     ? ['model', 'language', 'gui', 'skills', 'memories']
     : ['model', 'language', 'skills', 'memories']
 }
@@ -51,9 +48,6 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
   elevated?: boolean
 }) {
   const stepOrder = stepOrderFor(platform)
-  const isWin = platform === 'win32'
-  /** A UAC prompt appears only when Windows must be asked for rights we lack. */
-  const willPromptForElevation = () => isWin && !elevated
   const [phase, setPhase] = useState<'loading' | 'project' | 'pref' | 'done'>('loading')
   const [projects, setProjects] = useState<Project[]>([])
   const [project, setProject] = useState<Project | null>(null)
@@ -67,10 +61,6 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
   const [memories, setMemories] = useState<Memory[]>([])
   const [defaultModel, setDefaultModel] = useState<string | null>(null)
   const [statusMsg, setStatusMsg] = useState<string>('')
-  // GUI 授权的确认子屏: 选"是"后先停下来高亮提醒(Windows 会弹 UAC), 用户再确认才真正生效
-  // GUI authorization confirm sub-screen: pause with a highlighted notice (a
-  // UAC prompt follows on Windows) before the choice takes effect.
-  const [guiConfirm, setGuiConfirm] = useState(false)
   const thisCwd = cwd()
 
   // ── bootstrap ────────────────────────────────────────────────────────────
@@ -192,11 +182,6 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
     onReady({ project, issue: iss, prefs: p })
   }
 
-  /** Suffix marking the option this machine is currently set to. */
-  function markGuiMode(mode: GuiMode): string {
-    return tuiGuiMode() === mode ? ' · 当前' : ''
-  }
-
   /** Commit the wizard's GUI choice, then swap the daemon when it changed.
    *  Both the identifier (tui-⇄gui-) and the reverse-connect flags differ per
    *  mode, and the old daemon cannot be retargeted in place. */
@@ -254,67 +239,17 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
           items={[{ label: '中文', value: 'zh' }, { label: 'English', value: 'en' }]}
           onSelect={v => completeStep('language', { language: v as 'zh' | 'en' })} />
       : null}
-    {step === 'gui' && !guiConfirm
+    {step === 'gui'
       ? <Select
           title="是否授权操作图形界面 (GUI/computer use)"
-          items={[
-            { label: `使用纯命令行操作（推荐）${markGuiMode('off')}`, value: 'off', desc: '仅命令行/文件方式操作本机' },
-            // No elevation request to skip off Windows, so the middle choice
-            // would be the same as the last one; only offer it where it means
-            // something.
-            ...(platform === 'win32'
-              ? [{
-                  label: `授权使用图形界面（低权限）${markGuiMode('no-elevate')}`,
-                  value: 'no-elevate',
-                  // On an elevated terminal this cannot actually drop rights —
-                  // --gui-no-elevate only skips a request for rights we already
-                  // have, since children inherit the token.
-                  desc: elevated
-                    ? '不弹 UAC（终端已是管理员，权限无法再降）'
-                    : '不弹 UAC；能操作普通窗口，管理员窗口不行',
-                }]
-              : []),
-            {
-              label: `授权使用图形界面（高权限）${markGuiMode('elevate')}`,
-              value: 'elevate',
-              desc: !isWin ? '启用界面操作工具'
-                : elevated ? '已是管理员，不会弹 UAC；可操作管理员窗口'
-                : '每次启动 aimux 弹一次 UAC；可操作管理员窗口',
-            },
-          ]}
-          onSelect={v => {
-            if (v === 'elevate' && willPromptForElevation()) {
-              // 先停在确认屏: 让用户对即将出现的系统授权弹窗有预期, 不做突袭
-              // Pause on the confirm screen first so the OS prompt never
-              // ambushes the user. The other choices — and this one from an
-              // already-elevated terminal — raise no prompt, so they go
-              // straight through.
-              setGuiConfirm(true)
-              return
-            }
-            applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off')
-          }} />
-      : null}
-    {step === 'gui' && guiConfirm
-      ? <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-          <Text bold color="yellow">⚠ 即将授权操作图形界面</Text>
-          <Text color="yellow">确认后系统会弹出 UAC 管理员授权窗口，请留意屏幕上的弹窗并点击确认。</Text>
-          <Text color="yellow">授权后本机以 gui- 前缀注册，智能体可以操作本机图形界面（含管理员窗口）。</Text>
-          <Text color="gray">不想看到 UAC 就返回上一题选「授权使用图形界面（低权限）」。</Text>
-          <Box marginTop={1}>
-            <Select
-              title="继续吗？"
-              items={[
-                { label: '继续并授权', value: 'go', desc: '回车后请到 UAC 弹窗点击"是"' },
-                { label: '取消', value: 'cancel', desc: '返回上一题，不做任何改动' },
-              ]}
-              onSelect={v => {
-                if (v !== 'go') { setGuiConfirm(false); return }
-                setGuiConfirm(false)
-                applyGuiMode('elevate')
-              }} />
-          </Box>
-        </Box>
+          // Rows come from the shared builder so the wizard and /config cannot
+          // drift: a mode this machine cannot provide stays visible, disabled,
+          // with the reason in its label.
+          items={guiModeOptions(elevated, platform).map(row => ({
+            ...row,
+            label: `${row.label}${tuiGuiMode() === row.value ? ' · 当前' : ''}`,
+          }))}
+          onSelect={v => applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off')} />
       : null}
     {step === 'skills'
       ? <MultiPicker title={`选择启用的 Skill（默认全部启用，空格取消）`} items={toItems(skills)}
