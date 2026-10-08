@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest, pidAlive, aimuxWorkspaceHash, guiModeAvailability, guiModeOptions, pickGuiArgs, hasGuiSupport } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest, pidAlive, aimuxWorkspaceHash, guiModeAvailability, guiModeOptions, pickGuiArgs, hasGuiSupport, effectiveGuiMode } from '../src/aimux.js'
 import { parseElevatedGroups } from '../src/lib/windows-admin.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -449,6 +449,14 @@ function testGuiModeAvailability() {
   ok(pickGuiArgs('elevate', true, { enable: true, noElevate: false }, 'win32').enableGui === true, 'the elevated TUI is unaffected by that gap')
   ok(pickGuiArgs('elevate', false, { enable: false, noElevate: true }, 'win32').enableGui === false, 'an aimux without --enable-gui gets no GUI flags at all')
   ok(pickGuiArgs('elevate', false, canBoth, 'darwin').guiNoElevate === false, 'macOS has no elevation request, so it stays on the bare flag')
+
+  // The picker's "current" marker must point at the mode in force, which
+  // availability can have moved off the stored one.
+  ok(effectiveGuiMode('elevate', true, 'win32') === 'elevate', 'an elevated TUI uses the stored high privilege')
+  ok(effectiveGuiMode('elevate', false, 'win32') === 'no-elevate', 'the same choice from an ordinary TUI reports as low privilege')
+  ok(effectiveGuiMode('no-elevate', true, 'win32') === 'elevate', 'and the mirror case reports high privilege')
+  ok(effectiveGuiMode('off', false, 'win32') === 'off', 'command-line mode is never moved')
+  ok(effectiveGuiMode('elevate', false, 'darwin') === 'elevate', 'macOS is unaffected')
 }
 
 function testVersionAtLeast() {

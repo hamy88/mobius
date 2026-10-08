@@ -15,7 +15,7 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Select, TextInput, type SelectItem } from './primitives.js'
 import { MobiusClient } from '../api.js'
-import { guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
+import { effectiveGuiMode, guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
 import { windowsElevated } from '../lib/windows-admin.js'
 import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
@@ -48,6 +48,8 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
   elevated?: boolean
 }) {
   const stepOrder = stepOrderFor(platform)
+  // Mark the mode in force, which availability can have moved off the stored one.
+  const effective = effectiveGuiMode(tuiGuiMode(), elevated, platform)
   const [phase, setPhase] = useState<'loading' | 'project' | 'pref' | 'done'>('loading')
   const [projects, setProjects] = useState<Project[]>([])
   const [project, setProject] = useState<Project | null>(null)
@@ -247,7 +249,7 @@ export function PrepScreen({ client, onReady, onQuit, platform = process.platfor
           // with the reason in its label.
           items={guiModeOptions(elevated, platform).map(row => ({
             ...row,
-            label: `${row.label}${tuiGuiMode() === row.value ? ' · 当前' : ''}`,
+            label: `${row.label}${effective === row.value ? ' · 当前' : ''}`,
           }))}
           onSelect={v => applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off')} />
       : null}

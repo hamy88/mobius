@@ -28,7 +28,7 @@ import {
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
 } from '../config.js'
 import {
-  guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange,
+  effectiveGuiMode, guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange,
   setTuiGuiMode, tuiAimuxIdentifier, tuiGuiAuthorized, tuiGuiMode, type GuiMode,
 } from '../aimux.js'
 import { windowsElevated } from '../lib/windows-admin.js'
@@ -439,7 +439,7 @@ export function ReconfigFlow({ client, onDone, onCancel, platform = process.plat
             <Select
               items={guiModeOptions(elevated, platform).map(row => ({
                 ...row,
-                label: `${row.label}${tuiGuiMode() === row.value ? ' · 当前' : ''}`,
+                label: `${row.label}${effectiveGuiMode(tuiGuiMode(), elevated, platform) === row.value ? ' · 当前' : ''}`,
               }))}
               onSelect={v => void applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off', pendingModel!)}
             />

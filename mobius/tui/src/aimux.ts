@@ -942,6 +942,24 @@ let cachedEnableGui: boolean | undefined = undefined
 let cachedGuiNoElevate: boolean | undefined = undefined
 
 /**
+ * The mode actually in force, as opposed to the stored preference. Availability
+ * can invalidate a stored choice — a machine-level 'elevate' picked from an
+ * administrator session, reopened from an ordinary one — and the daemon gets
+ * this, not what was stored. Mirrors pickGuiArgs so the picker's "current"
+ * marker cannot point at a mode this machine will not use.
+ */
+export function effectiveGuiMode(
+  mode: GuiMode = tuiGuiMode(),
+  elevated = windowsElevated(),
+  platform: NodeJS.Platform = process.platform,
+): GuiMode {
+  if (mode === 'off') return 'off'
+  if (guiModeAvailability(elevated, platform)[mode].available) return mode
+  if (platform !== 'win32') return mode
+  return elevated ? 'elevate' : 'no-elevate'
+}
+
+/**
  * The GUI flags to send, given the stored mode, this TUI's own privilege and
  * what the installed aimux advertises.
  *
