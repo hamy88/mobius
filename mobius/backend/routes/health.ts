@@ -80,6 +80,59 @@ router.get('/memory', (_req: express.Request, res: express.Response) => {
   res.json({ ...memCache.payload, cached: !fresh });
 });
 
+// ── 服务器 CPU 占用 ──
+// /proc/stat 的累计计数器只能靠两次采样求差得出使用率, 不能像内存那样即时读。
+// 方案: 模块加载即启动后台采样器, 每 30s 与上一次快照求差 → 使用率; 请求时
+// 直接返回最近一次采样结果 (含 cached 标记), 请求路径零阻塞、读取频率与轮询无关。
+interface CpuSnapshot { idle: number; total: number }
+let cpuPrev: CpuSnapshot | null = null;
+let cpuCache: { ts: number; payload: any } = { ts: 0, payload: null };
+
+function readCpuSnapshot(): CpuSnapshot | null {
+  try {
+    const line = fs.readFileSync('/proc/stat', 'utf8').split('\n')[0];
+    const parts = line.trim().split(/\s+/).slice(1).map(Number);
+    if (parts.length < 4 || parts.some((n) => !Number.isFinite(n))) return null;
+    // user nice system idle iowait irq softirq steal — 非 idle 全算忙碌
+    const idle = parts[3] + (parts[4] || 0);
+    const total = parts.reduce((a, b) => a + b, 0);
+    return { idle, total };
+  } catch {
+    return null;
+  }
+}
+
+function sampleCpuOnce(): void {
+  const snap = readCpuSnapshot();
+  if (!snap) return;
+  const now = Date.now();
+  if (cpuPrev) {
+    const idleDelta = snap.idle - cpuPrev.idle;
+    const totalDelta = snap.total - cpuPrev.total;
+    if (totalDelta > 0) {
+      const usedPercent = round1(Math.max(0, Math.min(100, (1 - idleDelta / totalDelta) * 100)));
+      cpuCache = {
+        ts: now,
+        payload: {
+          usedPercent,
+          cores: os.cpus().length,
+          loadavg1: round1(os.loadavg()[0] || 0),
+          sampledAt: new Date(now).toISOString(),
+        },
+      };
+    }
+  }
+  cpuPrev = snap;
+}
+
+sampleCpuOnce();
+setInterval(sampleCpuOnce, 30 * 1000).unref();
+
+router.get('/cpu', (_req: express.Request, res: express.Response) => {
+  const fresh = !!cpuCache.payload && Date.now() - cpuCache.ts < 60 * 1000;
+  res.json({ ...cpuCache.payload, cached: !fresh });
+});
+
 // ── 系统主盘占用 ──
 // 以根目录所在文件系统作为系统主盘。优先用 statfs 读取, 回退到 POSIX df。
 // 与内存端点一样使用模块级 60s 缓存, 避免多标签页并发时频繁采样。

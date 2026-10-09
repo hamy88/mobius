@@ -3,6 +3,7 @@ package com.mobius.momo.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -24,6 +26,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mobius.momo.data.ChangelogItem
+import com.mobius.momo.viewmodel.OtaDownloadPhase
+import com.mobius.momo.viewmodel.OtaDownloadUi
 import com.mobius.momo.viewmodel.ThresholdEvaluator
 import kotlinx.serialization.Serializable
 
@@ -385,4 +389,132 @@ private fun InfoBox(
     // remember 调用占位：onToggle 由调用方捕获；保留以备 hard_block 不可关闭场景下的可访问性
     remember(lines, expanded) { Unit }
     remember(onToggle) { Unit }
+}
+
+/**
+ * 0.4.4 OTA 下载进度对话框（替代 4 档弹窗"立即更新"后的 toast 占位）。
+ *
+ * 渲染当前下载阶段 + 进度条 + 已下载/总字节 + 按 phase 切换按钮：
+ * - Queued / Downloading → "后台下载" + "取消下载"
+ * - Verifying / Installing → 仅展示进度（按钮 disabled）
+ * - Done → 自动 3s 后由 VM 清空 state,这里也允许"关闭"
+ * - Failed → "重试" + "关闭"
+ *
+ * 与 4 档弹窗不同：仅一个按钮（"后台下载"）会保留下载但关闭对话框（用户切别的页面也能继续）。
+ * 全部 UI 由 [ui] 驱动；不允许在 Composable 里直接读 [MomoAppViewModel]。
+ *
+ * 注意：本对话框直接走 AlertDialog（不走 BaseOtaDialog）以便在 text 槽里渲染 LinearProgressIndicator，
+ * BaseOtaDialog 仅接受 String 类型的 body 字段。
+ */
+@Composable
+fun OtaDownloadDialog(
+    ui: OtaDownloadUi,
+    colors: OtaColors,
+    onBackground: () -> Unit,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val title = if (ui.phase == OtaDownloadPhase.Failed) "下载失败 v${ui.version}" else "正在下载 v${ui.version}"
+    val phaseLabel = when (ui.phase) {
+        OtaDownloadPhase.Queued -> "准备下载…"
+        OtaDownloadPhase.Downloading -> "下载中…"
+        OtaDownloadPhase.Verifying -> "校验中…"
+        OtaDownloadPhase.Installing -> "安装中…"
+        OtaDownloadPhase.Done -> "已提交安装"
+        OtaDownloadPhase.Failed -> "下载失败"
+    }
+    val downloaded = humanBytes(ui.bytesDownloaded)
+    val total = humanBytes(if (ui.assetSize > 0L) ui.assetSize else 0L)
+    val percent = (ui.fraction * 100).toInt().coerceIn(0, 100)
+    val bodyText = when (ui.phase) {
+        OtaDownloadPhase.Failed -> ui.errorMessage?.takeIf { it.isNotBlank() } ?: "下载失败，请稍后重试。"
+        OtaDownloadPhase.Done -> "已提交安装，请按系统提示完成升级。"
+        else -> "$downloaded / $total（$percent%）"
+    }
+    val dialogDismiss = when (ui.phase) {
+        // Failed/Done 允许点外部 dismiss;其它阶段保留对话框强制用户做选择
+        OtaDownloadPhase.Failed, OtaDownloadPhase.Done -> onDismiss
+        else -> { -> }
+    }
+    AlertDialog(
+        onDismissRequest = dialogDismiss,
+        containerColor = colors.background,
+        titleContentColor = colors.onBackground,
+        textContentColor = colors.onBackgroundMuted,
+        title = {
+            Text(
+                title,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    phaseLabel,
+                    fontSize = 13.sp,
+                    color = colors.onBackgroundMuted,
+                )
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { ui.fraction.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(8.dp),
+                    color = colors.accent,
+                    trackColor = colors.divider.copy(alpha = 0.3f),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    bodyText,
+                    fontSize = 14.sp,
+                    color = colors.onBackgroundMuted,
+                )
+            }
+        },
+        confirmButton = {
+            when (ui.phase) {
+                OtaDownloadPhase.Failed -> {
+                    TextButton(onClick = onDismiss) {
+                        Text("关闭", color = colors.onBackgroundMuted)
+                    }
+                    TextButton(onClick = onRetry) {
+                        Text("重试", color = colors.accent, fontWeight = FontWeight.Bold)
+                    }
+                }
+                OtaDownloadPhase.Done -> {
+                    TextButton(onClick = onDismiss) {
+                        Text("关闭", color = colors.accent, fontWeight = FontWeight.Bold)
+                    }
+                }
+                OtaDownloadPhase.Verifying, OtaDownloadPhase.Installing -> {
+                    TextButton(onClick = onCancel) {
+                        Text("取消下载", color = colors.danger)
+                    }
+                }
+                OtaDownloadPhase.Queued, OtaDownloadPhase.Downloading -> {
+                    TextButton(onClick = onBackground) {
+                        Text("后台下载", color = colors.onBackgroundMuted)
+                    }
+                    TextButton(onClick = onCancel) {
+                        Text("取消下载", color = colors.danger)
+                    }
+                }
+            }
+        },
+    )
+}
+
+/** 字节数 → 人类可读(B / KB / MB / GB)。下载进度文案显示用。 */
+private fun humanBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    var value = bytes.toDouble()
+    var unitIdx = 0
+    while (value >= 1024.0 && unitIdx < units.lastIndex) {
+        value /= 1024.0
+        unitIdx++
+    }
+    return if (unitIdx == 0) "${bytes} B" else String.format(java.util.Locale.US, "%.1f %s", value, units[unitIdx])
 }

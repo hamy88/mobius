@@ -111,6 +111,9 @@ app.use('/api/assistant', assistantRoutes);
 // Mobius Mobile OTA 公开 endpoint: 翻译 mobile-builds/manifest.json → OtaManifest schema.
 // 客户端 Android App 优先访问本服务器 (CORS / no-cache), 失败 fallback 到 GitHub Releases.
 app.use('/api/mobile/ota', require('./backend/routes/mobile-ota'));
+// SEO 看板 Google OAuth 公开回调: 接收 Google 重定向回的 code, 转发到 :33330 exchange-code.
+// 解决云机内部 127.0.0.1:33330 用户浏览器跳不进来的问题 (见 :33330 platforms/google/index.js REDIRECT_URI_DEFAULT).
+app.use('/api/seo/oauth-callback', require('./backend/routes/seo-oauth-callback'));
 // 用户个人维度偏好: GET/POST /api/profile/tour-first-login-seen (普通 auth, 跨设备生效).
 app.use('/api/profile', profileRoutes);
 app.use('/api/tasks', tasksRoutes);

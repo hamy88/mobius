@@ -141,6 +141,7 @@ const RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT = 70
 const VERSION_UPTIME_VISIBLE_MAX_MS = 2 * 60 * 60 * 1000
 
 type MemInfo = { usedPercent: number; usedMb: number; totalMb: number }
+type CpuInfo = { usedPercent: number; cores: number; loadavg1: number }
 type DiskInfo = {
   usedPercent: number
   usedGb: number
@@ -250,7 +251,44 @@ function DiskIndicator() {
   )
 }
 
-function MemoryIndicator() {
+function CpuIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT }: { visibleThresholdPercent?: number } = {}) {
+  const [cpu, setCpu] = useState<CpuInfo | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const stop = pollRecursive(async (signal) => {
+      const d = await api('/api/health/cpu', { signal })
+      if (alive) setCpu(d)
+    }, 60 * 1000)
+    return () => { alive = false; stop() }
+  }, [])
+
+  const pct = cpu?.usedPercent
+  // 常规模式传 0 常显; 默认 70 → 低占用隐藏降噪 (与内存一致)
+  if (pct == null || pct < visibleThresholdPercent) return null
+
+  const danger = pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
+  const color = danger ? '#ef4444' : 'var(--text-muted)'
+
+  return (
+    <TopNavActionElement
+      as="div"
+      interactive={false}
+      className="select-none"
+      title={cpu ? `服务器 CPU 占用 ${pct}%（${cpu.cores} 核 · load ${cpu.loadavg1}）` : '服务器 CPU 占用'}
+      style={{ color }}>
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+          d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+      </svg>
+      <span className="text-[12px] tabular-nums font-medium">
+        {pct != null ? `${pct}%` : '--'}
+      </span>
+    </TopNavActionElement>
+  )
+}
+
+function MemoryIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT }: { visibleThresholdPercent?: number } = {}) {
   const [mem, setMem] = useState<MemInfo | null>(null)
 
   useEffect(() => {
@@ -263,7 +301,8 @@ function MemoryIndicator() {
   }, [])
 
   const pct = mem?.usedPercent
-  if (pct == null || pct < RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT) return null
+  // visibleThresholdPercent=0 → 常规模式常显 (用户要求可见); 默认 70 → 低占用隐藏降噪
+  if (pct == null || pct < visibleThresholdPercent) return null
 
   const danger = pct != null && pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
   const color = danger ? '#ef4444' : 'var(--text-muted)'
@@ -1245,35 +1284,13 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
             <div data-tour="top-system-status" className="mobius-topnav-status flex shrink-0 items-center gap-2">
               {/* 存储使用: 极简态保留 (磁盘告警对所有人都重要); 内存/版本仅专家态。 */}
               <DiskIndicator />
-              {!easyUI && <MemoryIndicator />}
+              {!easyUI && <CpuIndicator visibleThresholdPercent={0} />}
+              {!easyUI && <MemoryIndicator visibleThresholdPercent={0} />}
               {!easyUI && <VersionIndicator />}
             </div>
           )}
           {/* 极简 ⇄ 专家 切换入口已合并到「外观」菜单内的简易模式开关 (shell.tsx 中 easy-mode-switch),
               顶栏不再保留独立按钮。 */}
-          {/* 极简态"切回完整模式"直达入口 — 盲区修复: 完整态的简易模式开关藏在「外观」菜单,
-              而「外观」按钮在极简态被隐藏 (下方 !easyUI 分支), 切进极简后界面没有任何入口切回。
-              行为与 easy-mode-switch 对称: 会话页内只改呈现密度(原地恢复专业呈现, 不卸载组件);
-              其余页面(含 easy_mode 页)切全局模式, 由 EasyModePage 的 layoutMode 同步 effect
-              携当前会话上下文导航回完整 Issue/Research 页。 */}
-          {easyUI && (
-            <TopNavActionElement
-              type="button"
-              onClick={() => {
-                if (inSessionContext) {
-                  setSessionDensity('professional')
-                  return
-                }
-                setLayoutMode('normal_mode')
-              }}
-              title="切换回完整模式"
-              aria-label="切换回完整模式"
-              data-testid="easy-mode-exit"
-            >
-              <LayoutPanelTop className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-              <span className="text-[12px] font-medium whitespace-nowrap">完整模式</span>
-            </TopNavActionElement>
-          )}
           {/* 极简态的管理中心直达入口 (仅管理员可见; 专家态藏在用户菜单里) */}
           {easyUI && user?.role === 'admin' && (
             <TopNavActionElement
@@ -1287,8 +1304,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               <span className="text-[12px] font-medium whitespace-nowrap">管理</span>
             </TopNavActionElement>
           )}
-          {/* 外观按钮 — 极简态隐藏 (主题/调色盘属专家功能) */}
-          {!easyUI && (
+          {/* 外观按钮 — 极简态也显示 (菜单内含简易模式开关, 是极简 ⇄ 完整的唯一切回入口) */}
           <div className="relative shrink-0" data-tour="top-theme-toggle">
             <TopNavActionElement
               type="button"
@@ -1523,7 +1539,6 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               </div>
             )}
           </div>
-          )}
 
           {/* 用户菜单 — 极简态隐藏 (改名/下载/改密等均属专家功能; 管理员另有直达入口) */}
           {!easyUI && (
@@ -1581,7 +1596,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                   className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                   style={{ color: 'var(--text-primary)' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
-                  下载移动端 App <span className="font-mono text-[11px] opacity-70">(v0.4.3)</span>
+                  下载移动端 App <span className="font-mono text-[11px] opacity-70">(v0.4.4)</span>
                 </button>
                 <button onClick={() => { setShowUserMenu(false); setShowChangePw(true) }}
                   className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"

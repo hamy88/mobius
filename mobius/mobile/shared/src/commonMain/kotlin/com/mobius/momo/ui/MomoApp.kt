@@ -202,6 +202,8 @@ import com.mobius.momo.viewmodel.ThemePalette
 import com.mobius.momo.viewmodel.UiState
 import com.mobius.momo.viewmodel.canSendComposerMessage
 import com.mobius.momo.viewmodel.OtaCheckUseCase
+import com.mobius.momo.viewmodel.OtaDownloadPhase
+import com.mobius.momo.viewmodel.OtaDownloadUi
 import com.mobius.momo.viewmodel.ThresholdEvaluator
 import androidx.compose.foundation.rememberScrollState
 import kotlinx.coroutines.Dispatchers
@@ -521,6 +523,26 @@ fun MomoApp(viewModel: MomoAppViewModel = remember { MomoAppViewModel() }) {
                         items = items,
                         theme = theme,
                         onDismiss = { viewModel.dismissOtaChangelog() },
+                    )
+                }
+                // 0.4.4 OTA 下载进度对话框 — state.otaDownload 非空时接管弹窗,展示进度 + 阶段 + 按钮。
+                // 与 otaCheckResult(4 档弹窗)独立:dismissOtaDialog 已把后者清掉,这里专门管下载 UI。
+                otaState.otaDownload?.let { downloadUi ->
+                    val downloadColors = OtaColors(
+                        background = theme.bgPrimary,
+                        onBackground = theme.textPrimary,
+                        onBackgroundMuted = theme.textMuted,
+                        accent = theme.accentPrimary,
+                        danger = theme.danger,
+                        divider = theme.borderDefault,
+                    )
+                    OtaDownloadDialog(
+                        ui = downloadUi,
+                        colors = downloadColors,
+                        onBackground = { viewModel.dismissOtaDownloadUi() },
+                        onCancel = { viewModel.cancelOtaDownload() },
+                        onRetry = { viewModel.retryOtaDownload() },
+                        onDismiss = { viewModel.dismissOtaDownloadUi() },
                     )
                 }
             }
@@ -1631,6 +1653,24 @@ private fun SettingsScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewMode
                                     )
                                 else ->
                                     Text("未检查", color = theme.textMuted, style = momoTextStyle(MomoTypography.caption))
+                            }
+                        }
+                        // 0.4.4 OTA：下载中状态行（点"后台下载"后，用户能在设置页看到进度;点 row 不触发动作，
+                        // 仅展示。"打开下载"按钮也走 dialog,这里只是信息镜像）。
+                        val downloadUi = state.otaDownload
+                        if (downloadUi != null && downloadUi.phase != OtaDownloadPhase.Done) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(36.dp)
+                                    .padding(horizontal = MomoSpacing.lg),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    buildOtaDownloadProgressLabel(downloadUi),
+                                    color = theme.accentPrimary,
+                                    style = momoTextStyle(MomoTypography.caption),
+                                )
                             }
                         }
                         SettingSwitch("消息推送", state.pushEnabled, theme, showDivider = true, onClick = vm::togglePush)
@@ -6995,6 +7035,25 @@ private fun formatRelativeTime(epochMillis: Long): String {
                 fmt.format(date)
             }
         }
+    }
+}
+
+/**
+ * 0.4.4 设置页"下载中"短文案。
+ *
+ * 设计原则：单行 ≤ 12 字,小字号;展示版本 + 阶段 + 百分比(下载阶段才显示百分比)。
+ * 失败的下载显示 "v{ver} 下载失败"。
+ */
+private fun buildOtaDownloadProgressLabel(ui: OtaDownloadUi): String {
+    val ver = "v${ui.version}"
+    val percent = (ui.fraction * 100).toInt().coerceIn(0, 100)
+    return when (ui.phase) {
+        OtaDownloadPhase.Queued -> "$ver 准备下载…"
+        OtaDownloadPhase.Downloading -> "$ver 下载中 $percent%"
+        OtaDownloadPhase.Verifying -> "$ver 校验中…"
+        OtaDownloadPhase.Installing -> "$ver 安装中…"
+        OtaDownloadPhase.Failed -> "$ver 下载失败"
+        OtaDownloadPhase.Done -> "$ver 已完成"
     }
 }
 

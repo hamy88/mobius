@@ -67,8 +67,11 @@ android {
         // 0.4.3: OTA 弹窗显示 changelog — Normal 档正文首条摘要 + "查看完整更新说明"链接点击展开
         //       全屏 modal(ModalBottomSheet 渲染完整 changelog_items)。Show 数据类携带 changelogItems
         //       透传到 UI; 后端 /api/mobile/ota/manifest.json 读 CHANGELOG.md 解析对应版本段填入。
-        versionCode = 27
-        versionName = "0.4.3"
+        // 0.4.4: 接 OtaDownloader / OtaInstaller 到 ViewModel — 全程进度条 + 失败重试 + 后台通知 +
+        //       前台弹窗接管 OtaDownloadDialog。OtaDownloader / OtaInstaller 提到 commonMain expect/actual,
+        //       iOS / desktop 占位实现保证跨平台编译通过。
+        versionCode = 28
+        versionName = "0.4.4"
         // 极光推送 AppKey / 渠道：JPush SDK 经 AndroidManifest meta-data(JPUSH_APPKEY) 读取。
         // 从 gradle.properties(或环境变量)读取；默认空串——未配置时 JPush 不注册，App 仍可正常构建运行。
         val jpushAppKey = providers.gradleProperty("MOMO_JPUSH_APPKEY")

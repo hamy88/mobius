@@ -4,7 +4,15 @@ import com.mobius.momo.data.FilePicker
 import com.mobius.momo.data.AssistantPromptAttachment
 import com.mobius.momo.data.AssistantPresetRequiresSessionDeleteException
 import com.mobius.momo.data.ChangelogItem
+import com.mobius.momo.data.OtaAsset
 import com.mobius.momo.data.OtaManifest
+import com.mobius.momo.platform.ota.OtaCompletionEvent
+import com.mobius.momo.platform.ota.OtaDownloader
+import com.mobius.momo.platform.ota.OtaInstaller
+import com.mobius.momo.platform.ota.OtaInstallResult
+import com.mobius.momo.platform.ota.OtaDownloadProgress
+import com.mobius.momo.platform.ota.OtaDownloadStatus
+import com.mobius.momo.platform.ota.currentDeviceAbi
 import com.mobius.momo.data.DoubaoTtsEngine
 import com.mobius.momo.data.MobiusApi
 import com.mobius.momo.data.NotificationGateway
@@ -95,6 +103,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -302,7 +313,48 @@ data class UiState(
     val otaLastCheckAt: Long = 0L,
     /** 0.4.3: 弹窗点"查看完整更新说明"时打开的全屏 modal 内容(完整 changelog_items)。null=关闭。 */
     val otaChangelogSheet: List<ChangelogItem>? = null,
+    // ===== 0.4.4 OTA 下载进度（点"立即更新"后接管弹窗） =====
+    /** OTA 下载状态。null = 当前未在下载(也没有遗留的失败/已完成状态)。非空时 UI 层渲染 OtaDownloadDialog。 */
+    val otaDownload: OtaDownloadUi? = null,
 )
+
+/**
+ * 0.4.4 OTA 下载 UI 状态。
+ *
+ * UI 层只读这一份数据；[MomoAppViewModel] 内部订阅 [OtaDownloader.lastProgress] 和
+ * [OtaDownloader.completionEvents] 把 flow 状态翻译成本数据类的更新。
+ *
+ * @param assetSize manifest.builds[].abi 命中后的总字节(兜底用,DownloadManager 进度比这个优先)
+ * @param bytesDownloaded 当前已下载字节(由 DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+ * @param fraction 0..1,优先取 DownloadManager.COLUMN_TOTAL_SIZE_BYTES 算得,
+ *                 在 total=0 时用 assetSize 兜底
+ */
+data class OtaDownloadUi(
+    val version: String,
+    val assetSize: Long,
+    val bytesDownloaded: Long,
+    val fraction: Float,
+    val phase: OtaDownloadPhase,
+    val errorMessage: String? = null,
+    /** 重试时需用回同一 manifest 才能复现"立即更新"前的版本/资产。 */
+    val manifest: OtaManifest,
+)
+
+/** 0.4.4 OTA 下载阶段：UI 用此决定按钮文案。Done 由 UI 自动 dismiss(3s 后)。 */
+enum class OtaDownloadPhase {
+    /** DownloadManager 已接受下载但还没开始(Pending)。 */
+    Queued,
+    /** 正在下载。 */
+    Downloading,
+    /** SHA256 校验中(下载完成后到调 OtaInstaller.install 前)。 */
+    Verifying,
+    /** 调起 PackageInstaller.Session / ACTION_INSTALL_PACKAGE。 */
+    Installing,
+    /** 安装已提交;3s 后 UI 自动清空。 */
+    Done,
+    /** 失败;显示重试按钮。 */
+    Failed,
+}
 
 data class GroupTypingAgent(val sessionId: String, val name: String)
 
@@ -348,6 +400,9 @@ class MomoAppViewModel(
     private val pushProvider: PushProvider = createPushProvider(),
     private val buildBaseUrl: String = platformBuildBaseUrl(),
     private val serverAddressRepository: ServerAddressRepository = ServerAddressRepository(storage),
+    // 0.4.4: OTA 下载/安装平台层。Android 走系统 DownloadManager + PackageInstaller,iOS/desktop 占位。
+    private val otaDownloader: OtaDownloader = OtaDownloader(),
+    private val otaInstaller: OtaInstaller = OtaInstaller(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var currentBaseUrl = resolveMobiusBaseUrl(
@@ -469,6 +524,23 @@ class MomoAppViewModel(
         refreshAuthConfig()
         restoreToken()
         loadRelayOverlay()
+        observeOtaDownloader()
+    }
+
+    /**
+     * 0.4.4: 订阅 OtaDownloader 的进度流与完成事件流，把结果翻译成 UiState.otaDownload。
+     *
+     * 当前客户端一次只跑一个 OTA 下载(OtaDialog 弹窗的"立即更新"入口)，
+     * 因此 [OtaDownloader.lastProgress] 取 values.firstOrNull() 即可；mapNotNull 跳过空闲态空 map。
+     */
+    private fun observeOtaDownloader() {
+        otaDownloader.lastProgress
+            .mapNotNull { it.values.firstOrNull() }
+            .onEach { p -> updateOtaProgress(p) }
+            .launchIn(scope)
+        otaDownloader.completionEvents
+            .onEach { e -> handleOtaCompletion(e) }
+            .launchIn(scope)
     }
 
     /** 从持久化偏好恢复「消息推送」总开关（默认开）。 */
@@ -583,13 +655,213 @@ class MomoAppViewModel(
     }
 
     /**
-     * 用户在 OTA 弹窗点"立即更新": 本期(D7 之前)只弹 toast 占位, 真正下载/安装留给后续阶段
-     * ([OtaDownloader] / [OtaInstaller] 已实装, 缺少统一编排入口)。
-     * TODO(D7): 拉 asset → 校验签名 → 调平台 installer → 安装完成后 dismiss + toast。
+     * 用户在 OTA 弹窗点"立即更新": 拉匹配当前 ABI 的 asset → 入队下载 → 完成后调 OtaInstaller.install。
+     *
+     * 流程：
+     * 1. 选 ABI: [currentDeviceAbi]() 与 manifest.builds[].abi 严格匹配,找不到 → toast 失败
+     * 2. 拼 [OtaAsset](fromBuild) → [otaDownloader.enqueue] → 拿到 downloadId
+     * 3. 写 [UiState.otaDownload] = Queued;关闭 OTA 弹窗(OtaDownloadDialog 接管)
+     * 4. 后续 [updateOtaProgress] / [handleOtaCompletion] 由 init 订阅的 flow 驱动
      */
     fun downloadAndInstallOta(manifest: OtaManifest) {
+        if (state.value.otaDownload != null) {
+            // 已有下载在进行中,避免重复 enqueue
+            return
+        }
         val version = manifest.version.ifBlank { "新版本" }
-        showToast("已开始下载 v$version（占位）")
+        val abi = currentDeviceAbi()
+        if (abi.isBlank()) {
+            showToast("当前平台不支持 OTA 更新")
+            return
+        }
+        val build = manifest.builds.firstOrNull { it.abi == abi }
+            ?: run {
+                showToast("找不到匹配当前 CPU 的安装包 ($abi)")
+                return
+            }
+        val asset = OtaAsset.fromBuild(build)
+        // Android 13+ 首次下载需要 POST_NOTIFICATIONS,iOS/desktop 占位 no-op
+        runCatching { otaDownloader.requestPostNotificationsIfNeeded() }
+        val downloadId = runCatching { otaDownloader.enqueue(asset) }.getOrElse { e ->
+            showToast("加入下载队列失败：${e.message ?: "未知错误"}")
+            return
+        }
+        _state.update {
+            it.copy(
+                otaCheckResult = null, // 关闭 4 档弹窗,OtaDownloadDialog 接管
+                otaDownload = OtaDownloadUi(
+                    version = version,
+                    assetSize = asset.size,
+                    bytesDownloaded = 0L,
+                    fraction = 0f,
+                    phase = OtaDownloadPhase.Queued,
+                    errorMessage = null,
+                    manifest = manifest,
+                ),
+            )
+        }
+        // 启动一个轻量进度轮询协程:每 500ms 调一次 queryProgress 把 system flow 主动 emit 一遍,
+        // 保证用户不订阅 SharedFlow(只 _state)时,UI 仍能持续刷新。
+        // 注意:DownloadManager 的 lastProgress 已经会随 queryProgress 调用 emit,无需独立 tick;
+        // 这里不再额外开协程,直接走 _lastProgress 的被动事件流即可。
+        // downloadId 当前仅用于 cancel;由 downloadAndInstallOta 内闭包持有的 manifest 重试路径
+        // 不需要重新记录(见 [retryOtaDownload])。
+        @Suppress("UNUSED_VARIABLE") val unusedId = downloadId
+    }
+
+    /** 0.4.4: 用户按"重试"时清掉旧 otaDownload,重新走 [downloadAndInstallOta]。 */
+    fun retryOtaDownload() {
+        val manifest = state.value.otaDownload?.manifest ?: return
+        _state.update { it.copy(otaDownload = null) }
+        downloadAndInstallOta(manifest)
+    }
+
+    /** 0.4.4: 用户按"后台下载"时关闭弹窗但保留下载状态(进度信息由系统通知接管)。 */
+    fun dismissOtaDownloadUi() {
+        _state.update { it.copy(otaDownload = null) }
+    }
+
+    /** 0.4.4: 用户按"取消下载"时调用:真正取消 DownloadManager 任务并清状态。 */
+    fun cancelOtaDownload() {
+        val ui = state.value.otaDownload ?: return
+        runCatching {
+            // openDownloadId 给出当前活跃 downloadId;若无活跃(已完成/失败/无)则跳过
+            otaDownloader.openDownloadId()?.let { otaDownloader.cancel(it) }
+        }
+        _state.update { it.copy(otaDownload = null) }
+        showToast("已取消下载 v${ui.version}")
+    }
+
+    /**
+     * 0.4.4: 把 [OtaDownloader.lastProgress] 推过来的进度更新翻译进 UiState.otaDownload。
+     * total=0 时用 manifest 里的 assetSize 兜底显示比例。
+     */
+    private fun updateOtaProgress(p: OtaDownloadProgress) {
+        val ui = state.value.otaDownload ?: return
+        // Done/Failed 阶段不再接受进度(走 completionEvents 路径)
+        if (ui.phase == OtaDownloadPhase.Done || ui.phase == OtaDownloadPhase.Failed) return
+        val total = if (p.totalBytes > 0L) p.totalBytes else ui.assetSize
+        val fraction = if (total > 0L) (p.bytesDownloaded.toDouble() / total).toFloat().coerceIn(0f, 1f) else 0f
+        val phase = when (p.status) {
+            OtaDownloadStatus.Pending -> OtaDownloadPhase.Queued
+            OtaDownloadStatus.Running -> OtaDownloadPhase.Downloading
+            OtaDownloadStatus.Paused -> OtaDownloadPhase.Downloading
+            OtaDownloadStatus.Successful -> OtaDownloadPhase.Verifying
+            OtaDownloadStatus.Failed -> OtaDownloadPhase.Failed
+            OtaDownloadStatus.Cancelled -> OtaDownloadPhase.Failed
+        }
+        // Successful status 第一次出现 → 立刻切 Verifying 触发 install;
+        // 兜底:如果 completionEvents 因 broadcast 没到(罕见),Verifying 阶段自己 queryProgress 一次。
+        val newUi = ui.copy(
+            bytesDownloaded = p.bytesDownloaded,
+            fraction = fraction,
+            phase = phase,
+        )
+        _state.update { it.copy(otaDownload = newUi) }
+        if (phase == OtaDownloadPhase.Verifying && ui.phase != OtaDownloadPhase.Verifying) {
+            kickOtaInstall(newUi)
+        }
+    }
+
+    /** 0.4.4: 调 OtaInstaller 安装 localUri 指向的 APK。 */
+    private fun kickOtaInstall(ui: OtaDownloadUi) {
+        val downloadId = otaDownloader.openDownloadId()
+        if (downloadId == null) {
+            _state.update {
+                it.copy(
+                    otaDownload = ui.copy(
+                        phase = OtaDownloadPhase.Failed,
+                        errorMessage = "找不到当前下载任务",
+                    ),
+                )
+            }
+            return
+        }
+        // 通过 OtaDownloader 拿本地 URI(file://...);失败兜底 Failed。
+        val uri = runCatching { otaDownloader.localUri(downloadId) }.getOrNull()
+        if (uri.isNullOrBlank()) {
+            _state.update {
+                it.copy(
+                    otaDownload = ui.copy(
+                        phase = OtaDownloadPhase.Failed,
+                        errorMessage = "找不到下载文件路径",
+                    ),
+                )
+            }
+            return
+        }
+        // COLUMN_LOCAL_URI 是 file:// URI; OtaInstaller 内部用 java.io.File(path) 解析
+        val apkPath = if (uri.startsWith("file://")) uri.removePrefix("file://") else uri
+        // manifest.android.packageName 为空时,用当前 app 的(升级场景应相同);install 内部不强校验
+        val packageName = ui.manifest.android.packageName.ifBlank { ui.manifest.version }
+        _state.update { it.copy(otaDownload = ui.copy(phase = OtaDownloadPhase.Installing)) }
+        otaInstaller.install(
+            apkPath = apkPath,
+            expectedPackageName = packageName,
+            onResult = { result ->
+                when (result) {
+                    is OtaInstallResult.Success -> {
+                        _state.update {
+                            it.copy(
+                                otaDownload = ui.copy(phase = OtaDownloadPhase.Done),
+                            )
+                        }
+                        // 3s 后自动清空,给用户"已提交"视觉反馈
+                        scope.launch {
+                            delay(3000L)
+                            // 已被用户 dismiss 则不再覆盖
+                            if (state.value.otaDownload?.phase == OtaDownloadPhase.Done) {
+                                _state.update { it.copy(otaDownload = null) }
+                            }
+                        }
+                    }
+                    is OtaInstallResult.Failure -> {
+                        _state.update {
+                            it.copy(
+                                otaDownload = ui.copy(
+                                    phase = OtaDownloadPhase.Failed,
+                                    errorMessage = result.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    /**
+     * 0.4.4: 把 [OtaDownloader.completionEvents] 的 Success/Failure 翻译进 UiState。
+     *
+     * Success 由 updateOtaProgress 的 Verifying 阶段已通过 queryProgress 触发 install;
+     * 这里仍保留 Success 分支兜底(若 completionEvents 比 queryProgress 先到)。
+     * Failure → Failed 阶段,errorMessage 给到 UI 重试按钮。
+     */
+    private fun handleOtaCompletion(event: OtaCompletionEvent) {
+        val ui = state.value.otaDownload ?: return
+        when (event) {
+            is OtaCompletionEvent.Success -> {
+                if (ui.phase != OtaDownloadPhase.Verifying && ui.phase != OtaDownloadPhase.Installing) {
+                    // lastProgress 路径还没切到 Verifying,这里兜底触发 install
+                    _state.update {
+                        it.copy(
+                            otaDownload = ui.copy(phase = OtaDownloadPhase.Verifying),
+                        )
+                    }
+                    kickOtaInstall(ui.copy(phase = OtaDownloadPhase.Verifying))
+                }
+            }
+            is OtaCompletionEvent.Failure -> {
+                _state.update {
+                    it.copy(
+                        otaDownload = ui.copy(
+                            phase = OtaDownloadPhase.Failed,
+                            errorMessage = event.reason,
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     fun dispose() {

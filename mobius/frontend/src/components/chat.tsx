@@ -19,6 +19,7 @@ import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
 import { AnnouncePcButton } from './announce-pc-button'
 import { renderWithSecretChips } from './encrypted-secrets'
+import { MessageContentWithAttachments } from './message-attachments'
 import { isGuidedDemoSession, patchGuidedDemoSessionCompleted } from '../services/guided-demo'
 import { readJsonlCacheSync, readJsonlCacheFromIdb, writeJsonlCache } from '../services/session-jsonl-cache'
 import {
@@ -1609,7 +1610,7 @@ export function MessageBubble({
           </>
         )
       }
-      return <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{secretNodes ?? content}</p>
+      return <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{secretNodes ?? <MessageContentWithAttachments content={content} />}</p>
     }
     if (secretNodes) {
       return <div className="prose-chat"><p className="whitespace-pre-wrap">{secretNodes}</p></div>
