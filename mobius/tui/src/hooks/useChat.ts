@@ -14,7 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { MobiusClient, ApiError } from '../api.js'
 import { SseConnection } from '../sse.js'
 import { updateIssuePreference } from '../config.js'
-import { tuiAimuxIdentifier, probeAimuxBridgeConnection } from '../aimux.js'
+import { tuiGuiAuthorized, tuiAimuxIdentifier, probeAimuxBridgeConnection } from '../aimux.js'
 import { viewsForEntry } from '../lib/entry-view.js'
 import type { AnyEntry } from '../types.js'
 import type { ReadyState } from '../components/PrepScreen.js'
@@ -356,6 +356,7 @@ export function useChat({ client, ready, resumeSessionId }: ChatApi): ChatContro
         local_path: process.cwd(),
         is_tui: true,
         add_remote_aimux_mcp: true,
+        ...(tuiGuiAuthorized() ? { gui_authorized: true } : {}),
       },
     })
     const sid = s.session_id

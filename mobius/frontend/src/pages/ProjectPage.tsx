@@ -5,9 +5,10 @@ import { useStore, api } from '../store'
 import { TopNav } from '../components/shell'
 import {
   NewIssueModal, ConfirmModal,
-  NewProjectModal, DeleteProjectModal, PathPickerModal,
+  DeleteProjectModal, PathPickerModal,
   NewResearchModal, RenameResearchModal,
 } from '../components/modals'
+import { NewProjectModal } from '../components/new-project-modal'
 import {
   Boxes,
   Brain,
@@ -165,7 +166,7 @@ export default function ProjectPage() {
 
   // 左侧导航按钮样式与用户主页统一 (图标 + 文案). settings tab 在此追加图标并改用更短的文案.
   const navCls = (active: boolean) =>
-    `flex items-center gap-2 h-9 px-3 rounded-lg text-[13px] transition-colors ${active ? 'bg-blue-500/15 text-blue-400' : 'hover:bg-[var(--bg-hover)]'}`
+    `flex items-center gap-2 h-9 px-3 rounded-lg text-[length:var(--fs-lg)] transition-colors ${active ? 'bg-blue-500/15 text-blue-400' : 'hover:bg-[var(--bg-hover)]'}`
   const SETTINGS_NAV_META: Record<string, { label: string; icon: ReactNode }> = {
     settings: { label: '项目设置', icon: <Settings className="w-4 h-4" strokeWidth={1.8} /> },
     context: { label: '记忆技能', icon: <Brain className="w-4 h-4" strokeWidth={1.8} /> },
@@ -722,7 +723,7 @@ export default function ProjectPage() {
     <div className="flex flex-col h-screen" style={{ background: 'var(--bg-primary)' }}>
       <TopNav />
       <div className="flex-1 flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-        <div className="text-[13px]">加载项目中...</div>
+        <div className="text-[length:var(--fs-lg)]">加载项目中...</div>
       </div>
     </div>
   )
@@ -960,11 +961,7 @@ export default function ProjectPage() {
           }
         }} />}
       {showNewResearch && <NewResearchModal projectId={projectId} onClose={() => setShowNewResearch(false)}
-        onCreated={(research: any, options?: { createLeader?: boolean }) => {
-          setShowNewResearch(false); refreshResearches()
-          // 仿 Issue 的"立即创建第一个会话": 立即创建 Leader 时进入 Research 自动打开 Leader 配置.
-          navigate(`/u/${userParam}/p/${projectId}/r/${research.id}${options?.createLeader ? '?newLeader=1' : ''}`)
-        }} />}
+        onCreated={(research: any) => { setShowNewResearch(false); refreshResearches(); navigate(`/u/${userParam}/p/${projectId}/r/${research.id}`) }} />}
       {editingResearch && <RenameResearchModal research={editingResearch} onClose={() => setEditingResearch(null)}
         onRenamed={() => { setEditingResearch(null); refreshResearches() }} />}
       {confirmAction && <ConfirmModal

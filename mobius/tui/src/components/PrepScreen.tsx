@@ -15,14 +15,22 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { Select, TextInput, type SelectItem } from './primitives.js'
 import { MobiusClient } from '../api.js'
+import { effectiveGuiMode, guiModeOptions, hasGuiSupport, restartAimuxConnectionForGuiChange, setTuiGuiMode, tuiGuiMode, type GuiMode } from '../aimux.js'
+import { windowsElevated } from '../lib/windows-admin.js'
 import {
   bindCwdToProject, cwd, getCwdPreference, loadDir2Project, loadProjectsCache,
   saveProjectsCache, setCwdIssue, updateIssuePreference, type IssuePreference,
 } from '../config.js'
 import type { Issue, Memory, Project, SessionModelOption, Skill } from '../types.js'
 
-type PrefStep = 'issue' | 'model' | 'language' | 'skills' | 'memories'
-const STEP_ORDER: PrefStep[] = ['model', 'language', 'skills', 'memories']
+export type PrefStep = 'issue' | 'model' | 'language' | 'gui' | 'skills' | 'memories'
+/** A function rather than a constant so tests can reach the platform-gated
+ *  GUI step on any host (they pass `platform` to PrepScreen). */
+export function stepOrderFor(platform: NodeJS.Platform): PrefStep[] {
+  return hasGuiSupport(platform)
+    ? ['model', 'language', 'gui', 'skills', 'memories']
+    : ['model', 'language', 'skills', 'memories']
+}
 
 export interface ReadyState {
   project: Project
@@ -30,11 +38,18 @@ export interface ReadyState {
   prefs: IssuePreference
 }
 
-export function PrepScreen({ client, onReady, onQuit }: {
+export function PrepScreen({ client, onReady, onQuit, platform = process.platform, elevated = windowsElevated() }: {
   client: MobiusClient
   onReady: (st: ReadyState) => void
   onQuit?: () => void
+  /** Overridable so tests can exercise the platform-gated GUI step anywhere. */
+  platform?: NodeJS.Platform
+  /** Overridable so tests can exercise the elevated branch anywhere. */
+  elevated?: boolean
 }) {
+  const stepOrder = stepOrderFor(platform)
+  // Mark the mode in force, which availability can have moved off the stored one.
+  const effective = effectiveGuiMode(tuiGuiMode(), elevated, platform)
   const [phase, setPhase] = useState<'loading' | 'project' | 'pref' | 'done'>('loading')
   const [projects, setProjects] = useState<Project[]>([])
   const [project, setProject] = useState<Project | null>(null)
@@ -105,7 +120,7 @@ export function PrepScreen({ client, onReady, onQuit }: {
 
   function computeStep(p: IssuePreference): PrefStep | null {
     const done = new Set(p.done ?? [])
-    for (const s of STEP_ORDER) if (!done.has(s)) return s
+    for (const s of stepOrder) if (!done.has(s)) return s
     return null
   }
 
@@ -169,6 +184,19 @@ export function PrepScreen({ client, onReady, onQuit }: {
     onReady({ project, issue: iss, prefs: p })
   }
 
+  /** Commit the wizard's GUI choice, then swap the daemon when it changed.
+   *  Both the identifier (tui-⇄gui-) and the reverse-connect flags differ per
+   *  mode, and the old daemon cannot be retargeted in place. */
+  function applyGuiMode(mode: GuiMode) {
+    if (tuiGuiMode() !== mode) {
+      setTuiGuiMode(mode)
+      // In elevate mode the replacement daemon is what raises the Windows UAC
+      // prompt; in no-elevate mode it is what removes it.
+      void restartAimuxConnectionForGuiChange()
+    }
+    completeStep('gui', {})
+  }
+
   // ── lazy-load lists for the active step ──────────────────────────────────
   useEffect(() => {
     if (phase !== 'pref' || !step) return
@@ -212,6 +240,18 @@ export function PrepScreen({ client, onReady, onQuit }: {
           title="选择回复语言"
           items={[{ label: '中文', value: 'zh' }, { label: 'English', value: 'en' }]}
           onSelect={v => completeStep('language', { language: v as 'zh' | 'en' })} />
+      : null}
+    {step === 'gui'
+      ? <Select
+          title="是否授权操作图形界面 (GUI/computer use)"
+          // Rows come from the shared builder so the wizard and /config cannot
+          // drift: a mode this machine cannot provide stays visible, disabled,
+          // with the reason in its label.
+          items={guiModeOptions(elevated, platform).map(row => ({
+            ...row,
+            label: `${row.label}${effective === row.value ? ' · 当前' : ''}`,
+          }))}
+          onSelect={v => applyGuiMode(v === 'elevate' ? 'elevate' : v === 'no-elevate' ? 'no-elevate' : 'off')} />
       : null}
     {step === 'skills'
       ? <MultiPicker title={`选择启用的 Skill（默认全部启用，空格取消）`} items={toItems(skills)}

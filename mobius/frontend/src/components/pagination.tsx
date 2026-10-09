@@ -73,26 +73,27 @@ export function PaginationControls({
   const goTo = (n: number) => onPageChange(Math.min(Math.max(n, 1), totalPages))
 
   if (compact) {
+    // 设计师之眼: 分页条压到 30px 高, 上一页/下一页去边框改纯文字按钮 (只保留整条顶部分隔线).
     return (
-      <div className="px-3 py-2 border-t flex items-center justify-between gap-2" style={{ borderColor: 'var(--border-color)' }}>
+      <div className="px-3 h-[30px] flex-shrink-0 border-t flex items-center justify-between gap-2" style={{ borderColor: 'var(--border-color)' }}>
         <button
           type="button"
           onClick={() => goTo(page - 1)}
           disabled={page <= 1}
-          className="h-8 sm:h-7 px-2 rounded-md border text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+          className="h-7 px-2 rounded-md text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ color: 'var(--text-secondary)' }}
         >
           上一页
         </button>
-        <span className="text-[11px] tabular-nums flex-shrink-0" style={{ color: 'var(--text-secondary)' }}>
+        <span className="text-[length:var(--fs-sm)] tabular-nums flex-shrink-0" style={{ color: 'var(--text-secondary)' }}>
           {pageStart}-{pageEnd} / {totalItems}
         </span>
         <button
           type="button"
           onClick={() => goTo(page + 1)}
           disabled={page >= totalPages}
-          className="h-8 sm:h-7 px-2 rounded-md border text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
+          className="h-7 px-2 rounded-md text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ color: 'var(--text-secondary)' }}
         >
           下一页
         </button>
@@ -101,10 +102,10 @@ export function PaginationControls({
   }
 
   if (inlinePageSwitch) {
-    const inlineButtonClass = 'align-baseline text-[11px] transition-colors hover:text-[var(--text-primary)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-[var(--text-muted)]'
+    const inlineButtonClass = 'align-baseline text-[length:var(--fs-sm)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-[var(--text-muted)]'
 
     return (
-      <div className="flex items-center gap-1.5 text-[11px] tabular-nums flex-wrap" style={{ color: 'var(--text-muted)' }}>
+      <div className="flex items-center gap-1.5 text-[length:var(--fs-sm)] tabular-nums flex-wrap" style={{ color: 'var(--text-muted)' }}>
         <span>显示 {pageStart}-{pageEnd} / {totalItems} 个</span>
         <span>·</span>
         <span>第 {page} / {totalPages} 页</span>
@@ -132,7 +133,7 @@ export function PaginationControls({
 
   return (
     <div className="flex items-center justify-between gap-3">
-      <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+      <span className="text-[length:var(--fs-sm)] tabular-nums" style={{ color: 'var(--text-muted)' }}>
         显示 {pageStart}-{pageEnd} / {totalItems} 个 · 第 {page} / {totalPages} 页
       </span>
       <div className="flex items-center gap-1.5">
@@ -140,7 +141,7 @@ export function PaginationControls({
           type="button"
           onClick={() => goTo(page - 1)}
           disabled={page <= 1}
-          className="h-8 px-2.5 rounded-md border text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+          className="h-8 px-2.5 rounded-md border text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}
         >
           上一页
@@ -149,7 +150,7 @@ export function PaginationControls({
           type="button"
           onClick={() => goTo(page + 1)}
           disabled={page >= totalPages}
-          className="h-8 px-2.5 rounded-md border text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+          className="h-8 px-2.5 rounded-md border text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}
         >
           下一页

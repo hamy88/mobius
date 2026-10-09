@@ -11,10 +11,6 @@ const FLIP_MIN_DELTA_PX = 0.5
 
 type FlipItem = { el: HTMLElement; left: number; top: number }
 
-function prefersReducedMotion(): boolean {
-  return !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-}
-
 // 读相对容器内容原点的位置: 扣掉 scrollTop/scrollLeft, 单纯滚动列表不会误触发动画.
 function readItems(container: HTMLElement): Map<string, FlipItem> {
   const base = container.getBoundingClientRect()
@@ -49,7 +45,7 @@ export function useListReorderAnimation(containerRef: RefObject<HTMLElement>, or
     const previous = itemsRef.current
     const next = readItems(container)
     itemsRef.current = next
-    if (prefersReducedMotion()) return
+    // 特效全量播放: 不再跟随系统「减少动效」跳过 FLIP 动画 (小莫悬浮球是唯一例外, 见 index.css).
     next.forEach((to, key) => {
       const from = previous.get(key)
       // 首次出现 (无旧位置) 的项不动画, 交给各自的挂载效果.

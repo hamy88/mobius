@@ -48,11 +48,11 @@ class StaleChunkErrorBoundary extends Component<{ children: ReactNode }, { hasEr
           className="flex h-screen w-screen flex-col items-center justify-center gap-3"
           style={{ background: 'var(--bg-primary)', color: 'var(--text-muted)' }}
         >
-          <div className="text-sm">页面加载失败，可能是 Mobius 刚完成一次自我迭代。</div>
+          <div className="text-[length:var(--fs-xl)]">页面加载失败，可能是 Mobius 刚完成一次自我迭代。</div>
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="rounded-md border px-4 py-1.5 text-sm transition-colors hover:bg-[var(--bg-hover)]"
+            className="rounded-md border px-4 py-1.5 text-[length:var(--fs-xl)] transition-colors hover:bg-[var(--bg-hover)]"
             style={{ color: 'var(--text-primary)', borderColor: 'var(--border-color-strong)' }}
           >
             立即刷新
@@ -396,10 +396,33 @@ function layoutModeTargetPath(pathname: string) {
   return null
 }
 
+/*
+ * Non-critical overlays (assistant bubble, onboarding tour) wait for the browser to go idle
+ * before mounting, so their chunks stop competing with first-paint resources.
+ */
+// 助手气泡和新手引导不参与首屏: 等浏览器空闲再挂载, 免得它们的 chunk 跟首屏抢带宽
+// (助手气泡还会连带整个 markdown 渲染栈). 2s 超时兜底, 保证不会一直不出现.
+// The assistant bubble and onboarding tour mount on idle with a 2s fallback timeout so
+// they never stay hidden.
+function useIdleMount() {
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    const idle = (window as any).requestIdleCallback as undefined | ((cb: () => void, opts?: { timeout: number }) => number)
+    if (typeof idle === 'function') {
+      const id = idle(() => setReady(true), { timeout: 2000 })
+      return () => (window as any).cancelIdleCallback?.(id)
+    }
+    const timer = window.setTimeout(() => setReady(true), 1200)
+    return () => window.clearTimeout(timer)
+  }, [])
+  return ready
+}
+
 function AuthenticatedApp() {
   const { user, assistantBubbleEnabled } = useStore()
   const location = useLocation()
   const layoutMode = useLayoutMode()
+  const idleReady = useIdleMount()
 
   useEffect(() => startTextRedactionRuntime(), [])
 
@@ -458,10 +481,12 @@ function AuthenticatedApp() {
       </StaleChunkErrorBoundary>
       <SelfIterationToast />
       <AssistantTaskDoneToast />
-      <Suspense fallback={null}>
-        <TourController />
-      </Suspense>
-      {assistantBubbleEnabled ? (
+      {idleReady ? (
+        <Suspense fallback={null}>
+          <TourController />
+        </Suspense>
+      ) : null}
+      {idleReady && assistantBubbleEnabled ? (
         <Suspense fallback={null}>
           <AssistantChat />
         </Suspense>

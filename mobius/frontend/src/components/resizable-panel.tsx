@@ -61,9 +61,13 @@ type ResizablePanelProps = {
   minWidth: number
   maxWidth: number
   side?: Side
+  // fill: 填满父容器剩余宽度 (flex:1, 无拖拽手柄、无宽度记忆). 用于嵌入窄容器里的
+  // 次级面板 — 宽度调整交给外层面板, 自己只占满剩余空间. fill 生命周期内应保持不变.
+  fill?: boolean
   className?: string
   style?: CSSProperties
   'data-tour'?: string
+  'data-testid'?: string
   children: ReactNode
 }
 
@@ -89,9 +93,11 @@ export function ResizablePanel({
   minWidth,
   maxWidth,
   side = 'left',
+  fill = false,
   className,
   style,
   'data-tour': dataTour,
+  'data-testid': dataTestId,
   children,
 }: ResizablePanelProps) {
   const [width, setWidth] = useState<number>(() => readStoredWidth(storageKey, defaultWidth, minWidth, maxWidth))
@@ -274,6 +280,20 @@ export function ResizablePanel({
     return createPortal(drawer, document.body)
   }
 
+  // ===== fill 模式: 填满父容器剩余宽度, 无手柄无记忆 (宽窄交给外层面板) =====
+  if (fill) {
+    return (
+      <aside
+        data-tour={dataTour}
+        data-testid={dataTestId}
+        className={['mobius-resizable', 'mobius-resizable--fill', className || ''].filter(Boolean).join(' ')}
+        style={{ flex: '1 1 0%', minWidth: 0, position: 'relative', ...style }}
+      >
+        {children}
+      </aside>
+    )
+  }
+
   // ===== 桌面端 / 右侧栏: 原本的可拖拽固定宽度面板 =====
   const handleStyle: CSSProperties = {
     position: 'absolute',
@@ -290,6 +310,7 @@ export function ResizablePanel({
     <aside
       ref={panelRef}
       data-tour={dataTour}
+      data-testid={dataTestId}
       className={['mobius-resizable', className || ''].filter(Boolean).join(' ')}
       style={{
         // width 不在此处: 由 panelRef + useLayoutEffect / 拖拽直接写 DOM 控制

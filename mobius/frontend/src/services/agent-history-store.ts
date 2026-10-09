@@ -25,6 +25,10 @@ export interface HistoryGroupMeta {
   user_summary: string
   version: number
   entry_count: number
+  essential_dict?: {
+    opener: any | null
+    final: any | null
+  }
 }
 
 // 挂起中的开轮卡 (pending_round_openers): 前端当作「特殊的最后一个组」渲染.
@@ -155,9 +159,11 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 /** ① GET groups. 304 → notModified (缓存全可信). */
-async function fetchGroups(sid: string, etag: string | null): Promise<{ notModified?: boolean; session_version?: number; jsonl_path?: string | null; groups?: HistoryGroupMeta[]; pending?: PendingOpenerMeta[] }> {
-  const res = await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/groups`, {
-    headers: authHeaders(etag ? { 'If-None-Match': etag } : {}),
+async function fetchGroups(sid: string, etag: string | null, withEssential = false): Promise<{ notModified?: boolean; session_version?: number; jsonl_path?: string | null; groups?: HistoryGroupMeta[]; pending?: PendingOpenerMeta[] }> {
+  const query = withEssential ? '?with_essential=1' : ''
+  const res = await fetch(`${API}/api/sessions/${encodeURIComponent(sid)}/groups${query}`, {
+    // Essential data is an optional projection; never let a prior ETag hide it with 304.
+    headers: authHeaders(withEssential ? {} : (etag ? { 'If-None-Match': etag } : {})),
   })
   if (res.status === 304) return { notModified: true }
   const data = await res.json().catch(() => ({}))
@@ -221,6 +227,7 @@ export class SessionHistoryStore {
   private inflight = new Set<string>()
   // ① 完成前到达的 SSE 事件缓冲 (订阅先于协商的生命周期).
   private pendingEvents: Array<() => void> = []
+  private essentialsLoading = false
 
   constructor(sid: string) {
     this.sid = sid
@@ -407,7 +414,15 @@ export class SessionHistoryStore {
             this.groupVersions.delete(gid)
           }
         }
-        this.groups = serverGroups
+        // ① 只带元数据, essential 投影 (opener/final) 是另一次请求合并进来的; 整体替换会把它抹掉,
+        // 简易模式的用户气泡随即退回群组摘要兜底 —— 这就是"首轮泡泡在长短两种之间随机跳"的根因.
+        // ① carries metadata only; replacing wholesale drops the separately merged essential projection,
+        // which makes the easy-mode opener bubble fall back to the terse group summary at random.
+        const carriedEssentials = new Map(this.groups.map((g) => [String(g.id), g.essential_dict]))
+        this.groups = serverGroups.map((g) => {
+          const carried = carriedEssentials.get(String(g.id))
+          return carried ? { ...g, essential_dict: carried } : g
+        })
         this.pending = Array.isArray(data.pending) ? data.pending : []
         this.sessionVersion = Number(data.session_version) || 0
         if (typeof data.jsonl_path === 'string') this.jsonlPath = data.jsonl_path
@@ -433,6 +448,32 @@ export class SessionHistoryStore {
       this.emit()
     } finally {
       this.negotiating = false
+    }
+  }
+
+  /** Load the optional opener/final projection used by easy mode without touching full entries. */
+  async ensureEssentialGroups(): Promise<void> {
+    if (this.essentialsLoading || this.groups.length === 0) return
+    this.essentialsLoading = true
+    try {
+      const data = await fetchGroups(this.sid, null, true)
+      if (data.notModified || !Array.isArray(data.groups)) return
+      const essentialById = new Map(data.groups.map((group) => [String(group.id), group.essential_dict]))
+      let changed = false
+      this.groups = this.groups.map((group) => {
+        const essential = essentialById.get(group.id)
+        if (!essential) return group
+        changed = true
+        return { ...group, essential_dict: essential }
+      })
+      if (changed) {
+        this.emit()
+        this.persistSoon()
+      }
+    } catch {
+      // Essential projection is a best-effort enhancement; full group loading remains usable.
+    } finally {
+      this.essentialsLoading = false
     }
   }
 

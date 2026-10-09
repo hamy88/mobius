@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { ChangeEvent, ClipboardEvent as ReactClipboardEvent, ComponentPropsWithoutRef, CSSProperties, DragEvent as ReactDragEvent, MouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
+import { getMermaidSource, MermaidCodeBlock } from './markdown-components'
 import { AlertTriangle, Archive, BookOpen, Check, ChevronsLeft, ChevronsRight, Copy, Eraser, ExternalLink, FilePlus2, Maximize2, Mic, Minimize2, RefreshCw, SendHorizontal, Settings, Square, Trash2, UserPlus, Volume2, VolumeX, X } from 'lucide-react'
 import { api, useStore } from '../store'
 import { formatCstRelative } from '../utils/time-format'
@@ -278,7 +279,7 @@ function MarkdownAnchor({ href, children, node: _node, ...props }: ComponentProp
 // 代码块(```...```) 渲染器: 右上角叠一个复制按钮.
 // 外层包 position:relative 的 .prose-pre-wrap 托住按钮, 这样代码长行水平滚动时按钮不跟着滚走;
 // 复制内容取内层 pre 的 textContent(button 在 pre 外, 不含按钮自身文本), 兼容桌面端 clipboard 不可用时回退 execCommand.
-const CodePre = ({ children, node: _node, ...props }: ComponentPropsWithoutRef<'pre'> & { node?: unknown }) => {
+const CopyableCodePre = ({ children, node: _node, ...props }: ComponentPropsWithoutRef<'pre'> & { node?: unknown }) => {
   const preRef = useRef<HTMLPreElement>(null)
   const [copied, setCopied] = useState(false)
   const handleCopy = useCallback(async () => {
@@ -313,6 +314,12 @@ const CodePre = ({ children, node: _node, ...props }: ComponentPropsWithoutRef<'
       <pre ref={preRef} {...props}>{children}</pre>
     </div>
   )
+}
+
+const CodePre = (props: ComponentPropsWithoutRef<'pre'> & { node?: unknown }) => {
+  const source = getMermaidSource(props.children)
+  if (source !== null) return <MermaidCodeBlock source={source} />
+  return <CopyableCodePre {...props} />
 }
 
 const AssistantMarkdown = memo(function AssistantMarkdown({ content }: { content: string }) {
@@ -1481,20 +1488,20 @@ function CompactContextConfirmModal({ onConfirm, onClose }: { onConfirm: () => v
         onClick={event => event.stopPropagation()}
         style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}
       >
-        <h3 className="mb-2 text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>压缩上文</h3>
-        <p className="mb-5 text-[13px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+        <h3 className="mb-2 text-[length:var(--fs-2xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>压缩上文</h3>
+        <p className="mb-5 text-[length:var(--fs-lg)] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
           是否继续，将消耗一段时间压缩上文；压缩期间可以继续发送后续指令，但响应会延后。
         </p>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="h-9 flex-1 rounded-xl border text-[13px]"
+            className="h-9 flex-1 rounded-xl border text-[length:var(--fs-lg)]"
             style={{ color: 'var(--text-muted)', borderColor: 'var(--input-border)', background: 'var(--bg-card-hover)' }}
           >
             取消
           </button>
-          <button type="button" onClick={onConfirm} className="btn-primary h-9 flex-1 rounded-xl text-[13px]">
+          <button type="button" onClick={onConfirm} className="btn-primary h-9 flex-1 rounded-xl text-[length:var(--fs-lg)]">
             压缩上文
           </button>
         </div>
@@ -1533,14 +1540,14 @@ function DeleteCurrentSessionConfirmModal({
         <div className="mb-3 flex items-start gap-2">
           <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-400" />
           <div className="min-w-0">
-            <h3 className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>删除当前小莫会话</h3>
-            <p className="mt-1 text-[13px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            <h3 className="text-[length:var(--fs-2xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>删除当前小莫会话</h3>
+            <p className="mt-1 text-[length:var(--fs-lg)] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
               确认后会关闭后台执行，并永久删除会话「{name}」。删除后不会保留在回收站；下一次向小莫提问时会创建新的小莫会话。
             </p>
           </div>
         </div>
         {error ? (
-          <div className="mb-3 rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">
+          <div className="mb-3 rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-300">
             {error}
           </div>
         ) : null}
@@ -1549,7 +1556,7 @@ function DeleteCurrentSessionConfirmModal({
             type="button"
             onClick={onClose}
             disabled={deleting}
-            className="h-9 flex-1 rounded-xl border text-[13px] disabled:opacity-40"
+            className="h-9 flex-1 rounded-xl border text-[length:var(--fs-lg)] disabled:opacity-40"
             style={{ color: 'var(--text-muted)', borderColor: 'var(--input-border)', background: 'var(--bg-card-hover)' }}
           >
             取消
@@ -1558,7 +1565,7 @@ function DeleteCurrentSessionConfirmModal({
             type="button"
             onClick={onConfirm}
             disabled={deleting}
-            className="h-9 flex-1 rounded-xl bg-red-500 text-[13px] text-white transition-colors hover:bg-red-600 disabled:opacity-40"
+            className="h-9 flex-1 rounded-xl bg-red-500 text-[length:var(--fs-lg)] text-white transition-colors hover:bg-red-600 disabled:opacity-40"
           >
             {deleting ? '删除中...' : '删除会话'}
           </button>
@@ -1599,20 +1606,20 @@ function CreateCloneSessionModal({
         style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}
       >
         <div className="mb-4">
-          <h3 className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>开一个分身小莫</h3>
-          <p className="mt-1 text-[12px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+          <h3 className="text-[length:var(--fs-2xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>开一个分身小莫</h3>
+          <p className="mt-1 text-[length:var(--fs-md)] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
             分身只处理一个独立任务，不能再开分身，也不能语音播报。完成后会把结果回传给主体小莫统一收尾。
           </p>
         </div>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-auto">
           <label className="block">
-            <span className="mb-1 block text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>任务说明</span>
+            <span className="mb-1 block text-[length:var(--fs-md)] font-semibold" style={{ color: 'var(--text-secondary)' }}>任务说明</span>
             <textarea
               value={draft.task}
               onChange={event => onChange({ task: event.target.value })}
               rows={5}
-              className="w-full resize-none rounded-xl border px-3 py-2 text-[13px] leading-relaxed outline-none"
+              className="w-full resize-none rounded-xl border px-3 py-2 text-[length:var(--fs-lg)] leading-relaxed outline-none"
               style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }}
               placeholder="写清楚这个分身要单独完成什么..."
               disabled={creating}
@@ -1621,11 +1628,11 @@ function CreateCloneSessionModal({
 
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
-              <span className="mb-1 block text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>模型</span>
+              <span className="mb-1 block text-[length:var(--fs-md)] font-semibold" style={{ color: 'var(--text-secondary)' }}>模型</span>
               <select
                 value={draft.model}
                 onChange={event => onChange({ model: event.target.value })}
-                className="h-10 w-full rounded-xl border px-3 text-[12px] outline-none"
+                className="h-10 w-full rounded-xl border px-3 text-[length:var(--fs-md)] outline-none"
                 style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }}
                 disabled={creating}
               >
@@ -1637,11 +1644,11 @@ function CreateCloneSessionModal({
               </select>
             </label>
             <label className="block">
-              <span className="mb-1 block text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>语言</span>
+              <span className="mb-1 block text-[length:var(--fs-md)] font-semibold" style={{ color: 'var(--text-secondary)' }}>语言</span>
               <select
                 value={draft.language}
                 onChange={event => onChange({ language: event.target.value === 'en' ? 'en' : 'zh' })}
-                className="h-10 w-full rounded-xl border px-3 text-[12px] outline-none"
+                className="h-10 w-full rounded-xl border px-3 text-[length:var(--fs-md)] outline-none"
                 style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }}
                 disabled={creating}
               >
@@ -1651,12 +1658,12 @@ function CreateCloneSessionModal({
             </label>
           </div>
 
-          <div className="rounded-xl border px-3 py-2 text-[12px] leading-relaxed" style={{ borderColor: 'rgba(14,165,233,.22)', color: 'var(--text-muted)', background: 'rgba(14,165,233,.08)' }}>
+          <div className="rounded-xl border px-3 py-2 text-[length:var(--fs-md)] leading-relaxed" style={{ borderColor: 'rgba(14,165,233,.22)', color: 'var(--text-muted)', background: 'rgba(14,165,233,.08)' }}>
             分身参数会写入该分身 Session。主体小莫仍负责分发、汇总和必要的语音播报。
           </div>
 
           {error ? (
-            <div className="rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">
+            <div className="rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-300">
               {error}
             </div>
           ) : null}
@@ -1667,7 +1674,7 @@ function CreateCloneSessionModal({
             type="button"
             onClick={onClose}
             disabled={creating}
-            className="h-9 flex-1 rounded-xl border text-[13px] disabled:opacity-40"
+            className="h-9 flex-1 rounded-xl border text-[length:var(--fs-lg)] disabled:opacity-40"
             style={{ color: 'var(--text-muted)', borderColor: 'var(--input-border)', background: 'var(--bg-card-hover)' }}
           >
             取消
@@ -1676,7 +1683,7 @@ function CreateCloneSessionModal({
             type="button"
             onClick={onConfirm}
             disabled={creating || !draft.task.trim()}
-            className="btn-primary h-9 flex-1 rounded-xl text-[13px] disabled:opacity-40"
+            className="btn-primary h-9 flex-1 rounded-xl text-[length:var(--fs-lg)] disabled:opacity-40"
           >
             {creating ? '创建中...' : '创建并启动'}
           </button>

@@ -34,9 +34,16 @@ const router = express.Router();
 const RUNTIME_PATH = process.env.AIMUX_BRIDGE_RUNTIME ||
   path.join(process.env.HOME || '/root', '.aimux', 'bridge', 'runtime.json');
 
+// content-length is NOT hop-by-hop and must not be dropped: on the streaming
+// /client/data path the body is piped straight through, and without a length
+// Node re-frames it as chunked. The bridge's upload handler read those bytes
+// raw, so the chunk framing landed in the payload and the stream never saw a
+// clean end — a 66 MiB download arrived corrupted and stalled to the idle
+// timeout. The buffered path below sets this header itself, so keeping it is
+// harmless there.
 const HOP_BY_HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-  'te', 'trailer', 'transfer-encoding', 'upgrade', 'host', 'content-length',
+  'te', 'trailer', 'transfer-encoding', 'upgrade', 'host',
 ]);
 
 interface BridgeTarget {

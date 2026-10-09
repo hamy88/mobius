@@ -55,6 +55,33 @@ function saveSessionLayoutMode(sessionId: string | null | undefined, mode: Works
   } catch { /* localStorage 不可用时静默 */ }
 }
 
+// 会话列表刷新时, 把列表里的最新标题回填给"当前选中会话"的副本
+// (currentSession / currentTask 只在切会话时拷贝一次, 标题多为后端自动生成,
+//  不回填则侧栏已更新而对话头部仍旧标题, 要刷新页面才变). 只同步 name,
+// 不动 agent_status 等前端实时维护的字段.
+// Keep the selected session's title in sync with a refreshed session list: currentSession is a
+// one-time copy, so backend auto-generated titles would otherwise stay stale in the chat header.
+// Only `name` is copied — live fields such as agent_status stay under frontend control.
+function syncSelectedSessionName(currentSession: Session | null, currentTask: Task | null, lists: any[][]) {
+  const pickName = (target: Session | Task | null) => {
+    const id = (target as any)?.session_id || (target as any)?.task_id
+    if (!target || !id) return null
+    for (const list of lists) {
+      const fresh = (list || []).find((s: any) => s && (s.session_id === id || s.task_id === id))
+      const freshName = fresh && typeof fresh.name === 'string' ? fresh.name : ''
+      if (freshName && freshName !== target.name) return { ...target, name: freshName }
+      if (freshName) return null
+    }
+    return null
+  }
+  const nextSession = pickName(currentSession)
+  const nextTask = pickName(currentTask)
+  const patch: Record<string, Session | Task> = {}
+  if (nextSession) patch.currentSession = nextSession
+  if (nextTask) patch.currentTask = nextTask
+  return patch
+}
+
 // Branding: 由 index.html 头部同步阻塞 script 注入到 window.__BRANDING__,
 // React 启动前已经定型, 不需要异步 fetch, 避免首屏闪烁.
 interface Branding {
@@ -68,7 +95,7 @@ interface Branding {
 declare global {
   interface Window {
     __BRANDING__?: Branding
-    // 全局打开管理中心 overlay (shell.tsx 注册). 引导系统「重温管理中心」按钮先打开 overlay 再启动引导.
+    // 全局打开管理中心 overlay (shell.tsx 注册).
     // 可选 tab: 传入即直接落到该 tab (例如 'runtime' = 运行监控), 不传则用管理中心默认 tab.
     openAdminOverlay?: (tab?: AdminPanelTab) => void
   }
@@ -460,8 +487,14 @@ export const useStore = create<AppState>((set) => ({
   setResearchesMap: (projectId, researches) => set((s) => ({ researchesMap: { ...s.researchesMap, [projectId]: researches } })),
   setCurrentResearch: (research) => set({ currentResearch: research }),
   setSessions: (sessions) => set({ sessions }),
-  setSessionsMap: (issueId, sessions) => set((s) => ({ sessionsMap: { ...s.sessionsMap, [issueId]: sessions } })),
-  setSessionsMapBatch: (entries) => set((s) => ({ sessionsMap: { ...s.sessionsMap, ...entries } })),
+  setSessionsMap: (issueId, sessions) => set((s) => ({
+    sessionsMap: { ...s.sessionsMap, [issueId]: sessions },
+    ...syncSelectedSessionName(s.currentSession, s.currentTask, [sessions]),
+  })),
+  setSessionsMapBatch: (entries) => set((s) => ({
+    sessionsMap: { ...s.sessionsMap, ...entries },
+    ...syncSelectedSessionName(s.currentSession, s.currentTask, Object.values(entries)),
+  })),
   setCurrentSession: (session) => set({ currentSession: session }),
   setTurns: (turns) => set({ turns }),
   setTasks: (tasks) => set({ tasks }),

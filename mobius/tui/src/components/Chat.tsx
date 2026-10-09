@@ -40,6 +40,8 @@ interface ChatProps {
   onResume: () => void
   onQuit: () => void
   onLogout: () => void
+  /** 可选，与 aimuxStatus 一样只在接了 AIMUX 的宿主里给；缺省时 /upgrade 不动作。 */
+  onUpgradeAimux?: () => void
   onReconfigure: (result: ConfigResult) => void
   onConfigCancel: (sessionId: string | null) => void
   aimuxStatus?: AimuxStatus
@@ -60,14 +62,15 @@ const SLASH_COMMANDS = [
   { cmd: '/compact', desc: '压缩当前会话上下文' },
   { cmd: '/resume', desc: '恢复一个历史会话' },
   { cmd: '/model', desc: '更换模型并开启新会话（保留当前任务）' },
-  { cmd: '/config', desc: '重新选择项目、任务和模型' },
+  { cmd: '/config', desc: '重新选择项目、任务、模型和 AIMUX 图形界面授权' },
   { cmd: '/logout', desc: '断开当前连接并返回登录界面' },
   { cmd: '/help', desc: '显示帮助' },
   { cmd: '/version', desc: '显示 TUI、AIMUX 和运行环境版本' },
+  { cmd: '/upgrade', desc: '从 PyPI 安装最新 AIMUX 并重连' },
   { cmd: '/quit', desc: '退出 TUI' },
 ]
 
-export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear, onResume, onQuit, onLogout, onReconfigure, onConfigCancel, aimuxStatus }: ChatProps) {
+export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear, onResume, onQuit, onLogout, onUpgradeAimux, onReconfigure, onConfigCancel, aimuxStatus }: ChatProps) {
   const chat = useChat({ client, ready, resumeSessionId })
   const [showHelp, setShowHelp] = useState(false)
   // null means "follow the tail". A concrete anchor identifies the exact row
@@ -130,11 +133,18 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
       }
       case '/model': setConfigOpen(true); return true
       case '/config': setReconfigOpen(true); return true
+      case '/upgrade': {
+        // 安装与重连进度都走 aimuxStatus（状态行），失败也会落进 aimuxStatus.detail，
+        // 所以这里只管触发，不额外弹错。
+        setVersionInfo(null)
+        onUpgradeAimux?.()
+        return true
+      }
       case '/logout': onLogout(); return true
       case '/quit': case '/exit': onQuit(); return true
       default: return false
     }
-  }, [aimuxStatus, chat, client.server, modelLabel, ready.prefs.model, onClear, onResume, onQuit, onLogout])
+  }, [aimuxStatus, chat, client.server, modelLabel, ready.prefs.model, onClear, onResume, onQuit, onLogout, onUpgradeAimux])
 
   const onSubmit = useCallback((text: string) => {
     const t = text.trim()
@@ -158,7 +168,7 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
   // the indicator falls back to the normal Working label for every turn.
   const firstQueryInFlight = !resumeSessionId && !chat.entries.some(isAssistantOutput)
 
-  // 用户输入去重 (对齐 web viewer/rounds.ts buildRounds): codex 同一提问的 3 形态
+  // 用户输入去重 (对齐 web viewer/display-dedup.ts): codex 同一提问的 3 形态
   // (type:user / response_item.message[user] / event_msg.user_message) 合并成 1 条,
   // 避免在累积视图里把同一条提问显示多次.
   const dedupedEntries = useMemo(() => dedupeUserEntries(chat.entries), [chat.entries])

@@ -49,9 +49,10 @@ async function main() {
   assert.strictEqual(install.status, 0, install.stderr);
   assert.strictEqual(fs.readFileSync(path.join(binDir, '.mobius-cli-app-dir'), 'utf8').trim(), path.resolve(mobiusRoot, '..'));
   fs.writeFileSync(path.join(binDir, '.mobius-cli-app-dir'), `${appDir}\n`);
-  for (const name of ['generate_localhost_jwt', 'multiagent_send', 'declare_job_done', 'declare_job_failed', 'research_blackboard_read', 'research_blackboard_write', '.research_blackboard_cli']) {
+  for (const name of ['generate_localhost_jwt', 'multiagent_send', 'declare_job_done', 'declare_job_failed', 'research_blackboard_read', 'research_blackboard_write', 'display-files', '.research_blackboard_cli']) {
     assert.strictEqual(fs.statSync(path.join(binDir, name)).mode & 0o777, 0o755);
   }
+  assert.strictEqual(run(path.join(binDir, 'display-files'), ['--remote', 'remote', '/tmp/a.py']).status, 0);
 
   for (const name of ['research_blackboard_read', 'research_blackboard_write']) {
     const helpResult = run(path.join(binDir, name), ['--help']);

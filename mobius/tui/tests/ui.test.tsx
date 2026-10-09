@@ -19,12 +19,14 @@ import { ChatScreen, Composer, shimmerText } from '../src/components/Chat.js'
 import { WindowsInputDecoder } from '../src/lib/windows-input.js'
 import { LoginScreen } from '../src/components/Login.js'
 import { PrepScreen } from '../src/components/PrepScreen.js'
+import { ReconfigFlow } from '../src/components/ConfigFlow.js'
 import { Select, TextInput } from '../src/components/primitives.js'
 import { MobiusClient } from '../src/api.js'
 import { renderMarkdownLines } from '../src/markdown.js'
-import { dedupeUserEntries, viewsForEntry, toolLabel } from '../src/lib/entry-view.js'
+import { dedupeUserEntries, isRoundOpenerEntry, viewsForEntry, toolLabel } from '../src/lib/entry-view.js'
 import { SseConnection } from '../src/sse.js'
 import type { ReadyState } from '../src/components/PrepScreen.js'
+import { setTuiGuiMode } from '../src/aimux.js'
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 let pass = 0, fail = 0
@@ -282,6 +284,26 @@ function testFirstUserEntryDedupe() {
   ]
   const deduped = dedupeUserEntries(entries as any)
   ok(deduped.length === 1, 'framed and plain first-turn user events render once')
+
+  const authoritativeOpener = {
+    type: 'user', uuid: 'mobius-opener', mobius: { kind: 'user' },
+    message: { role: 'user', content: '同一条权威输入' },
+  }
+  const nativeCopy = {
+    type: 'response_item', uuid: 'agent-copy',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '同一条权威输入' }] },
+  }
+  const openerWins = dedupeUserEntries([nativeCopy, authoritativeOpener] as any)
+  ok(openerWins.length === 1 && openerWins[0]?.uuid === 'mobius-opener', 'Mobius round opener wins even when the agent copy appears first')
+
+  const repeatedAcrossRounds = dedupeUserEntries([
+    authoritativeOpener,
+    { type: 'assistant', uuid: 'reply-1', message: { role: 'assistant', content: '第一轮完成' } },
+    { ...authoritativeOpener, uuid: 'mobius-opener-2' },
+  ] as any)
+  ok(repeatedAcrossRounds.filter(entry => entry.type === 'user').length === 2, 'same user text in separate rounds remains visible twice')
+
+  ok(!isRoundOpenerEntry({ ...authoritativeOpener, mobius: { kind: 'system' } } as any), 'non-opening Mobius kinds do not claim round-opener priority')
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -378,6 +400,192 @@ async function testPrepSearch() {
     // binding so later picker tests still start on the project screen.
     try { fs.rmSync(path.join(TMP_HOME, 'dir2project.json'), { force: true }) } catch { /* ignore */ }
   } finally { restoreFetch() }
+}
+// TEST 5c — GUI authorization step adapts to the TUI's own privilege
+// ════════════════════════════════════════════════════════════════════════════
+async function testPrepGuiStep() {
+  console.log('\n[UI 5c] GUI authorization step (windows)')
+  const client = new MobiusClient('http://mock.local', 'mock-jwt-token')
+  installMock((url) => {
+    if (url.includes('/api/projects') && !url.includes('/issues') && !url.includes('/skills') && !url.includes('/memories')) {
+      return jsonResponse([{ id: 'p9', name: '界面项目' }])
+    }
+    if (url.includes('/issues')) return jsonResponse([{ id: 'i9', project_id: 'p9', title: '授权任务' }])
+    if (url.includes('/sessions/model-options')) return jsonResponse([])
+    if (url.includes('/sessions/default-model')) return jsonResponse({ model: 'codex' })
+    if (url.includes('/memories')) return jsonResponse([])
+    if (url.includes('/skills')) return jsonResponse([])
+    return jsonResponse({ error: 'no mock' }, 404)
+  })
+  // Pre-seed the cwd binding + preferences so the wizard resumes right at the
+  // GUI step instead of walking project → issue → model → language first.
+  const HOME = process.env.MOBIUS_TUI_HOME as string
+  const cwd = process.cwd()
+  fs.writeFileSync(path.join(HOME, 'dir2project.json'), JSON.stringify({ [cwd]: 'p9' }))
+  const seedPrefs = () => fs.writeFileSync(path.join(HOME, 'dir2project_preference.json'), JSON.stringify({
+    [cwd]: { issueId: 'i9', prefs: { i9: { excluded_skill_ids: [], excluded_memory_ids: [], done: ['model', 'language'] } } },
+  }))
+  seedPrefs()
+  // No file at all means no choice has ever been made, i.e. 'off'.
+  const readMode = (): string => {
+    try { return JSON.parse(fs.readFileSync(path.join(HOME, 'tui-gui-authorized.json'), 'utf8')).mode } catch { return 'off' }
+  }
+  try {
+    // ── an ordinary (unelevated) terminal ────────────────────────────────────
+    const { lastFrame, stdin, unmount } = render(<PrepScreen client={client} onReady={() => {}} platform="win32" elevated={false} />)
+    await delay(160)
+    let frame = lastFrame() ?? ''
+    ok(frame.includes('使用纯命令行操作（推荐）'), 'option 1: command line only, marked recommended')
+    ok(frame.includes('授权使用图形界面（低权限）'), 'option 2 is offered')
+    ok(frame.includes('授权使用图形界面（高权限 - 不可用，请用管理员模式打开 Mobius TUI）'),
+      'option 3 is shown but unavailable, and says how to get it')
+    // The unavailable row is shown yet unreachable: Down from option 2 wraps
+    // past it back to option 1 rather than landing on it.
+    stdin.write('\x1b[B'); await delay(20)
+    ok((lastFrame() ?? '').includes('❯ 授权使用图形界面（低权限）'), 'option 2 is reachable')
+    ok((lastFrame() ?? '').includes('不弹 UAC'), 'option 2 advertises that it asks Windows for nothing')
+    stdin.write('\x1b[B'); await delay(20)
+    ok((lastFrame() ?? '').includes('❯ 使用纯命令行操作（推荐）'), 'the focus steps over the unavailable option')
+    stdin.write('\r'); await delay(120)
+    ok(!(lastFrame() ?? '').includes('使用纯命令行操作（推荐）'), 'choosing command line advances past the step')
+
+    seedPrefs()
+    const low = render(<PrepScreen client={client} onReady={() => {}} platform="win32" elevated={false} />)
+    await delay(160)
+    low.stdin.write('\x1b[B'); await delay(20)
+    low.stdin.write('\r'); await delay(140)
+    ok(readMode() === 'no-elevate', 'low privilege is what an unelevated TUI stores')
+    ok(!(low.lastFrame() ?? '').includes('授权使用图形界面（低权限）'), 'and the wizard moves on past the step')
+    low.unmount()
+    unmount()
+
+    // ── an already-elevated terminal ─────────────────────────────────────────
+    seedPrefs()
+    const adm = render(<PrepScreen client={client} onReady={() => {}} platform="win32" elevated={true} />)
+    await delay(160)
+    frame = adm.lastFrame() ?? ''
+    ok(frame.includes('授权使用图形界面（低权限 - 不可用，请用非管理员模式打开 Mobius TUI）'),
+      'an elevated TUI cannot offer low privilege, and says why')
+    ok(frame.includes('授权使用图形界面（高权限）'), 'high privilege is plain available')
+    adm.stdin.write('\x1b[B'); await delay(20)
+    ok((adm.lastFrame() ?? '').includes('❯ 授权使用图形界面（高权限）'), 'the focus steps over the unavailable low-privilege row')
+    ok(!(adm.lastFrame() ?? '').includes('❯ 授权使用图形界面（低权限）'), 'and never lands on it')
+    adm.stdin.write('\r'); await delay(140)
+    ok(readMode() === 'elevate', 'high privilege is stored')
+    adm.unmount()
+
+    // ── macOS: no elevation at all, so no middle row ─────────────────────────
+    seedPrefs()
+    const mac = render(<PrepScreen client={client} onReady={() => {}} platform="darwin" elevated={false} />)
+    await delay(160)
+    frame = mac.lastFrame() ?? ''
+    ok(frame.includes('授权使用图形界面（高权限）'), 'macOS still sees the GUI step')
+    ok(!frame.includes('（低权限'), 'macOS is offered no low/high distinction')
+    mac.unmount()
+  } finally { restoreFetch() }
+
+  for (const f of ['dir2project.json', 'dir2project_preference.json', 'tui-gui-authorized.json']) {
+    try { fs.rmSync(path.join(HOME, f), { force: true }) } catch { /* ignore */ }
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// TEST 5d — /config walks through the GUI authorization again
+// ════════════════════════════════════════════════════════════════════════════
+async function testConfigGuiStep() {
+  console.log('\n[UI 5d] /config can revisit the GUI authorization')
+  const client = new MobiusClient('http://mock.local', 'mock-jwt-token')
+  let sessionBody: any = null
+  installMock((url, init) => {
+    if (url.includes('/api/projects/p1/issues')) return jsonResponse([{ id: 'i1', project_id: 'p1', title: '配置任务' }])
+    if (url.includes('/api/projects')) return jsonResponse([{ id: 'p1', name: '配置项目' }])
+    if (url.includes('/api/sessions/model-options')) return jsonResponse([{ key: 'm1', label: '模型一', sub: '' }])
+    if (url.includes('/api/sessions/default-model')) return jsonResponse({ model: 'm1' })
+    if (url.includes('/api/issues/i1/sessions') && init?.method === 'POST') {
+      sessionBody = JSON.parse(String(init.body))
+      return jsonResponse({ session_id: 's-config' })
+    }
+    return jsonResponse({ error: 'no mock' }, 404)
+  })
+  const HOME = process.env.MOBIUS_TUI_HOME as string
+  // No file at all means no choice has ever been made, i.e. 'off'.
+  const readMode = (): string => {
+    try { return JSON.parse(fs.readFileSync(path.join(HOME, 'tui-gui-authorized.json'), 'utf8')).mode } catch { return 'off' }
+  }
+  let done = 0
+  // The mode cache is process-global, so pin it (and the file) to a known value
+  // before the flow, otherwise "unchanged" skips the write this test inspects.
+  setTuiGuiMode('off')
+  try {
+    const { lastFrame, stdin, unmount } = render(<ReconfigFlow client={client} onDone={() => { done += 1 }} onCancel={() => {}} platform="win32" elevated={false} />)
+    // Wait on the loaded rows, not the step titles: the titles render while the
+    // list is still fetching, and an Enter sent then goes nowhere.
+    ok(await waitFor(lastFrame, '配置项目'), 'config flow shows the project picker')
+    stdin.write('\r')
+    ok(await waitFor(lastFrame, '配置任务'), 'reaches the issue step')
+    stdin.write('\r')
+    ok(await waitFor(lastFrame, '模型一'), 'reaches the model step')
+    stdin.write('\r')
+    ok(await waitFor(lastFrame, 'AIMUX 图形界面授权'), 'the GUI authorization is offered inside /config')
+    let frame = lastFrame() ?? ''
+    ok(frame.includes('使用纯命令行操作（推荐）') && frame.includes('授权使用图形界面（低权限）'), 'with the same rows as the wizard')
+    ok(frame.includes('高权限 - 不可用，请用管理员模式打开 Mobius TUI'), 'and the same availability rule')
+
+    // Esc goes back to the model list rather than dropping the whole flow.
+    stdin.write('\x1b')
+    ok(await waitFor(lastFrame, '模型一'), 'Esc returns to the model step')
+    // Let the freshly mounted picker attach its input handler before typing.
+    await delay(150)
+    stdin.write('\r')
+    ok(await waitFor(lastFrame, 'AIMUX 图形界面授权'), 'and forward again')
+
+    await delay(150)                             // let the picker attach its input handler
+    stdin.write('\x1b[B')                       // → low privilege (the middle row, since it is available here)
+    await delay(40)
+    stdin.write('\r')
+    for (let i = 0; i < 80 && done === 0; i += 1) await delay(25)
+    ok(done === 1, 'the flow finishes by creating the session, exactly once')
+    ok(readMode() === 'no-elevate', 'and the chosen mode was stored')
+    ok(sessionBody?.pc_client_metadata?.gui_authorized === true, 'the session records that GUI was authorized')
+    unmount()
+  } finally {
+    setTuiGuiMode('off')
+    restoreFetch()
+  }
+  for (const f of ['dir2project.json', 'dir2project_preference.json', 'tui-gui-authorized.json']) {
+    try { fs.rmSync(path.join(HOME, f), { force: true }) } catch { /* ignore */ }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TEST 5e — Select skips unchoosable rows
+// ════════════════════════════════════════════════════════════════════════════
+async function testSelectDisabled() {
+  console.log('\n[UI 5e] Select disabled rows')
+  let picked = ''
+  const { lastFrame, stdin } = render(<Select items={[
+    { label: '选项一', value: 'a' },
+    { label: '选项二（不可用）', value: 'b', disabled: true },
+    { label: '选项三', value: 'c' },
+  ]} onSelect={v => { picked = v }} />)
+  await delay(30)
+  ok((lastFrame() ?? '').includes('❯ 选项一'), 'an enabled first row takes the focus')
+  stdin.write('\x1b[B'); await delay(20)
+  ok((lastFrame() ?? '').includes('❯ 选项三'), 'Down steps over the disabled row')
+  stdin.write('\r'); await delay(20)
+  ok(picked === 'c', 'Enter selects the focused enabled row')
+  // From the last row, Down wraps past the disabled row back to the first.
+  stdin.write('\x1b[B'); await delay(20)
+  ok((lastFrame() ?? '').includes('❯ 选项一'), 'Down wraps without landing on the disabled row')
+  // A leading disabled row cannot hold the initial focus either.
+  const leading = render(<Select items={[
+    { label: '不可用', value: 'x', disabled: true },
+    { label: '可用', value: 'y' },
+  ]} onSelect={() => {}} />)
+  await delay(30)
+  ok((leading.lastFrame() ?? '').includes('❯ 可用'), 'the initial focus skips a disabled row too')
+  leading.unmount()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1162,6 +1370,40 @@ async function testVersionSlash() {
   } finally { restoreFetch() }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// TEST 18 — /upgrade hands off to the host (install latest aimux + reconnect)
+// ════════════════════════════════════════════════════════════════════════════
+async function testUpgradeSlash() {
+  console.log('\n[UI 18] /upgrade slash command')
+  const client = new MobiusClient('http://mock.local', 'mock-jwt-token')
+  const ready: ReadyState = {
+    project: { id: 'p1', name: '测试项目' },
+    issue: { id: 'i1', project_id: 'p1', title: '测试任务' },
+    prefs: { model: 'codex', language: 'zh', excluded_skill_ids: [], excluded_memory_ids: [] },
+  }
+  installMock((url) => {
+    if (url.includes('/events')) {
+      return new Response(new RS({ start(c: any) { sseController = c; c.enqueue(enc.encode('event: subscribed\ndata: {"event":"subscribed","session":{}}\n\n')) } }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    return jsonResponse({ error: 'no mock' }, 404)
+  })
+  try {
+    let upgrades = 0
+    const { stdin, lastFrame, unmount } = render(
+      <ChatScreen client={client} ready={ready} webUserId="u" onClear={() => {}} onResume={() => {}} onQuit={() => {}} onLogout={() => {}} onUpgradeAimux={() => { upgrades += 1 }} onReconfigure={() => {}} onConfigCancel={() => {}} />,
+    )
+    await delay(60)
+    // 打全了命令名弹窗就收起，所以先在只打了前缀时看菜单里有没有它。
+    stdin.write('/upg'); await delay(40)
+    const menu = lastFrame() ?? ''
+    ok(menu.includes('/upgrade'), '/upgrade is offered in the slash-command menu')
+    stdin.write('rade'); await delay(40)
+    stdin.write('\r'); await delay(80)
+    unmount()
+    ok(upgrades === 1, '/upgrade calls the host upgrade hook exactly once')
+  } finally { restoreFetch() }
+}
+
 async function main() {
   await testLogin()
   await testChat()
@@ -1170,6 +1412,9 @@ async function main() {
   testFirstUserEntryDedupe()
   await testPrepRender()
   await testPrepSearch()
+  await testPrepGuiStep()
+  await testConfigGuiStep()
+  await testSelectDisabled()
   await testSelectViewport()
   await testProjectPickerEscQuit()
   await testTextInputBackspace()
@@ -1188,6 +1433,7 @@ async function main() {
   await testSendRetries502()
   await testCompactSlash()
   await testVersionSlash()
+  await testUpgradeSlash()
   // cleanup temp home
   try { fs.rmSync(TMP_HOME, { recursive: true, force: true }) } catch { /* ignore */ }
   console.log(`\n==== UI RESULT: ${pass} passed, ${fail} failed ====\n`)
