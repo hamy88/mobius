@@ -84,6 +84,7 @@ export interface Issue {
 export interface PcClientMetadata {
   work_mode: 'hub' | 'pc' | 'dual'
   aimux_id: string
+  initial_aimux_id?: string
   local_path?: string
   is_tui: boolean
   add_remote_aimux_mcp?: boolean
@@ -137,6 +138,8 @@ export interface SessionRuntimeStatus {
   agent_backend?: string
   real_time_info?: string
   model_available?: boolean
+  aimux_id?: string | null
+  initial_aimux_id?: string | null
 }
 
 // ── Preferences lookups ──────────────────────────────────────────────────────
@@ -193,14 +196,33 @@ export interface ResourceAccess {
 // ════════════════════════════════════════════════════════════════════════════
 export type AnyEntry = Record<string, any>
 
+// ── agent-history 组元数据 (协议 ① 的载荷) ───────────────────────────────────
+export interface HistoryGroup {
+  id: string
+  seq: number
+  opener_ts: string | null
+  user_summary: string
+  version: number
+  entry_count: number
+}
+
+/**
+ * 挂起中的开轮卡 (pending_round_openers): 忙时提交、尚未出队的用户指令.
+ * /groups 端点返回的 `pending` 数组与 SSE `pending_opener` 事件的 `entry` 字段同形.
+ */
+export interface HistoryPendingOpener {
+  id: string
+  opener_ts: string | null
+  user_summary: string
+}
+
 // ── SSE envelope events (GET /api/sessions/:id/events) ───────────────────────
 // Each SSE frame's data is a JSON object with an `event` discriminator.
 export type SseEvent =
   | { event: 'subscribed'; session: Session }
   | { event: 'history'; messages: any[]; total?: number }
-  | { event: 'jsonl_meta'; session_id: string; total?: number; total_approximate?: number; tail_count?: number; jsonl_path?: string }
-  | { event: 'jsonl_history'; reset?: boolean; done?: boolean; chunk_index?: number; count?: number; entries: AnyEntry[] }
-  | { event: 'jsonl_entry'; session_id: string; entry: AnyEntry }
+  | { event: 'group_created'; session_id: string; group: HistoryGroup }
+  | { event: 'entries'; session_id: string; group_id: string; group_id_version: number; entries: AnyEntry[] }
   | { event: 'typing'; active: boolean }
   | { event: 'error'; message?: string; category?: string }
   | { event: 'server_error'; message?: string }

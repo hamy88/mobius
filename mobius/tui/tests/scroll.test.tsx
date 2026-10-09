@@ -32,10 +32,13 @@ let sseController: any = null
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
+// SSE live batch counter — group_id_version must strictly increase (watermark).
+let liveVersion = 0
 function emitEntry(n: number) {
   // distinct uuid per entry so useChat's de-dup keeps every one
-  const payload = { event: 'jsonl_entry', session_id: SID, entry: { type: 'assistant', uuid: `a-${n}`, message: { role: 'assistant', content: [{ type: 'text', text: `回答 ${n}` }] } } }
-  sseController?.enqueue(enc.encode(`event: jsonl_entry\ndata: ${JSON.stringify(payload)}\n\n`))
+  liveVersion += 1
+  const payload = { event: 'entries', session_id: SID, group_id: 'g1', group_id_version: liveVersion, entries: [{ type: 'assistant', uuid: `a-${n}`, message: { role: 'assistant', content: [{ type: 'text', text: `回答 ${n}` }] } }] }
+  sseController?.enqueue(enc.encode(`event: entries\ndata: ${JSON.stringify(payload)}\n\n`))
 }
 
 let pass = 0, fail = 0
@@ -62,6 +65,9 @@ function mockFetch(url: string, init?: RequestInit): Response {
     }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
   }
   const method = init?.method ?? 'GET'
+  // agent-history 协议 ①②: 组元数据空表 (无 bootstrap 历史), live 事件由 emitEntry 注入.
+  if (url.endsWith(`/api/sessions/${SID}/groups`)) return json({ session_version: 0, groups: [] })
+  if (url.includes(`/api/sessions/${SID}/groups/`)) return json({ group_id: 'g1', version: 0, entries: [] })
   if (url.endsWith('/api/auth/config')) return json({ password_required: false })
   if (url.endsWith('/api/auth/me')) return json({ id: 'tester', display_name: 'Test User', role: 'admin', work_dir: '/tmp' })
   if (url.endsWith('/api/auth/login')) return json({ token: 'mock-jwt-token', user: { id: 'tester', display_name: 'Test User', role: 'admin' } })

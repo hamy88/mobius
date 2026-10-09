@@ -162,8 +162,7 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
 
   // First query of a fresh session triggers the full backend bootstrap (lazy
   // session creation, worker spawn, context load) before any output streams.
-  // Label that phase "第一个问题，正在初始化+全平台同步中，请稍候" instead of "Working"
-  // so it reads as startup rather than a stuck agent. Once the first assistant
+  // Label that phase as startup rather than a stuck agent. Once the first assistant
   // output is observed (or the session is a resumed one with prior history),
   // the indicator falls back to the normal Working label for every turn.
   const firstQueryInFlight = !resumeSessionId && !chat.entries.some(isAssistantOutput)
@@ -172,15 +171,32 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
   // (type:user / response_item.message[user] / event_msg.user_message) 合并成 1 条,
   // 避免在累积视图里把同一条提问显示多次.
   const dedupedEntries = useMemo(() => dedupeUserEntries(chat.entries), [chat.entries])
-  const pendingEntry = useMemo<AnyEntry | null>(() => chat.pendingUser === null ? null : ({
-    type: 'user',
-    __id: '__pending-user__',
-    message: { role: 'user', content: chat.pendingUser },
-  }), [chat.pendingUser])
-  const transcriptEntries = useMemo(
-    () => pendingEntry ? [...dedupedEntries, pendingEntry] : dedupedEntries,
-    [dedupedEntries, pendingEntry],
-  )
+  const pendingEntry = useMemo<AnyEntry | null>(() => {
+    // 忙时提交的指令已由排队行统一呈现, 乐观占位退役 (避免 "You:" 与 "排队" 双重显示).
+    if (chat.pending.length > 0) return null
+    return chat.pendingUser === null ? null : ({
+      type: 'user',
+      __id: '__pending-user__',
+      message: { role: 'user', content: chat.pendingUser },
+    })
+  }, [chat.pendingUser, chat.pending.length])
+  // 排队行 (合成条目): 显示最后一条挂起指令 + 总数, 紧跟对话末尾.
+  const pendingQueueEntry = useMemo<AnyEntry | null>(() => {
+    if (chat.pending.length === 0) return null
+    const last = chat.pending[chat.pending.length - 1]
+    return {
+      type: '__pending_queue__',
+      __id: '__pending-queue__',
+      text: last?.user_summary ?? '',
+      count: chat.pending.length,
+    }
+  }, [chat.pending])
+  const transcriptEntries = useMemo(() => {
+    const parts = [...dedupedEntries]
+    if (pendingEntry) parts.push(pendingEntry)
+    if (pendingQueueEntry) parts.push(pendingQueueEntry)
+    return parts
+  }, [dedupedEntries, pendingEntry, pendingQueueEntry])
 
   // Markdown parsing and wrapping are paid once per entry/terminal width. Keep
   // the two most recent widths so resize-back does not immediately reparse the
@@ -383,6 +399,12 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
           ? <WelcomeCard ready={ready} columns={terminal.columns} resumed={Boolean(resumeSessionId)} modelDisplay={modelDisplay} />
           : <CompactHeader ready={ready} sessionId={chat.sessionId} columns={terminal.columns} />}
 
+        {chat.switchedAway ? (
+          <Box flexShrink={0} borderStyle="round" borderColor="yellow" paddingX={1}>
+            <Text color="yellow" bold>注意：智能体已经离开此设备前往新设备（{chat.switchedAway}）</Text>
+          </Box>
+        ) : null}
+
         {!showWelcome
           ? <Box width="100%" flexShrink={0}><Text dimColor wrap="truncate-end">  {navigationPosition}{viewport.hasNewer ? <Text color="yellowBright">↓ 有新内容</Text> : null}{navigationDetail}</Text></Box>
           : null}
@@ -425,6 +447,8 @@ export function ChatScreen({ client, ready, webUserId, resumeSessionId, onClear,
           commands={SLASH_COMMANDS}
           onHeightChange={setComposerRows}
           inputActiveRef={chatInputActiveRef}
+          onPauseToDequeue={chat.pauseToDequeue}
+          hasPending={chat.pending.length > 0}
         />
         <StatusArea
           ready={ready}
@@ -510,7 +534,8 @@ function ScreenText({ row, text }: { row: ScreenRow; text: string }) {
       : tone === 'edit_header' || tone === 'reasoning' ? 'magenta'
         : tone === 'edit_new' ? 'green'
           : tone === 'system' ? 'yellow'
-            : undefined
+            : tone === 'pending' ? 'yellow'
+              : undefined
   const dimColor = tone === 'tool_result' || tone === 'tool_error' || tone === 'reasoning' || tone === 'system'
   return <Text wrap="truncate-end" bold={tone === 'user'} dimColor={dimColor} color={color}>{text}</Text>
 }
@@ -625,9 +650,12 @@ interface ComposerProps {
   commands: { cmd: string; desc: string }[]
   onHeightChange?: (rows: number) => void
   inputActiveRef?: React.RefObject<boolean>
+  // 排队插队: 有挂起指令时空输入回车触发; hasPending 控制提示文案与触发开关.
+  onPauseToDequeue?: () => void
+  hasPending?: boolean
 }
 
-export function Composer({ onSubmit, onStop, onQuit, typing, commands, onHeightChange, inputActiveRef }: ComposerProps) {
+export function Composer({ onSubmit, onStop, onQuit, typing, commands, onHeightChange, inputActiveRef, onPauseToDequeue, hasPending }: ComposerProps) {
   const [value, setValue] = useState('')
   const [cursor, setCursor] = useState(0)
   const [popupIdx, setPopupIdx] = useState(0)
@@ -848,6 +876,9 @@ export function Composer({ onSubmit, onStop, onQuit, typing, commands, onHeightC
         onSubmit(submitted)
         edit('', 0)
         setHistIdx(null)
+      } else if (hasPending) {
+        // 空输入回车 = 插队: 打断当前 turn 并出队下一条排队指令.
+        void onPauseToDequeue?.()
       }
       return
     }
@@ -980,7 +1011,10 @@ export function Composer({ onSubmit, onStop, onQuit, typing, commands, onHeightC
         <Box justifyContent="space-between">
           {confirmQuit
             ? <Text color="yellowBright" bold>请再次按下Ctrl+C退出</Text>
-            : <Text dimColor>{(stdout.columns ?? 80) >= 72 ? 'Enter 发送 · Shift+Enter / Alt+Enter / Ctrl+J 换行' : 'Enter 发送 · Alt+Enter / Ctrl+J 换行'}</Text>}
+            : <Text dimColor>
+                {hasPending ? <Text color="yellowBright">空回车插队 · </Text> : null}
+                {(stdout.columns ?? 80) >= 72 ? 'Enter 发送 · Shift+Enter / Alt+Enter / Ctrl+J 换行' : 'Enter 发送 · Alt+Enter / Ctrl+J 换行'}
+              </Text>}
           <Text dimColor>{wrapped.length > maxRows ? `${visualCursor + 1}/${wrapped.length} 行` : `${wrapped.length} 行`}</Text>
         </Box>
       </Box>

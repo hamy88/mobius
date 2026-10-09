@@ -118,6 +118,7 @@ export type ScreenRowTone =
   | 'reasoning'
   | 'system'
   | 'error'
+  | 'pending'
 
 export interface ScreenRow {
   /** Visible text used for geometry, hit-testing, and clipboard extraction. */
@@ -203,6 +204,11 @@ export function viewScreenRows(view: EntryView, columns: number): ScreenRows {
     case 'error': {
       const rows = view.text.split('\n').map((l, i) => `${i === 0 ? '⚠ ' : '  '}${l}`)
       return { marginTop: true, rows: fit(rows, 'error') }
+    }
+    case 'pending': {
+      const summary = clampLines(view.text, width - 6, 1)[0] || '(无内容)'
+      const tail = view.count > 1 ? ` · 等 ${view.count} 条指令` : ''
+      return { marginTop: true, rows: fit([`⚡ 排队 · ${summary}${tail}`], 'pending') }
     }
     default:
       return { marginTop: false, rows: [] }

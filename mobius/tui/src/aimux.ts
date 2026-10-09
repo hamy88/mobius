@@ -5,14 +5,15 @@
  * aimux on first use, then keep `aimux reverse connect` attached to the
  * currently authenticated Mobius server.  Nothing is started before login.
  */
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { promises as fs, existsSync, createWriteStream } from 'node:fs'
+import { promises as fs, existsSync, createWriteStream, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import extract from 'extract-zip'
 import { mobiusHome } from './config.js'
+import { windowsElevated } from './lib/windows-admin.js'
 
 export type AimuxState = 'starting' | 'connected' | 'failed' | 'stopped' | 'disabled'
 export type AimuxPhase = 'idle' | 'python' | 'venv' | 'install' | 'connecting' | 'heartbeat' | 'retrying' | 'connected'
@@ -32,7 +33,8 @@ export type AimuxLauncher =
   | { kind: 'exe'; path: string }
   | { kind: 'module'; python: string }
 
-const AIMUX_PACKAGE = 'aimux'
+const AIMUX_TARGET_VERSION = '0.3.69'
+const AIMUX_PACKAGE = `aimux==${AIMUX_TARGET_VERSION}`
 const WIN = process.platform === 'win32'
 const venvDir = () => path.join(mobiusHome(), 'aimux-venv')
 const venvPython = () => WIN ? path.join(venvDir(), 'Scripts', 'python.exe') : path.join(venvDir(), 'bin', 'python')
@@ -91,8 +93,9 @@ async function pythonForAimux(onProgress?: (p: InstallProgress) => void): Promis
 // 解压到 ~/.mobius/python-bundle/ 后用 `<python> -m aimux` 运行，彻底绕开宿主机
 // 系统 python（如被精简掉 ensurepip 的容器镜像）。aimux 全部依赖为纯 Python，
 // 故三平台可共用同一套打包产物，分别按 arch 发布到 CDN。
-const BUNDLE_VER = '3'
-const BUNDLE_AIMUX_VERSION = '0.1.29'
+/** Plan B 内置运行时包版本；每次发版跟 aimux pin 一起 +1，测试也从这里取。 */
+export const BUNDLE_VER = '17'
+const BUNDLE_AIMUX_VERSION = AIMUX_TARGET_VERSION
 /** Version expected from the installed or bundled AIMUX runtime. */
 export const AIMUX_VERSION = BUNDLE_AIMUX_VERSION
 const bundleDir = () => path.join(mobiusHome(), 'python-bundle')
@@ -271,12 +274,60 @@ export function spawnLauncher(launcher: AimuxLauncher, args: string[]): ChildPro
     : spawn(launcher.python, ['-m', 'aimux', ...args], { windowsHide: true })
 }
 
+/** 以守护进程形态 spawn aimux：detached(父变 init)+ stdio 重定向到 aimux.log, 不随 TUI 退出而亡。 */
+function spawnDetachedDaemon(launcher: AimuxLauncher, args: string[]): ChildProcess {
+  let logFd = -1
+  try { mkdirSync(mobiusHome(), { recursive: true }); logFd = openSync(aimuxLogPath(), 'a') } catch { logFd = -1 }
+  const stdio: StdioOptions = logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore'
+  const child = launcher.kind === 'exe'
+    ? spawn(launcher.path, args, { detached: true, stdio, windowsHide: true })
+    : spawn(launcher.python, ['-m', 'aimux', ...args], { detached: true, stdio, windowsHide: true })
+  if (logFd >= 0) { try { closeSync(logFd) } catch { /* ignore */ } }
+  child.unref?.()
+  return child
+}
+
 /** test-only 导出: 暴露内部 downloadBundle 以便单测 mock fetch 验证流式下载+进度。 */
 export const downloadBundleForTest = downloadBundle
 
+/** `a >= b`（点分数字）。非数字段一律判 false，宁可重装也不要用一个看不懂的版本。 */
+export function versionAtLeast(a: string, b: string): boolean {
+  const pa = a.split('.'), pb = b.split('.')
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = Number(pa[i] ?? 0), y = Number(pb[i] ?? 0)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false
+    if (x !== y) return x > y
+  }
+  return true
+}
+
+/** venv 里现成的 aimux 版本（跑不起来时 null）。 */
+function installedAimuxVersion(): string | null {
+  if (!existsSync(aimuxExe()) || !existsSync(venvPython())) return null
+  try {
+    const r = spawnSync(venvPython(), ['-c', 'import aimux; print(aimux.__version__)'], { encoding: 'utf8', windowsHide: true })
+    if (r.status !== 0) return null
+    const v = (r.stdout ?? '').trim().split(/\s+/).pop()
+    return v || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * pin 是**最低可用版本**，不是精确版本：比它新的直接沿用。
+ * 否则用户 `/upgrade` 到 PyPI 最新版后，下一次连接（乃至下次启动）会被拽回 pin，
+ * 升级看着"没生效"。
+ */
+function venvReady(): boolean {
+  const installed = installedAimuxVersion()
+  return installed !== null && versionAtLeast(installed, AIMUX_TARGET_VERSION)
+}
+
 export async function ensureAimux(onProgress?: (p: InstallProgress) => void): Promise<{ ok: boolean; error?: string; launcher?: AimuxLauncher }> {
   // Fast-path：venv 里已有 aimux 可执行 → 直接用。
-  if (existsSync(aimuxExe()) && existsSync(venvPython())) { logInstall(`ensureAimux fast-path: venv aimux exe present\n`); onProgress?.({ phase: 'ready' }); return { ok: true, launcher: { kind: 'exe', path: aimuxExe() } } }
+  const existing = venvReady() ? installedAimuxVersion() : null
+  if (existing) { logInstall(`ensureAimux fast-path: venv aimux ${existing} present (pin ${AIMUX_TARGET_VERSION})\n`); onProgress?.({ phase: 'ready' }); return { ok: true, launcher: { kind: 'exe', path: aimuxExe() } } }
   logInstall(`\n########## ensureAimux install begin ${new Date().toISOString()} platform=${process.platform} arch=${process.arch} home=${mobiusHome()} ##########\n`)
   const py = await pythonForAimux(onProgress)
   logInstall(`  pythonForAimux → ${py ?? '(null: no system python)'}\n`)
@@ -305,16 +356,232 @@ export async function ensureAimux(onProgress?: (p: InstallProgress) => void): Pr
   return { ok: false, error: `${venvError}；内置运行时也失败: ${bundle.error}` }
 }
 
-export function tuiAimuxIdentifier(hostname = os.hostname(), cwd = process.cwd()): string {
-  const host = hostname.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
-  // One machine may run several Mobius TUIs for different projects.  A
-  // hostname-only identifier makes every reverse client register with the
-  // same name and --replace continuously evicts its siblings ("client
-  // replaced").  The normalized cwd hash is stable across restarts/resume but
-  // unique for the common multi-project case.
-  const workspace = createHash('sha256').update(path.resolve(cwd)).digest('hex').slice(0, 10)
-  return `tui-${host || 'pc'}-${workspace}`
+/** Effective OS user (not `$USER`, which sudo/containers can pollute). */
+function currentUsername(): string {
+  try { return os.userInfo().username } catch { return process.env.USER || process.env.USERNAME || 'user' }
 }
+
+/** Per (username, workspace) hash — reused by the identifier and runtime JSON path. */
+export function aimuxWorkspaceHash(username = currentUsername(), cwd = process.cwd()): string {
+  return createHash('sha256').update(`${username}:${path.resolve(cwd)}`).digest('hex').slice(0, 10)
+}
+
+// ── GUI (computer use) authorization ─────────────────────────────────────
+// Machine-level choice made in the first-run wizard.
+//
+// The daemon's privilege is decided by this TUI's own privilege, once, and is
+// never negotiated at start time. A TUI must never ask Windows for rights it
+// does not already have: aimux satisfies such a request with
+// ShellExecuteW("runas"), which is synchronous and raises its consent prompt on
+// the secure desktop — a prompt nobody answers blocks the daemon *before* it
+// writes any state or starts its watchdog, leaving an immortal process the
+// supervisor can neither see nor kill. So:
+//
+//   unelevated TUI  --enable-gui --gui-no-elevate   (nothing is ever requested)
+//   elevated TUI    --enable-gui                    (aimux sees it is already
+//                                                    administrator and stays put)
+//
+// That is also why the modes are exclusive: a child inherits the parent's token,
+// so an elevated TUI cannot produce a low-privilege daemon, and an unelevated
+// one cannot produce an elevated daemon without prompting.
+//
+//   off        no GUI helper at all; registers as tui-<host>-<hash>
+//   no-elevate GUI helper, unelevated: Windows UIPI then blocks input into
+//              elevated windows
+//   elevate    GUI helper that can also drive administrator windows
+// Either authorized mode registers as gui-<host>-<hash>.
+export type GuiMode = 'off' | 'no-elevate' | 'elevate'
+
+/** Whether a mode can be offered here, and if not, what the user must change. */
+export interface GuiModeAvailability { available: boolean; reason?: string }
+
+const ADMIN_REASON = '请用管理员模式打开 Mobius TUI'
+const NON_ADMIN_REASON = '请用非管理员模式打开 Mobius TUI'
+
+/**
+ * Which GUI modes this machine can provide. Availability follows from the
+ * exclusive rule above: exactly one of the two authorized modes is offerable,
+ * and which one is decided by the TUI's own token.
+ */
+export function guiModeAvailability(
+  elevated: boolean,
+  platform: NodeJS.Platform = process.platform,
+): Record<GuiMode, GuiModeAvailability> {
+  return {
+    off: { available: true },
+    'no-elevate': platform === 'win32' && elevated
+      ? { available: false, reason: NON_ADMIN_REASON }
+      : { available: true },
+    // Off Windows there is no elevation to speak of, so the mode is always fine.
+    elevate: platform !== 'win32' || elevated ? { available: true } : { available: false, reason: ADMIN_REASON },
+  }
+}
+
+/**
+ * The GUI authorization picker's rows. An unavailable mode stays visible with
+ * the reason in its label — the user needs to know *why* the level they want is
+ * out of reach, and what to do about it.
+ */
+export function guiModeOptions(
+  elevated: boolean,
+  platform: NodeJS.Platform = process.platform,
+): Array<{ label: string; value: GuiMode; desc?: string; disabled?: boolean }> {
+  const availability = guiModeAvailability(elevated, platform)
+  const label = (name: string, mode: GuiMode): string => {
+    const a = availability[mode]
+    return a.available ? `授权使用图形界面（${name}）` : `授权使用图形界面（${name} - 不可用，${a.reason}）`
+  }
+  const rows: Array<{ label: string; value: GuiMode; desc?: string; disabled?: boolean }> = [
+    { label: '使用纯命令行操作（推荐）', value: 'off', desc: '仅命令行/文件方式操作本机' },
+  ]
+  // Off Windows there is no elevation request to skip, so the middle choice
+  // would be identical to the last one; only offer it where it means something.
+  if (platform === 'win32') {
+    rows.push({
+      label: label('低权限', 'no-elevate'),
+      value: 'no-elevate',
+      desc: availability['no-elevate'].available ? '不弹 UAC；能操作普通窗口，管理员窗口不行' : undefined,
+      disabled: !availability['no-elevate'].available,
+    })
+  }
+  rows.push({
+    label: label('高权限', 'elevate'),
+    value: 'elevate',
+    desc: availability.elevate.available
+      ? (platform === 'win32' ? '可操作管理员窗口（TUI 已是管理员，不会弹 UAC）' : '启用界面操作工具')
+      : undefined,
+    disabled: !availability.elevate.available,
+  })
+  return rows
+}
+
+/** Platforms where a computer-use helper exists at all, so the GUI choice applies. */
+export function hasGuiSupport(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32' || platform === 'darwin'
+}
+
+const GUI_AUTH_FILE = 'tui-gui-authorized.json'
+let guiModeCache: GuiMode | undefined = undefined
+
+/** Read the stored mode, also accepting the `{gui: boolean}` file written by <=0.3.66. */
+function readGuiMode(): GuiMode {
+  try {
+    const raw = JSON.parse(readFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), 'utf8')) as { mode?: unknown; gui?: unknown }
+    if (raw?.mode === 'off' || raw?.mode === 'no-elevate' || raw?.mode === 'elevate') return raw.mode
+    return raw?.gui === true ? 'elevate' : 'off'
+  } catch { return 'off' }
+}
+
+export function tuiGuiMode(): GuiMode {
+  if (guiModeCache === undefined) guiModeCache = readGuiMode()
+  return guiModeCache
+}
+
+/** test-only: read the stored mode straight from disk, bypassing the module cache. */
+export const readGuiModeForTest = readGuiMode
+
+export function setTuiGuiMode(mode: GuiMode): void {
+  guiModeCache = mode
+  try {
+    mkdirSync(mobiusHome(), { recursive: true })
+    // `gui` is written alongside `mode` so that a downgrade to <=0.3.66 still
+    // reads the right boolean instead of silently dropping the authorization.
+    writeFileSync(path.join(mobiusHome(), GUI_AUTH_FILE), JSON.stringify({ mode, gui: mode !== 'off' }), { mode: 0o600 })
+  } catch { /* unwritable home: the in-memory cache still holds this session */ }
+}
+
+/** Authorized in either mode — this is what flips the gui- identifier prefix. */
+export function tuiGuiAuthorized(): boolean { return tuiGuiMode() !== 'off' }
+
+/** Only this mode makes aimux request elevation, i.e. show a UAC prompt. */
+export function tuiGuiNoElevate(): boolean { return tuiGuiMode() === 'no-elevate' }
+
+export function setTuiGuiAuthorized(value: boolean): void { setTuiGuiMode(value ? 'elevate' : 'off') }
+
+export function tuiAimuxIdentifier(hostname = os.hostname(), cwd = process.cwd(), username = currentUsername(), guiEnabled = tuiGuiAuthorized()): string {
+  const host = hostname.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+  // One machine may run several Mobius TUIs for different projects (and for
+  // different users). A hostname-only identifier makes every reverse client
+  // register with the same name and --replace continuously evicts its siblings.
+  // The (username, cwd) hash is stable across restarts/resume but unique per
+  // user and per workspace, so separate projects/users never collide.
+  // GUI-authorized machines register under a gui- prefix so the capability is
+  // visible in the remote name itself (web device picker, remote ls).
+  return `${guiEnabled ? 'gui' : 'tui'}-${host || 'pc'}-${aimuxWorkspaceHash(username, cwd)}`
+}
+
+// ── shared daemon runtime JSON (one reverse connect per user+workspace) ──
+const LEASE_RENEW_MS = 5_000
+/**
+ * How long a freshly spawned daemon has to put runtime state on disk before the
+ * supervisor may conclude it never started.
+ *
+ * Generous on purpose. With --enable-gui on Windows the daemon cannot write
+ * anything until a human approves the elevation prompt — `runtime_update()` runs
+ * inside bridge_client.connect, which is *after* the elevation gate — so "no pid
+ * recorded yet" is the normal shape of a start in progress, not evidence of
+ * failure. Respawning on that evidence stacks another process (and another
+ * prompt) on top of the one already waiting.
+ */
+const SPAWN_GRACE_MS = 90_000
+/**
+ * Give up after this many consecutive spawns that never produced runtime state.
+ * Each attempt may raise a system authorization prompt, so an unbounded retry
+ * turns into a stream of windows; a clear failure the user can act on is worth
+ * far more than one more attempt.
+ */
+const MAX_UNPRODUCTIVE_SPAWNS = 3
+
+const aimuxRuntimeDir = () => path.join(mobiusHome(), 'aimux-runtime')
+const runtimePath = (hash: string) => path.join(aimuxRuntimeDir(), `${hash}.json`)
+
+async function ensureRuntimeDir(): Promise<void> {
+  await fs.mkdir(aimuxRuntimeDir(), { recursive: true, mode: 0o700 })
+}
+
+interface RuntimeRecord { pid?: number; last_feed_watchdog?: number; need_external_restart?: boolean; realtime_healthy_display?: boolean; identifier?: string; launched_at?: number }
+async function readRuntime(hash: string): Promise<RuntimeRecord | null> {
+  try {
+    return JSON.parse(await fs.readFile(runtimePath(hash), 'utf8')) as RuntimeRecord
+  } catch { return null }
+}
+
+/**
+ * Feed the daemon's watchdog. `last_feed_watchdog` is the liveness signal the
+ * daemon reads, so a feed must never be dropped just because the daemon has
+ * not written its runtime state yet — that would be a missed heartbeat.
+ */
+async function touchWatchdog(hash: string): Promise<void> {
+  await ensureRuntimeDir()
+  const file = runtimePath(hash)
+  let state: Record<string, unknown> = {}
+  try {
+    state = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>
+  } catch { /* AIMUX has not written runtime state yet — start a fresh record */ }
+  state.last_feed_watchdog = Date.now()
+  try {
+    const tmp = `${file}.tmp-${process.pid}`
+    await fs.writeFile(tmp, JSON.stringify(state), { mode: 0o600 })
+    await fs.rename(tmp, file)
+  } catch { /* directory not writable; nothing useful to do here */ }
+}
+
+/**
+ * Is `pid` still running? `process.kill(pid, 0)` is the only portable probe, and
+ * its *error* carries the answer: ESRCH means gone, EPERM means the process is
+ * there and simply not ours to signal. EPERM is the normal case now that
+ * --enable-gui makes the daemon an elevated process while the TUI stays
+ * unelevated (and it is the classic cross-user case on POSIX). Reading EPERM as
+ * dead is what made the supervisor kill and respawn healthy daemons on every
+ * bridge hiccup.
+ */
+export function pidAlive(
+  pid: number,
+  probe: (pid: number, signal: number) => void = (p, s) => process.kill(p, s),
+): boolean {
+  try { probe(pid, 0); return true } catch (e: any) { return e?.code === 'EPERM' }
+}
+
 
 /**
  * Build the reverse-connect command in one place. On Windows the bridge shells
@@ -334,13 +601,21 @@ export function reverseConnectArgs(
   token: string,
   platform: NodeJS.Platform = process.platform,
   silentFlag: string | null = null,
+  runtimeFile: string | null = null,
+  enableGui = false,
+  guiNoElevate = false,
 ): string[] {
   return [
     'reverse', 'connect', `${server.replace(/\/$/, '')}/aimux_bridge`,
     '--identifier', identifier,
     '--token', token,
     '--replace',
+    ...(runtimeFile ? ['--runtime', runtimeFile, '--watchdog', runtimeFile] : []),
     ...(platform === 'win32' && silentFlag ? [silentFlag] : []),
+    ...(enableGui ? ['--enable-gui'] : []),
+    // Only meaningful next to --enable-gui: it skips that flag's elevation
+    // request, and without --enable-gui there is no request to skip.
+    ...(enableGui && guiNoElevate ? ['--gui-no-elevate'] : []),
   ]
 }
 
@@ -375,12 +650,34 @@ export function pickSilentFlag(helpText: string, platform: NodeJS.Platform = pro
   return null
 }
 
-export async function probeAimuxBridgeConnection(
+/**
+ * Does this aimux build advertise --enable-gui (0.3.64+)? Older installs
+ * reject unknown options outright, so the flag is only sent when the help
+ * text confirms it — same defensive pattern as pickSilentFlag.
+ */
+export function pickEnableGuiFlag(helpText: string): boolean {
+  return /--enable-gui\b/.test(helpText)
+}
+
+/**
+ * Does this aimux build advertise --gui-no-elevate? It landed in the same
+ * 0.3.64 release as --enable-gui, but probe it separately: sending it to a
+ * build that lacks it is the same "No such option" crash-loop.
+ */
+export function pickGuiNoElevateFlag(helpText: string): boolean {
+  return /--gui-no-elevate\b/.test(helpText)
+}
+
+/** Result of a bridge heartbeat: is the stream up, and did the JWT just get rejected? */
+export interface AimuxBridgeProbe { connected: boolean; authError: boolean }
+
+/** Heartbeat probe that distinguishes "stream down" from "JWT expired" (401/403). */
+export async function probeAimuxBridge(
   server: string,
   token: string,
   identifier: string,
   timeoutMs = 4_000,
-): Promise<boolean> {
+): Promise<AimuxBridgeProbe> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -388,14 +685,24 @@ export async function probeAimuxBridgeConnection(
       `${server.replace(/\/$/, '')}/aimux_bridge/api/remotes/${encodeURIComponent(identifier)}/connection`,
       { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
     )
-    if (!response.ok) return false
+    if (response.status === 401 || response.status === 403) return { connected: false, authError: true }
+    if (!response.ok) return { connected: false, authError: false }
     const data: any = await response.json().catch(() => ({}))
-    return data?.identifier === identifier && data?.event_stream_connected === true
+    return { connected: data?.identifier === identifier && data?.event_stream_connected === true, authError: false }
   } catch {
-    return false
+    return { connected: false, authError: false }
   } finally {
     clearTimeout(timeout)
   }
+}
+
+export async function probeAimuxBridgeConnection(
+  server: string,
+  token: string,
+  identifier: string,
+  timeoutMs = 4_000,
+): Promise<boolean> {
+  return (await probeAimuxBridge(server, token, identifier, timeoutMs)).connected
 }
 
 interface SupervisorOptions {
@@ -403,162 +710,286 @@ interface SupervisorOptions {
   token: string
   identifier: string
   onStatus: (s: AimuxStatus) => void
+  /** Re-authenticate after AIMUX reports an expired/invalid bridge JWT. */
+  refreshToken?: () => Promise<string | null>
   heartbeatIntervalMs?: number
-  heartbeatFailureThreshold?: number
+  /** Grace before a spawn that produced no runtime state counts as failed (tests shrink this). */
+  spawnGraceMs?: number
+  /** Spawns allowed before giving up (tests shrink this). */
+  maxUnproductiveSpawns?: number
   retryBaseMs?: number
-  probeConnection?: () => Promise<boolean>
-  spawnProcess?: () => ChildProcess
+  probeConnection?: () => Promise<boolean | AimuxBridgeProbe>
+  spawnProcess?: (token: string) => ChildProcess
 }
 
+/**
+ * Coordinates the shared `aimux reverse connect` daemon for one user+workspace.
+ *
+ * The daemon is spawned detached (survives this TUI) and shared by every TUI in
+ * the same user+workspace. Two files under ~/.mobius/aimux-runtime/ coordinate
+ * it: a lease (mtime = "a TUI renewed me recently", content = daemon pid) and a
+ * runtime JSON is the shared watchdog state. A TUI only spawns when no live
+ * daemon is found; otherwise it feeds the watchdog and reuses it.
+ */
 export class AimuxSupervisor {
-  private child: ChildProcess | null = null
   private stopping = false
-  private retry: ReturnType<typeof setTimeout> | null = null
-  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null
-  private heartbeatEpoch = 0
-  private heartbeatFailures = 0
+  private refreshingToken = false
   private reconnectAttempt = 0
-  private bridgeConnected = false
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null
+  private probeTimer: ReturnType<typeof setTimeout> | null = null
+  private bridgeFailures = 0
+  /** When this supervisor last started a daemon (0 = it has not started any). */
+  private spawnedAt = 0
+  /** Spawns in a row that never reached runtime state — see MAX_UNPRODUCTIVE_SPAWNS. */
+  private unproductiveSpawns = 0
+  /** Set once the retry budget is spent: keep probing (so a late approval still recovers) but stop spawning. */
+  private gaveUp = false
   private opts: SupervisorOptions
-  constructor(opts: SupervisorOptions) { this.opts = opts }
-  start() { this.stopping = false; this.spawnChild() }
-  private spawnChild() {
-    const { server, token, identifier, onStatus } = this.opts
-    onStatus({ state: 'starting', phase: 'connecting', detail: '正在连接 Mobius AIMUX bridge…', identifier, attempt: this.reconnectAttempt })
-    const child = this.opts.spawnProcess?.() ?? spawn(
-      aimuxExe(),
-      reverseConnectArgs(server, identifier, token),
-      { windowsHide: true },
-    )
-    this.child = child
-    this.startHeartbeat()
-    let tail = ''   // 缓存 aimux 最近输出, 进程异常退出时带进状态行, 便于诊断(code=1 不再是黑盒)
-    const logWrite = { queue: Promise.resolve() }
-    appendAimuxLog(logWrite, `\n===== AIMUX start ${new Date().toISOString()} =====\n`)
-    appendAimuxLog(logWrite, `server=${server} identifier=${identifier} platform=${process.platform} arch=${process.arch}\n`)
-    const classify = (buf: Buffer) => {
-      const text = buf.toString('utf8')
-      tail = (tail + text).slice(-4000)
-      appendAimuxLog(logWrite, text)
-      if (!this.bridgeConnected && /connected|registered|event stream|heartbeat|sse/i.test(text)) {
-        onStatus({ state: 'starting', phase: 'heartbeat', detail: 'AIMUX 已启动，等待 bridge 心跳确认…', identifier })
-      } else if (/connection (refused|reset|closed|error)|failed to connect|unauthorized|forbidden|token.*invalid/i.test(text)) {
-        onStatus({ state: 'failed', phase: 'heartbeat', detail: text.trim().slice(-200), identifier })
-      }
+  private hash: string
+  constructor(opts: SupervisorOptions) { this.opts = opts; this.hash = aimuxWorkspaceHash() }
+
+  async start(): Promise<void> {
+    this.stopping = false
+    await this.ensureDaemon()
+    this.startLeaseRenewal()
+    this.scheduleProbe()
+  }
+
+  /** Adopt an existing daemon if one is alive; otherwise spawn (under the lock). */
+  private async ensureDaemon(): Promise<void> {
+    if (this.stopping) return
+    const current = await readRuntime(this.hash)
+    const pid = current?.pid ?? null
+    if (current && pid !== null && pidAlive(pid)) {
+      await touchWatchdog(this.hash)
+      this.opts.onStatus({ state: 'starting', phase: 'heartbeat', detail: 'AIMUX runtime 已存在，复用中…', identifier: this.opts.identifier })
+      return
     }
-    child.stdout?.on('data', classify); child.stderr?.on('data', classify)
-    child.on('error', e => {
-      appendAimuxLog(logWrite, `\n[spawn error] ${e.stack || e.message}\n`)
-      onStatus({ state: 'failed', phase: 'retrying', detail: `AIMUX 启动失败: ${e.message} · 日志: ${aimuxLogPath()}`, identifier })
-    })
-    child.on('exit', code => {
-      if (this.child !== child) return
-      this.child = null
-      this.stopHeartbeat()
-      if (this.stopping) { onStatus({ state: 'stopped', phase: 'idle', detail: 'AIMUX 已停止', identifier }); return }
-      appendAimuxLog(logWrite, `\n===== AIMUX exit code=${code} ${new Date().toISOString()} =====\n`)
-      const reason = code !== 0 && tail.trim()
-        ? `AIMUX 进程退出（code=${code}）: ${tail.trim().split(/[\r\n]+/).filter(Boolean).slice(-3).join(' ⏎ ').slice(-220)} · 日志: ${aimuxLogPath()}`
-        : `AIMUX 进程退出（code=${code}） · 日志: ${aimuxLogPath()}`
-      this.scheduleReconnect(reason)
-    })
+    await this.spawnDaemon()
   }
 
-  private startHeartbeat() {
-    this.stopHeartbeat()
-    this.heartbeatFailures = 0
-    this.bridgeConnected = false
-    const epoch = ++this.heartbeatEpoch
-    void this.checkHeartbeat(epoch)
-  }
-
-  private stopHeartbeat() {
-    this.heartbeatEpoch += 1
-    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer)
-    this.heartbeatTimer = null
-  }
-
-  private async checkHeartbeat(epoch: number): Promise<void> {
-    const connected = await (this.opts.probeConnection?.() ?? probeAimuxBridgeConnection(this.opts.server, this.opts.token, this.opts.identifier))
-    if (this.stopping || epoch !== this.heartbeatEpoch || !this.child) return
-
-    const threshold = this.opts.heartbeatFailureThreshold ?? 3
-    if (connected) {
-      this.heartbeatFailures = 0
+  /** Spawn the detached daemon exactly once, serialized by the path lock. */
+  private async spawnDaemon(): Promise<void> {
+    if (this.stopping) return
+      const current = await readRuntime(this.hash)
+      const pid = current?.pid ?? null
+      if (pid !== null && pidAlive(pid)) { await touchWatchdog(this.hash); return }
+      const { server, token, identifier, onStatus } = this.opts
+      onStatus({ state: 'starting', phase: 'connecting', detail: '正在启动 AIMUX 守护进程…', identifier, attempt: this.reconnectAttempt })
+      const gui = resolvedGuiArgs()
+      const child = this.opts.spawnProcess?.(token) ?? spawnDetachedDaemon({ kind: 'exe', path: aimuxExe() }, reverseConnectArgs(server, identifier, token, process.platform, null, runtimePath(this.hash), gui.enableGui, gui.guiNoElevate))
+      child.on('error', (e: Error) => { appendAimuxLog(installLogQueue, `\n[aimux spawn error] ${e.stack || e.message}\n`) })
+      child.unref?.()
+      this.spawnedAt = Date.now()
+      this.unproductiveSpawns += 1
+      appendAimuxLog(installLogQueue, `\n[aimux spawn] at=${new Date(this.spawnedAt).toISOString()} workspace=${this.hash} cwd=${process.cwd()} pid=${process.pid} gui=${gui.enableGui ? (gui.guiNoElevate ? 'no-elevate' : 'elevate') : 'off'} attempt=${this.unproductiveSpawns}\n`)
       this.reconnectAttempt = 0
-      this.bridgeConnected = true
-      this.opts.onStatus({
-        state: 'connected', phase: 'connected',
-        detail: `心跳正常 · ${this.opts.identifier}`,
-        identifier: this.opts.identifier,
-      })
-    } else {
-      this.heartbeatFailures += 1
-      if (this.heartbeatFailures >= threshold) {
-        this.bridgeConnected = false
-        await this.restartAfterDisconnect(`bridge 心跳连续 ${this.heartbeatFailures} 次未响应`)
-        return
-      }
-      this.opts.onStatus({
-        state: 'starting', phase: 'heartbeat',
-        detail: `等待 bridge 心跳确认（${this.heartbeatFailures}/${threshold}）…`,
-        identifier: this.opts.identifier,
-      })
+  }
+
+  /** Renew the lease every 5s while this TUI is alive. */
+  private startLeaseRenewal(): void {
+    const tick = () => {
+      if (this.stopping) return
+      void touchWatchdog(this.hash).catch(() => {})
+      this.watchdogTimer = setTimeout(tick, LEASE_RENEW_MS)
     }
-    const interval = this.opts.heartbeatIntervalMs ?? 5_000
-    this.heartbeatTimer = setTimeout(() => void this.checkHeartbeat(epoch), interval)
+    void touchWatchdog(this.hash).catch(() => {})
+    this.watchdogTimer = setTimeout(tick, LEASE_RENEW_MS)
   }
 
-  private async restartAfterDisconnect(reason: string) {
-    this.stopHeartbeat()
-    await this.killChild()
-    if (!this.stopping) this.scheduleReconnect(reason)
+  private scheduleProbe(): void {
+    if (this.stopping) return
+    this.probeTimer = setTimeout(() => void this.checkDaemon(), this.opts.heartbeatIntervalMs ?? 5_000)
   }
 
-  private scheduleReconnect(reason: string) {
-    if (this.stopping || this.retry) return
-    this.reconnectAttempt += 1
-    const base = this.opts.retryBaseMs ?? 1_000
-    const delay = Math.min(15_000, base * (2 ** Math.min(this.reconnectAttempt - 1, 4)))
-    const seconds = Math.max(1, Math.ceil(delay / 1_000))
-    this.opts.onStatus({
-      state: 'failed', phase: 'retrying',
-      detail: `${reason}，${seconds} 秒后进行第 ${this.reconnectAttempt} 次重连…`,
-      identifier: this.opts.identifier,
-      attempt: this.reconnectAttempt,
-    })
-    this.retry = setTimeout(() => {
-      this.retry = null
-      if (!this.stopping) this.spawnChild()
-    }, delay)
+  /** Probe the bridge; refresh on auth error, respawn only when the daemon is gone. */
+  private async checkDaemon(): Promise<void> {
+    if (this.stopping) return
+      const raw = await (this.opts.probeConnection?.() ?? probeAimuxBridge(this.opts.server, this.opts.token, this.opts.identifier))
+      const probe: AimuxBridgeProbe = typeof raw === 'boolean' ? { connected: raw, authError: false } : raw
+      if (this.stopping) return
+      if (probe.authError) {
+      await this.setRuntimeRestartRequested()
+        await this.refreshCredentials('JWT 已过期')
+    } else if (probe.connected) {
+      this.reconnectAttempt = 0
+      this.gaveUp = false
+      this.unproductiveSpawns = 0
+      this.opts.onStatus({ state: 'connected', phase: 'connected', detail: `心跳正常 · ${this.opts.identifier}`, identifier: this.opts.identifier })
+      this.bridgeFailures = 0
+    } else {
+      this.bridgeFailures += 1
+      await this.updateRuntimeHealth(false)
+      const runtime = await readRuntime(this.hash)
+      const pid = runtime?.pid ?? null
+      const alive = pid !== null && pidAlive(pid)
+      // Runtime state on disk means the daemon got past its own start — which on
+      // Windows may have meant an elevation prompt — so the attempt produced
+      // something and the retry budget is not the thing to withhold.
+      if (pid !== null) this.unproductiveSpawns = 0
+      if (alive) {
+        // The daemon owns reconnection — it retries with backoff and re-registers
+        // on its own. Killing a live daemon cannot fix a bridge problem, and on
+        // Windows the replacement costs a UAC prompt; worse, the two then take
+        // turns evicting each other through --replace, which drops the stream
+        // again. So a live daemon is left alone no matter how long it takes.
+        this.opts.onStatus({ state: 'starting', phase: 'heartbeat', detail: '等待 bridge 心跳确认…', identifier: this.opts.identifier })
+      } else if (pid === null && this.unproductiveSpawns >= (this.opts.maxUnproductiveSpawns ?? MAX_UNPRODUCTIVE_SPAWNS)) {
+        // Stop rather than keep stacking attempts the user cannot act on. The
+        // actionable cause is almost always a system authorization prompt that
+        // was never shown (a remote or locked session) or never answered, and
+        // the daemon cannot reach its watchdog until the prompt is dealt with.
+        this.opts.onStatus({
+          state: 'failed', phase: 'idle',
+          detail: `AIMUX 连续 ${this.unproductiveSpawns} 次启动失败。若系统授权弹窗看不到或点不了（远程/锁屏会话），请在向导里把 GUI 授权改为「低权限」或「纯命令行」。日志: ${aimuxLogPath()}`,
+          identifier: this.opts.identifier,
+        })
+        this.gaveUp = true
+      } else if (pid === null && Date.now() - this.spawnedAt < (this.opts.spawnGraceMs ?? SPAWN_GRACE_MS)) {
+        // Nothing on disk yet. With --enable-gui on Windows the daemon cannot
+        // write runtime state until a human approves the elevation prompt, so
+        // this is the normal shape of a start in progress — respawning here
+        // stacks another prompt every probe interval. Wait it out.
+        this.opts.onStatus({ state: 'starting', phase: 'connecting', detail: '等待 AIMUX 守护进程就绪（若弹出系统授权请点击确认）…', identifier: this.opts.identifier })
+      } else if (!this.gaveUp) {
+        // No runtime state and our own spawn is long past, or the recorded pid is
+        // genuinely gone (ESRCH) — nothing to reconnect, so start one.
+        this.reconnectAttempt += 1
+        this.opts.onStatus({ state: 'failed', phase: 'retrying', detail: `AIMUX 守护进程未响应，重启连接中（第 ${this.reconnectAttempt} 次）…`, identifier: this.opts.identifier, attempt: this.reconnectAttempt })
+        this.bridgeFailures = 0
+        await this.spawnDaemon()
+      }
+    }
+    this.scheduleProbe()
   }
 
-  private async killChild() {
-    const child = this.child
-    this.child = null
-    if (!child?.pid) return
-    if (WIN) await run('taskkill', ['/PID', String(child.pid), '/T', '/F'])
-    else try { child.kill('SIGTERM') } catch { /* ignore */ }
+  private async updateRuntimeHealth(healthy: boolean): Promise<void> {
+    const file = runtimePath(this.hash)
+    try {
+      const state = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>
+      state.realtime_healthy_display = healthy
+      if (healthy) state.last_healthy_heartbeat = Date.now()
+      const tmp = `${file}.tmp-${process.pid}`
+      await fs.writeFile(tmp, JSON.stringify(state), { mode: 0o600 })
+      await fs.rename(tmp, file)
+    } catch {}
   }
 
-  async stop() {
+  private async setRuntimeRestartRequested(): Promise<void> {
+    const file = runtimePath(this.hash)
+    try {
+      const state = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>
+      state.need_external_restart = true
+      state.realtime_healthy_display = false
+      const tmp = `${file}.tmp-${process.pid}`
+      await fs.writeFile(tmp, JSON.stringify(state), { mode: 0o600 })
+      await fs.rename(tmp, file)
+    } catch {}
+  }
+
+  private async refreshCredentials(reason: string): Promise<void> {
+    if (this.stopping || this.refreshingToken) return
+    const refreshToken = this.opts.refreshToken
+    if (!refreshToken) return
+    this.refreshingToken = true
+    this.opts.onStatus({ state: 'starting', phase: 'retrying', detail: 'AIMUX 登录凭据已过期，正在刷新 JWT…', identifier: this.opts.identifier })
+    try {
+      const token = await refreshToken()
+      if (this.stopping) return
+      if (!token) throw new Error('登录接口未返回新 JWT')
+      this.opts.token = token
+      this.reconnectAttempt = 0
+      appendAimuxLog(installLogQueue, `AIMUX JWT refreshed at ${new Date().toISOString()}; restarting bridge client\n`)
+      this.opts.onStatus({ state: 'starting', phase: 'connecting', detail: 'JWT 已刷新，正在重新连接 AIMUX bridge…', identifier: this.opts.identifier })
+      await this.spawnDaemon()
+    } catch {
+      // refresh failed → the probe loop will retry on the next tick
+    } finally {
+      this.refreshingToken = false
+    }
+  }
+
+  async stop(): Promise<void> {
     this.stopping = true
-    if (this.retry) clearTimeout(this.retry)
-    this.retry = null
-    this.stopHeartbeat()
-    await this.killChild()
-    this.opts.onStatus({ state: 'stopped', phase: 'idle', detail: 'AIMUX 已停止', identifier: this.opts.identifier })
+    if (this.watchdogTimer) clearTimeout(this.watchdogTimer)
+    this.watchdogTimer = null
+    if (this.probeTimer) clearTimeout(this.probeTimer)
+    this.probeTimer = null
+    this.opts.onStatus({ state: 'stopped', phase: 'idle', detail: 'AIMUX watchdog 将在续租超时后停止', identifier: this.opts.identifier })
   }
 }
 
 let supervisor: AimuxSupervisor | null = null
 let installing: Promise<void> | null = null
+/** 上一次 startAimuxConnection 的参数，供 `/upgrade` 重装后原地重连。 */
+let lastStartOpts: StartOptions | null = null
+
+interface StartOptions {
+  server: string
+  token: string
+  onStatus?: (s: AimuxStatus) => void
+  refreshToken?: () => Promise<string | null>
+}
 // Resolved Windows console-hiding flag for the installed aimux (undefined =
 // not probed yet this process). Cached so reconnects reuse it without re-running
 // `aimux reverse connect --help`. See reverseConnectArgs for why this is probed.
 let cachedSilentFlag: string | null | undefined = undefined
+// Same caching for --enable-gui support (aimux 0.3.64+): sending it to an older
+// build crashes the supervisor with "No such option".
+let cachedEnableGui: boolean | undefined = undefined
+// --gui-no-elevate shipped in that same release, so it is probed from the same
+// help text and only consulted while --enable-gui is being sent.
+let cachedGuiNoElevate: boolean | undefined = undefined
 
-export async function startAimuxConnection(opts: { server: string; token: string; onStatus?: (s: AimuxStatus) => void }): Promise<void> {
+/**
+ * The mode actually in force, as opposed to the stored preference. Availability
+ * can invalidate a stored choice — a machine-level 'elevate' picked from an
+ * administrator session, reopened from an ordinary one — and the daemon gets
+ * this, not what was stored. Mirrors pickGuiArgs so the picker's "current"
+ * marker cannot point at a mode this machine will not use.
+ */
+export function effectiveGuiMode(
+  mode: GuiMode = tuiGuiMode(),
+  elevated = windowsElevated(),
+  platform: NodeJS.Platform = process.platform,
+): GuiMode {
+  if (mode === 'off') return 'off'
+  if (guiModeAvailability(elevated, platform)[mode].available) return mode
+  if (platform !== 'win32') return mode
+  return elevated ? 'elevate' : 'no-elevate'
+}
+
+/**
+ * The GUI flags to send, given the stored mode, this TUI's own privilege and
+ * what the installed aimux advertises.
+ *
+ * Pure so the rule can be tested directly. The rule is that an unelevated TUI may
+ * only ever send the pair that requests nothing; when the installed build cannot
+ * express that, it sends no GUI flags at all rather than risk a daemon start that
+ * blocks on a consent prompt the supervisor can neither see nor clean up.
+ */
+export function pickGuiArgs(
+  mode: GuiMode,
+  elevated: boolean,
+  supports: { enable: boolean; noElevate: boolean },
+  platform: NodeJS.Platform = process.platform,
+): { enableGui: boolean; guiNoElevate: boolean } {
+  if (mode === 'off' || !supports.enable) return { enableGui: false, guiNoElevate: false }
+  if (platform !== 'win32') return { enableGui: true, guiNoElevate: mode === 'no-elevate' && supports.noElevate }
+  if (elevated) return { enableGui: true, guiNoElevate: false }
+  return supports.noElevate ? { enableGui: true, guiNoElevate: true } : { enableGui: false, guiNoElevate: false }
+}
+
+/** pickGuiArgs bound to the stored mode, this process's token and the probe caches. */
+function resolvedGuiArgs(): { enableGui: boolean; guiNoElevate: boolean } {
+  return pickGuiArgs(
+    tuiGuiMode(),
+    windowsElevated(),
+    { enable: cachedEnableGui === true, noElevate: cachedGuiNoElevate === true },
+  )
+}
+
+export async function startAimuxConnection(opts: StartOptions): Promise<void> {
   const onStatus = opts.onStatus ?? (() => {})
   // Tests and explicitly opted-out users should not spawn a network worker.
   if (process.env.MOBIUS_TUI_DISABLE_AIMUX === '1') {
@@ -568,6 +999,7 @@ export async function startAimuxConnection(opts: { server: string; token: string
     onStatus({ state: 'disabled', phase: 'idle', detail: 'AIMUX 测试连接已跳过' }); return
   }
   if (supervisor || installing) return
+  lastStartOpts = opts
   installing = (async () => {
     onStatus({ state: 'starting', phase: 'python', detail: '检查 Python 与 AIMUX 运行环境…' })
     const ready = await ensureAimux(p => onStatus({
@@ -581,17 +1013,27 @@ export async function startAimuxConnection(opts: { server: string; token: string
     // Windows only: ask the installed aimux which console-hiding flag it accepts
     // before spawning, so a version mismatch (older PyPI/bundle aimux without
     // --slient-v2) can't crash-loop the supervisor with "No such option".
-    if (WIN && cachedSilentFlag === undefined) {
+    const needGuiFlag = tuiGuiAuthorized()
+    if (cachedSilentFlag === undefined || (needGuiFlag && cachedEnableGui === undefined)) {
       const help = await probeReverseConnectHelp(launcher)
-      cachedSilentFlag = pickSilentFlag(help)
-      logInstall(`reverse-connect silent flag probe → ${cachedSilentFlag ?? '(none supported; sending no flag)'}\n`)
+      if (WIN && cachedSilentFlag === undefined) {
+        cachedSilentFlag = pickSilentFlag(help)
+        logInstall(`reverse-connect silent flag probe → ${cachedSilentFlag ?? '(none supported; sending no flag)'}\n`)
+      }
+      if (needGuiFlag && cachedEnableGui === undefined) {
+        cachedEnableGui = pickEnableGuiFlag(help)
+        cachedGuiNoElevate = pickGuiNoElevateFlag(help)
+        logInstall(`reverse-connect --enable-gui probe → ${cachedEnableGui ? 'supported' : 'NOT supported (skipping; upgrade aimux to 0.3.64+)'} · --gui-no-elevate ${cachedGuiNoElevate ? 'supported' : 'NOT supported'}\n`)
+      }
     }
     const silentFlag = cachedSilentFlag
+    const gui = resolvedGuiArgs()
+    logInstall(`GUI mode ${tuiGuiMode()} → ${gui.enableGui ? (gui.guiNoElevate ? '--enable-gui --gui-no-elevate (no UAC)' : '--enable-gui (UAC on Windows)') : 'no GUI flags'}\n`)
     supervisor = new AimuxSupervisor({
-      server: opts.server, token: opts.token, identifier, onStatus,
-      spawnProcess: () => spawnLauncher(launcher, reverseConnectArgs(opts.server, identifier, opts.token, process.platform, silentFlag)),
+      server: opts.server, token: opts.token, identifier, onStatus, refreshToken: opts.refreshToken,
+      spawnProcess: token => spawnDetachedDaemon(launcher, reverseConnectArgs(opts.server, identifier, token, process.platform, silentFlag, runtimePath(aimuxWorkspaceHash()), gui.enableGui, gui.guiNoElevate)),
     })
-    supervisor.start()
+    await supervisor.start()
   })().finally(() => { installing = null })
   await installing
 }
@@ -599,4 +1041,100 @@ export async function startAimuxConnection(opts: { server: string; token: string
 export async function stopAimuxConnection(): Promise<void> {
   const current = supervisor; supervisor = null
   await current?.stop()
+}
+
+/**
+ * Re-do the reverse connection after the GUI authorization choice changed.
+ * The old daemon must die first (its runtime JSON is keyed by workspace hash,
+ * not by the identifier or flags) and a fresh one spawns with the new set:
+ * the identifier flips tui-⇄gui- on off⇄authorized, and the flags differ
+ * between no-elevate and elevate. No-op when no connection is up yet — the
+ * next startAimuxConnection picks the new mode up anyway.
+ */
+export async function restartAimuxConnectionForGuiChange(): Promise<void> {
+  const opts = lastStartOpts
+  await stopAimuxConnection()
+  await stopDaemonFromRuntime()
+  if (opts) await startAimuxConnection(opts)
+}
+
+/** SIGTERM 掉本工作区 runtime JSON 里记录的守护进程，并删掉该文件。
+ *  不这么做的话，新 supervisor 会按 pid 复用到刚升级前的旧 daemon。 */
+async function stopDaemonFromRuntime(): Promise<void> {
+  const hash = aimuxWorkspaceHash()
+  const pid = (await readRuntime(hash))?.pid ?? null
+  if (pid !== null && pidAlive(pid)) {
+    // EPERM means the daemon is elevated and not ours to signal; waiting for it
+    // to die would just stall the caller, so leave it to its own watchdog.
+    let ours = true
+    try { process.kill(pid, 'SIGTERM') } catch (e: any) { ours = e?.code !== 'EPERM' }
+    if (ours) {
+      for (let i = 0; i < 30 && pidAlive(pid); i++) await new Promise(r => setTimeout(r, 100))
+      if (pidAlive(pid)) { try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ } }
+    }
+  }
+  try { await fs.unlink(runtimePath(hash)) } catch { /* 本来就没有 */ }
+}
+
+/** `/upgrade` 装的永远是 PyPI 上的最新版，故意不走 AIMUX_TARGET_VERSION 这条 pin。 */
+const AIMUX_PYPI_INDEX = 'https://pypi.org/simple'
+
+/** 从 PyPI 官方索引安装最新 aimux（不带版本约束），返回实际装上的版本。 */
+async function installLatestAimux(onProgress?: (p: InstallProgress) => void): Promise<{ ok: boolean; version?: string; error?: string }> {
+  const py = await pythonForAimux(onProgress)
+  if (!py) return { ok: false, error: '未找到 Python 3.10+（或 uv），无法升级 AIMUX' }
+  if (!existsSync(venvPython())) {
+    onProgress?.({ phase: 'venv', detail: `创建 Python 虚拟环境（${py}）…` })
+    let r = await run(py, ['-m', 'venv', venvDir()])
+    if (r.code !== 0 && py === 'py') r = await run(py, ['-3', '-m', 'venv', venvDir()])
+    if (r.code !== 0) return { ok: false, error: `venv 创建失败: ${r.stderr || r.stdout}` }
+  }
+  onProgress?.({ phase: 'install', detail: '正在从 PyPI 安装最新 aimux…' })
+  // --no-cache-dir：刚发布的版本可能还躺在 pip 的索引/包缓存里（TTL 内），
+  // 用户点 /upgrade 就是要立刻拿到新版本，宁可多下一次也不吃缓存。
+  const r = await run(venvPython(), [
+    '-m', 'pip', 'install', '--no-input', '--disable-pip-version-check',
+    '--upgrade', '--no-cache-dir', '--index-url', AIMUX_PYPI_INDEX, 'aimux',
+  ], line => {
+    if (/downloading|collecting|installing|using cached|%\s*\d|━|─/i.test(line)) onProgress?.({ phase: 'install', detail: line.slice(0, 120) })
+  })
+  if (r.code !== 0) return { ok: false, error: `pip install 失败: ${r.stderr || r.stdout}` }
+  const v = await run(venvPython(), ['-c', 'import aimux; print(aimux.__version__)'])
+  const version = v.code === 0 ? v.stdout.trim().split(/\s+/).pop() : undefined
+  logInstall(`/upgrade installed aimux ${version ?? '(version unknown)'} from ${AIMUX_PYPI_INDEX}\n`)
+  return { ok: true, version }
+}
+
+/**
+ * `/upgrade`：把本地 AIMUX 升到 PyPI 上的最新版并原地重连。
+ *
+ * 顺序很关键——先停 TUI 的续租与旧守护进程，再装，最后用上次的连接参数重连：
+ * 否则 supervisor 会按旧 pid 把升级前的 daemon 复用回来，升级看起来"没生效"。
+ */
+export async function upgradeAimuxRuntime(): Promise<{ ok: boolean; version?: string; error?: string }> {
+  const opts = lastStartOpts
+  const onStatus = opts?.onStatus ?? (() => {})
+  if (process.env.MOBIUS_TUI_DISABLE_AIMUX === '1') {
+    const error = 'AIMUX 自动连接已关闭 (MOBIUS_TUI_DISABLE_AIMUX=1)'
+    onStatus({ state: 'disabled', phase: 'idle', detail: 'AIMUX 自动连接已关闭' })
+    return { ok: false, error }
+  }
+  if (!opts) return { ok: false, error: '尚未登录或 AIMUX 未启动，无法升级' }
+  logInstall(`\n########## /upgrade requested ${new Date().toISOString()} ##########\n`)
+  onStatus({ state: 'starting', phase: 'install', detail: '正在停止 AIMUX 守护进程…' })
+  await stopAimuxConnection()
+  await stopDaemonFromRuntime()
+  const installed = await installLatestAimux(p => onStatus({
+    state: 'starting',
+    phase: p.phase === 'ready' ? 'connecting' : p.phase,
+    detail: p.detail || (p.phase === 'ready' ? 'AIMUX 已就绪，准备连接…' : p.phase),
+  }))
+  if (!installed.ok) {
+    logInstall(`########## /upgrade FAILED: ${installed.error} ##########\n`)
+    onStatus({ state: 'failed', phase: 'idle', detail: `${installed.error} · 日志: ${aimuxLogPath()}` })
+    return { ok: false, error: installed.error }
+  }
+  onStatus({ state: 'starting', phase: 'connecting', detail: `AIMUX ${installed.version ?? '最新版'} 已安装，正在重新连接…` })
+  await startAimuxConnection(opts)
+  return { ok: true, version: installed.version }
 }
