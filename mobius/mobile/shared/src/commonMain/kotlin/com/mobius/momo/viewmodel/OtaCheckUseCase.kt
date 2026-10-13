@@ -106,7 +106,9 @@ class OtaCheckUseCase(
             }
 
             return@withContext when (result.level) {
-                ThresholdEvaluator.Level.NoUpdate,
+                // 远端 ≤ 本地 / 用户已忽略 / 静默期未到期 → 已是最新版本（§8.3 + §10.5.4）
+                ThresholdEvaluator.Level.NoUpdate -> OtaCheckResult.NoUpdate
+                // 元数据解析失败 / manifest 缺关键字段 → 版本信息无效
                 ThresholdEvaluator.Level.Invalid -> OtaCheckResult.Invalid
                 else -> OtaCheckResult.Show(
                     level = result.level,

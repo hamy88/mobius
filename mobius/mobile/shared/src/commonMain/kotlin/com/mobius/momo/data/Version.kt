@@ -62,7 +62,9 @@ data class SemVer(val major: Int, val minor: Int, val patch: Int, val preRelease
             val normalized = text.removePrefix("v").removePrefix("V")
             val mainAndPre = normalized.split("-", limit = 2)
             val parts = mainAndPre[0].split(".")
-            if (parts.isEmpty() || parts.size > 3) return null
+            // 兼容 X.Y.Z.W 四段版本号(0.4.5.1): 第 4 段及之后忽略, 不参与 major/minor/patch 构造。
+            // 5 段及以上视为非法(防止拼接错误拼出 X.Y.Z.W.N 的版本号)。
+            if (parts.isEmpty() || parts.size > 4) return null
             val nums = parts.map { it.toIntOrNull() ?: return null }
             val major = nums.getOrElse(0) { 0 }
             val minor = nums.getOrElse(1) { 0 }

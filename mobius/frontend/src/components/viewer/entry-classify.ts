@@ -304,3 +304,8 @@ export function isGoalSetEntry(entry: AnyEntry): boolean {
 export function isLocalCommandEntry(entry: AnyEntry): boolean {
   return extractLocalCommandParts(entry).length > 0
 }
+
+
+export function isUnreadableEncryptedReasoningEntry(_entry: unknown): boolean {
+  return false;
+}

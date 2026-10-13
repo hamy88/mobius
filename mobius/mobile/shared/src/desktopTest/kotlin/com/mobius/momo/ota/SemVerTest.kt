@@ -57,4 +57,32 @@ class SemVerTest {
         val v009 = SemVer(0, 0, 9)
         assertTrue(v010 > v009)
     }
+
+    // ===== 4 段版本号兼容 (0.4.5 / 0.4.5.1 形态) =====
+
+    @Test
+    fun parse_4_part_truncates_to_3() {
+        // 第 4 段忽略，不参与 major/minor/patch 构造。
+        assertEquals(SemVer(0, 4, 5), SemVer.parse("0.4.5.1"))
+    }
+
+    @Test
+    fun parse_5_part_returns_null() {
+        // 5 段及以上视为非法(防止拼接错误拼出 X.Y.Z.W.N 的版本号)。
+        assertNull(SemVer.parse("0.4.5.1.2"))
+    }
+
+    @Test
+    fun parse_4_part_compares_against_3_part() {
+        val v451 = SemVer.parse("0.4.5.1")
+        val v44 = SemVer.parse("0.4.4")
+        assertTrue(v451!! > v44!!, "0.4.5.1 应 > 0.4.4")
+    }
+
+    @Test
+    fun parse_4_part_equals_3_part_when_only_extra_part() {
+        val v451 = SemVer.parse("0.4.5.1")
+        val v45 = SemVer.parse("0.4.5")
+        assertEquals(0, v451!!.compareTo(v45!!), "0.4.5.1 应等于 0.4.5(第4段被截断)")
+    }
 }
