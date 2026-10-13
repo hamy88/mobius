@@ -14,6 +14,14 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
+import okhttp3.Authenticator
+import okhttp3.Credentials
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.Route
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -177,6 +185,7 @@ private class DesktopSecureStorage : SecureStorage {
 
 actual fun createMobiusHttpClient(
     onUnauthorized: suspend () -> Unit,
+    proxy: ProxyConfig?,
 ): HttpClient = HttpClient(OkHttp) {
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true })
@@ -192,6 +201,7 @@ actual fun createMobiusHttpClient(
     engine {
         config {
             retryOnConnectionFailure(true)
+            configureMobiusProxy(proxy)
         }
     }
     defaultRequest {
@@ -244,5 +254,26 @@ actual fun formatBackendTime(value: String?): String {
         date.isEqual(today) -> time
         date.isEqual(today.minusDays(1)) -> "昨天 $time"
         else -> "${zdt.monthValue}月${zdt.dayOfMonth}日 $time"
+    }
+}
+
+
+/** 把 [ProxyConfig] 配置到 OkHttpClient.Builder；null/无效配置表示直连。desktopTest 可独立验证映射。 */
+internal fun OkHttpClient.Builder.configureMobiusProxy(proxyConfig: ProxyConfig?) {
+    val configuredProxy = proxyConfig?.takeIf { it.isUsable } ?: return
+    val type = when (configuredProxy.protocol) {
+        ProxyProtocol.HTTP -> Proxy.Type.HTTP
+        ProxyProtocol.SOCKS5 -> Proxy.Type.SOCKS
+    }
+    proxy(Proxy(type, InetSocketAddress(configuredProxy.host, configuredProxy.port)))
+    if (configuredProxy.username.isNotBlank()) {
+        proxyAuthenticator(object : Authenticator {
+            override fun authenticate(route: Route?, response: Response): Request? {
+                val credential = Credentials.basic(configuredProxy.username, configuredProxy.password)
+                return response.request.newBuilder()
+                    .header("Proxy-Authorization", credential)
+                    .build()
+            }
+        })
     }
 }

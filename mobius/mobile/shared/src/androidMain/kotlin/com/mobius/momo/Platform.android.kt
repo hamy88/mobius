@@ -41,6 +41,13 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
+import okhttp3.Authenticator
+import okhttp3.Credentials
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.Route
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -329,6 +336,7 @@ private fun inferMimeTypeFromExtension(name: String): String =
 
 actual fun createMobiusHttpClient(
     onUnauthorized: suspend () -> Unit,
+    proxy: ProxyConfig?,
 ): HttpClient = HttpClient(OkHttp) {
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true })
@@ -340,6 +348,28 @@ actual fun createMobiusHttpClient(
         connectTimeoutMillis = 15_000L
         requestTimeoutMillis = 30_000L
         socketTimeoutMillis = 30_000L
+    }
+    val configuredProxy = proxy?.takeIf { it.isUsable }
+    engine {
+        config {
+            if (configuredProxy != null) {
+                val type = when (configuredProxy.protocol) {
+                    ProxyProtocol.HTTP -> Proxy.Type.HTTP
+                    ProxyProtocol.SOCKS5 -> Proxy.Type.SOCKS
+                }
+                this.proxy(Proxy(type, InetSocketAddress(configuredProxy.host, configuredProxy.port)))
+                if (configuredProxy.username.isNotBlank()) {
+                    proxyAuthenticator(object : Authenticator {
+                        override fun authenticate(route: Route?, response: Response): Request? {
+                            val credential = Credentials.basic(configuredProxy.username, configuredProxy.password)
+                            return response.request.newBuilder()
+                                .header("Proxy-Authorization", credential)
+                                .build()
+                        }
+                    })
+                }
+            }
+        }
     }
     defaultRequest {
         header(HttpHeaders.Accept, ContentType.Application.Json.toString())

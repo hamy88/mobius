@@ -1,7 +1,11 @@
 package com.mobius.momo.ota
 
 import com.mobius.momo.data.OtaError
+import com.mobius.momo.data.ProxyConfig
+import com.mobius.momo.data.ProxyProtocol
+import com.mobius.momo.data.configureMobiusProxy
 import com.mobius.momo.data.createOtaRepositoryWithClient
+import okhttp3.OkHttpClient
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.MockEngineConfig
@@ -12,10 +16,12 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.net.Proxy
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** 本地 MockEngine 工厂（生产代码不依赖，仅 desktopTest 验证错误映射）。 */
@@ -45,6 +51,26 @@ private fun createMockOtaClient(handler: MockRequestHandler): HttpClient =
  * 10. fetchLocalManifest: 任意 HTTP 错误 → 返回 null (不抛错, 留给上层 fallback)
  */
 class OtaRepositoryHttpTest {
+
+    @Test
+    fun `proxy on HTTP config maps to OkHttp HTTP proxy`() {
+        val client = OkHttpClient.Builder()
+            .apply {
+                configureMobiusProxy(
+                    ProxyConfig(protocol = ProxyProtocol.HTTP, host = "127.0.0.1", port = 1080),
+                )
+            }
+            .build()
+        assertEquals(Proxy.Type.HTTP, client.proxy?.type())
+    }
+
+    @Test
+    fun `proxy off config leaves direct connection`() {
+        val client = OkHttpClient.Builder()
+            .apply { configureMobiusProxy(null) }
+            .build()
+        assertNull(client.proxy)
+    }
 
     @Test
     fun `releases array with valid drafts false returns parsed release with changelogItems`() = runBlocking<Unit> {

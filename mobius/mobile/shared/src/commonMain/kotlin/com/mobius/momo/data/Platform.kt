@@ -59,6 +59,7 @@ expect fun createFilePicker(): FilePicker
 
 expect fun createMobiusHttpClient(
     onUnauthorized: suspend () -> Unit,
+    proxy: ProxyConfig? = null,
 ): HttpClient
 
 expect fun nowShortTime(): String

@@ -1,5 +1,6 @@
 package com.mobius.momo.viewmodel
 
+import com.mobius.momo.data.ProxyProtocol
 import com.mobius.momo.data.ServerEntry
 import com.mobius.momo.data.TtsPlaybackMode
 import com.mobius.momo.data.Voice
@@ -58,6 +59,12 @@ data class AuthState(
     val passwordRequired: Boolean = false,
     val serverBaseUrl: String = "",
     val serverEntries: List<ServerEntry> = emptyList(),
+    val proxyEnabled: Boolean = false,
+    val proxyProtocol: ProxyProtocol = ProxyProtocol.HTTP,
+    val proxyHost: String = "",
+    val proxyPort: String = "",
+    val proxyUsername: String = "",
+    val proxyPassword: String = "",
     val pushEnabled: Boolean = true,
     val ttsEnabled: Boolean = true,
     val ttsPlaybackMode: TtsPlaybackMode = TtsPlaybackMode.All,
@@ -169,6 +176,12 @@ fun UiState.toAuthState(): AuthState = AuthState(
     passwordRequired = passwordRequired,
     serverBaseUrl = serverBaseUrl,
     serverEntries = serverEntries,
+    proxyEnabled = proxyEnabled,
+    proxyProtocol = proxyProtocol,
+    proxyHost = proxyHost,
+    proxyPort = proxyPort,
+    proxyUsername = proxyUsername,
+    proxyPassword = proxyPassword,
     pushEnabled = pushEnabled,
     ttsEnabled = ttsEnabled,
     ttsPlaybackMode = ttsPlaybackMode,

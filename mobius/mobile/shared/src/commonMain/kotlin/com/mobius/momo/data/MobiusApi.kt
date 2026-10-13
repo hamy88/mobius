@@ -139,6 +139,7 @@ class MobiusApi(
     private val baseUrl: String,
     private val storage: SecureStorage,
     private val onUnauthorized: suspend () -> Unit,
+    proxy: ProxyConfig? = null,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -148,6 +149,7 @@ class MobiusApi(
 
     private val client: HttpClient = createMobiusHttpClient(
         onUnauthorized = onUnauthorized,
+        proxy = proxy,
     )
 
     fun close() {
