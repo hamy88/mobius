@@ -80,6 +80,10 @@ data class AuthState(
     val presetConfirmSessionName: String = "",
     val presetPersonalityOptions: List<SessionPersonalityOption> = emptyList(),
     val cloneModelOptions: List<SessionModelOption> = emptyList(),
+    // 0.4.5.3 登录页「记住密码」复选框: 默认勾选, 与 30 天 token 机制独立, 不动 token.
+    val rememberPassword: Boolean = true,
+    // 当前 server 已记住的凭据: 切到该 server 时 UI 预填(用户手动点登录, 不做自动登录).
+    val rememberedCredential: Pair<String, String>? = null,
 )
 
 fun UiState.toChatState(): ChatState = ChatState(
@@ -197,4 +201,6 @@ fun UiState.toAuthState(): AuthState = AuthState(
     presetConfirmSessionName = presetConfirmSessionName,
     presetPersonalityOptions = presetPersonalityOptions,
     cloneModelOptions = cloneModelOptions,
+    rememberPassword = rememberPassword,
+    rememberedCredential = rememberedCredential,
 )

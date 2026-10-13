@@ -1,7 +1,7 @@
 {
-  "version": "0.4.5.2",
+  "version": "0.4.5.3",
   "platform": "android",
-  "generatedAt": "2026-10-13T03:20:58.111Z",
+  "generatedAt": "2026-10-13T04:12:00.000Z",
   "builds": [
     {
       "platform": "android",
@@ -200,6 +200,28 @@
       "versionCode": 31,
       "sha256": "ffd2f291375e03cd488921a2b3ba223940b6c1ea7d1c9ed56692e82e4ac5deb3",
       "source": "github-actions run 38340113072 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit bc010a60; OTA Phase 5 — SemVer.parse 4-segment support + NoUpdate/Invalid 拆分 + versionCode 30→31 / versionName 0.4.5.1→0.4.5.2, 修 0.4.4 收不到 0.4.5+ 提示的根因)"
+    },
+    {
+      "platform": "android",
+      "arch": "arm64",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.5.3-android-arm64.apk",
+      "size": 5185644,
+      "version": "0.4.5.3",
+      "versionCode": 32,
+      "sha256": "c26d714504bf002bf99024fd994914cf0952cd19348efeafd567e85472876035",
+      "source": "github-actions run 38344603289 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 41cf3a70; login page 记住密码 checkbox (方案 B) + CredentialStore 按 baseUrl 分桶 + SecureStorage 预填 + versionCode 31→32 / versionName 0.4.5.2→0.4.5.3)"
+    },
+    {
+      "platform": "android",
+      "arch": "armeabi-v7a",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.5.3-android-armeabi-v7a.apk",
+      "size": 5193612,
+      "version": "0.4.5.3",
+      "versionCode": 32,
+      "sha256": "065e186c215a9fffe19333feae1939261fca170223bdc1c4f370f47b0f7e90c0",
+      "source": "github-actions run 38344603289 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 41cf3a70; login page 记住密码 checkbox (方案 B) + CredentialStore 按 baseUrl 分桶 + SecureStorage 预填 + versionCode 31→32 / versionName 0.4.5.2→0.4.5.3)"
     }
   ]
 }

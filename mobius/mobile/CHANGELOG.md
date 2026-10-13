@@ -3,6 +3,23 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.5.3] - 2026-10-13
+
+### 新增
+- **登录页「记住密码」复选框（方案 B）**：在密码输入框下方新增 `✓ 记住密码` 复选框（默认勾选）。勾选 + 登录成功 → 把 `username + password` 落 `SecureStorage`，**按当前 server baseUrl 分桶**（key 用 SHA-256(baseUrl)，避免 raw URL 出现在 key 里）；下次进入登录页、选中已记住的 server → 自动预填用户名 / 密码（**用户手动点登录**，不做自动登录，区别于 30 天 token 机制）；注销 / 主动取消勾选再登录一次 → 清掉对应桶。
+  - `CredentialStore`（commonMain）三个方法 `saveRememberedCredential` / `loadRememberedCredential` / `clearRememberedCredential`，复用 `SecureStorage.savePreference / getPreference`（Android EncryptedSharedPreferences + Keystore / iOS Keychain / desktop OS 凭据存储），三平台行为一致。
+  - `AuthState` 加 `rememberPassword`（复选框态，默认 true）和 `rememberedCredential`（当前 server 的已记住凭据，用于 UI 角标）。
+  - `LoginScreen` 在密码框与登录按钮之间插入 `Row(Checkbox + Text("记住密码") + 已记住角标)`。
+  - `selectServerEntry` / `applyServerBaseUrlInput` 在切服后调用 `loadRememberedFor` 同步预填；`login()` 成功路径按复选框态落 / 清；`logout()` 显式清当前 server 桶。
+  - 启动初始化时拉一次当前 baseUrl 的凭据预填，token 过期后用户重新登录仍可享受预填。
+
+### 测试
+- 新增 `CredentialStoreTest`（desktopTest 5 用例）：save+load 往返、不同 baseUrl 命中不同桶 + key 不含 raw URL 字符、clear 后 load 返回 null 并从 index 移除、同一 baseUrl 多次 save index 去重且不重复、空 username / 空 password / 空 baseUrl 拒绝写入且不进 index。
+- 新增 `Sha256Test`（desktopTest 4 用例）：对 NIST FIPS 180-4 公开测试向量（空串 + `"abc"`）做一致性校验，防御实现回归。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=31→32` / `versionName="0.4.5.2"→"0.4.5.3"`。
+
 ## [0.4.5.1] - 2026-10-13
 
 ### 修复

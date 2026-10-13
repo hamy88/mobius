@@ -986,6 +986,44 @@ private fun LoginScreen(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel
             onChange = vm::setPassword,
             focusRequester = passwordFocus,
         )
+        // 0.4.5.3 登录页「记住密码」: 复选框在密码框下方, 默认勾选. 勾选状态变化由 vm.setRememberPassword
+        // 立即同步: 取消勾选即清掉当前 server 的已记住凭据(防御: UI 与存储一致性). UI 预填已在
+        // 切服时由 vm.loadRememberedFor 完成, 这里只绑定复选框状态.
+        Spacer(Modifier.height(MomoSpacing.md))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClickLabel = if (state.rememberPassword) "取消记住密码" else "记住密码",
+                ) { vm.setRememberPassword(!state.rememberPassword) }
+                .padding(vertical = MomoSpacing.xs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = state.rememberPassword,
+                onCheckedChange = vm::setRememberPassword,
+                colors = CheckboxDefaults.colors(
+                    checkedColor = theme.accentPrimary,
+                    uncheckedColor = theme.borderDefault,
+                    checkmarkColor = theme.bgPrimary,
+                ),
+            )
+            Text(
+                "记住密码",
+                color = theme.textPrimary,
+                style = momoTextStyle(MomoTypography.body),
+            )
+            if (state.rememberedCredential != null) {
+                Spacer(Modifier.width(MomoSpacing.sm))
+                Text(
+                    "已记住",
+                    color = theme.textMuted,
+                    style = momoTextStyle(MomoTypography.caption),
+                )
+            }
+        }
         Spacer(Modifier.height(MomoSpacing.xl))
         PrimaryButton("登 录", state.loading, theme, vm::login)
         Spacer(Modifier.height(MomoSpacing.xxl))

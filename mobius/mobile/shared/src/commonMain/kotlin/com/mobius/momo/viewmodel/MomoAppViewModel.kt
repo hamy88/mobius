@@ -23,6 +23,7 @@ import com.mobius.momo.data.ServerAddressRepository
 import com.mobius.momo.data.ServerEntry
 import com.mobius.momo.data.ProxyConfig
 import com.mobius.momo.data.ProxyProtocol
+import com.mobius.momo.data.CredentialStore
 import com.mobius.momo.data.toProxyConfigOrNull
 import com.mobius.momo.data.PROJECTS_LITE_MODE_KEY
 import com.mobius.momo.data.SERVER_BASE_URL_PREFERENCE
@@ -326,6 +327,10 @@ data class UiState(
     // ===== 0.4.4 OTA 下载进度（点"立即更新"后接管弹窗） =====
     /** OTA 下载状态。null = 当前未在下载(也没有遗留的失败/已完成状态)。非空时 UI 层渲染 OtaDownloadDialog。 */
     val otaDownload: OtaDownloadUi? = null,
+    // 0.4.5.3 登录页「记住密码」复选框: 默认勾选, 与 30 天 token 机制独立, 不动 token.
+    val rememberPassword: Boolean = true,
+    // 当前 server 已记住的凭据: 切到该 server 时 UI 预填(用户手动点登录, 不做自动登录).
+    val rememberedCredential: Pair<String, String>? = null,
 )
 
 /**
@@ -410,6 +415,8 @@ class MomoAppViewModel(
     private val pushProvider: PushProvider = createPushProvider(),
     private val buildBaseUrl: String = platformBuildBaseUrl(),
     private val serverAddressRepository: ServerAddressRepository = ServerAddressRepository(storage),
+    // 0.4.5.3 登录页「记住密码」复选框: 按 baseUrl 分桶, 复用 SecureStorage KV.
+    private val credentialStore: CredentialStore = CredentialStore(storage),
     // 0.4.4: OTA 下载/安装平台层。Android 走系统 DownloadManager + PackageInstaller,iOS/desktop 占位。
     private val otaDownloader: OtaDownloader = OtaDownloader(),
     private val otaInstaller: OtaInstaller = OtaInstaller(),
@@ -505,6 +512,10 @@ class MomoAppViewModel(
         }.getOrNull()
     }
 
+    // 0.4.5.3 登录页「记住密码」: 启动时拉一次当前 baseUrl 的凭据, 预填到 UI;
+    // 用户手动点登录, 不做自动登录(无 api.me 前置).
+    private val initialRemembered = credentialStore.loadRememberedCredential(currentBaseUrl)
+
     private val _state = MutableStateFlow(
         UiState(
             serverBaseUrl = currentBaseUrl,
@@ -519,7 +530,12 @@ class MomoAppViewModel(
             ttsPlaybackMode = TtsPlaybackMode.fromName(storage.getPreference(SECURE_PREF_TTS_PLAYBACK_MODE)),
             ttsEnabled = storage.getPreference(SECURE_PREF_TTS_ENABLED) != "0",
             chatListHintDismissed = storage.getPreference(CHAT_LIST_SWIPE_HINT_DISMISSED_KEY) == "1",
-        projectsLiteMode = storage.getPreference(PROJECTS_LITE_MODE_KEY) == "1",
+            projectsLiteMode = storage.getPreference(PROJECTS_LITE_MODE_KEY) == "1",
+            // 0.4.5.3 记住密码: 启动时 username/password 用已记住凭据预填, rememberedCredential
+            // 用于 LoginScreen 的 MomoInput 绑定 + 复选框"已记住"角标.
+            username = initialRemembered?.first.orEmpty(),
+            password = initialRemembered?.second.orEmpty(),
+            rememberedCredential = initialRemembered,
         ),
     )
     val state: StateFlow<UiState> = _state
@@ -920,6 +936,36 @@ class MomoAppViewModel(
 
     fun setProxyPassword(value: String) = _state.update { it.copy(proxyPassword = value, toast = null) }
 
+    /**
+     * 0.4.5.3 登录页「记住密码」复选框状态: 仅写 state, 真正落盘走 login() 成功路径.
+     * 用户主动取消勾选时, 立即清掉当前 server 的已记住凭据(避免下次"看似未勾选却仍预填").
+     */
+    fun setRememberPassword(value: Boolean) {
+        if (value) {
+            _state.update { it.copy(rememberPassword = true, toast = null) }
+        } else {
+            val url = _state.value.serverBaseUrl
+            if (url.isNotBlank()) credentialStore.clearRememberedCredential(url)
+            _state.update { it.copy(rememberPassword = false, rememberedCredential = null, toast = null) }
+        }
+    }
+
+    /**
+     * 0.4.5.3 切到某 baseUrl 时同步预填: 已记住 → 写入 state.username/password/rememberedCredential;
+     * 未记住 → 仅清 rememberedCredential(不动当前已输入的 username, 避免误清).
+     */
+    private fun loadRememberedFor(baseUrl: String) {
+        val saved = credentialStore.loadRememberedCredential(baseUrl)
+        _state.update {
+            it.copy(
+                rememberedCredential = saved,
+                username = saved?.first ?: it.username,
+                password = saved?.second ?: it.password,
+                rememberPassword = saved != null,
+            )
+        }
+    }
+
     fun saveServerBaseUrl() {
         if (applyServerBaseUrlInput()) showToast("服务器地址已保存")
     }
@@ -932,7 +978,11 @@ class MomoAppViewModel(
         // 直接写 state(MutableStateFlow.value 立即可见), 保证紧随的 applyServerBaseUrlInput
         // 读到的是新地址——setServerBaseUrl 走 _state.update 虽同为同步, 显式赋值意图更清晰。
         _state.update { it.withProxyFromEntry(entry).copy(serverBaseUrl = url, toast = null) }
-        if (applyServerBaseUrlInput()) serverAddressRepository.addOrTouch(url)
+        if (applyServerBaseUrlInput()) {
+            serverAddressRepository.addOrTouch(url)
+            // 0.4.5.3 切服后立即拉已记住凭据, UI 预填.
+            loadRememberedFor(currentBaseUrl)
+        }
         _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
     }
 
@@ -996,6 +1046,9 @@ class MomoAppViewModel(
                 loading = false,
             )
         }
+        // 0.4.5.3 切服后立即同步预填: 新 server 已记住凭据 → username/password/rememberedCredential
+        // 写 state; 未记住 → 仅清 rememberedCredential(保留用户已输入的 username).
+        if (serverChanged) loadRememberedFor(normalized)
         refreshAuthConfig()
         return true
     }
@@ -1179,6 +1232,13 @@ class MomoAppViewModel(
                     enabled = enabledProxy != null,
                     proxy = enabledProxy ?: ProxyConfig(protocol = state.value.proxyProtocol),
                 )
+                // 0.4.5.3 记住密码: 登录成功 + 复选框勾选 → 落当前 baseUrl 的凭据; 取消勾选 → 清掉(允许
+                // 取消记忆而不登录失败, 即使勾选状态被改, 这里也同步一次, 避免下次预填残留).
+                if (state.value.rememberPassword) {
+                    credentialStore.saveRememberedCredential(currentBaseUrl, username, password)
+                } else {
+                    credentialStore.clearRememberedCredential(currentBaseUrl)
+                }
                 val refreshedEntries = serverAddressRepository.getAll()
                 _state.update {
                     it.copy(
@@ -1188,6 +1248,8 @@ class MomoAppViewModel(
                         password = "",
                         loading = false,
                         serverEntries = refreshedEntries,
+                        // 刷新 rememberedCredential 为实际持久化的值(若未勾选则已清).
+                        rememberedCredential = credentialStore.loadRememberedCredential(currentBaseUrl),
                     )
                 }
                 ensureSpeechPermission()
@@ -3269,6 +3331,10 @@ class MomoAppViewModel(
             if (hmsToken != null) runCatching { api.unregisterDeviceToken(hmsToken) }
             NotificationGateway.stopForeground()
             storage.clear()
+            // 0.4.5.3 记住密码: 注销时清掉当前 server 的记住凭据(用户登出=主动放弃该 server 的记忆).
+            // 这里 storage.clear() 已经把 SecureStorage 整体清空, 但显式调一次 credentialStore
+            // 让 index 也清(防御: 若未来 SecureStorage.clear() 改成"保留部分 key"也能保持正确).
+            credentialStore.clearRememberedCredential(currentBaseUrl)
             clearStreamState()
             conversationClearCutoffs = emptyMap()
             deletedMessageIds = emptyMap()
