@@ -228,6 +228,12 @@ actual fun platformAppVersion(): String =
         ?: System.getenv("MOMO_APP_VERSION")?.takeIf { it.isNotBlank() }
         ?: "0.1.4"
 
+// Desktop versionCode: 由 -Dmomo.app.version_code 或 MOMO_APP_VERSION_CODE 注入, 拿不到返回 0。
+actual fun platformAppVersionCode(): Int =
+    System.getProperty("momo.app.version_code")?.toIntOrNull()
+        ?: System.getenv("MOMO_APP_VERSION_CODE")?.toIntOrNull()
+        ?: 0
+
 actual fun nowShortTime(): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
 

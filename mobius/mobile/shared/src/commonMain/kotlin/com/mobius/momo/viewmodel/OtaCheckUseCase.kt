@@ -36,6 +36,13 @@ class OtaCheckUseCase(
     private val repoName: String = com.mobius.momo.data.DEFAULT_OTA_REPO,
     private val localBaseUrl: String = "",
     private val localVersion: String,
+    /**
+     * 本地已安装包 versionCode（与 androidApp/build.gradle.kts 的 versionCode 一致）。
+     * 默认 0：拿不到时让 [ThresholdEvaluator.evaluate] 走 SemVer 兜底。
+     * 透传给 [ThresholdEvaluator.Input.localVersionCode]，修复 4 段 SemVer
+     * 第 4 段被截断导致永远 NoUpdate 的 bug。
+     */
+    private val localVersionCode: Int = 0,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val now: () -> Long = { nowEpochMillis() },
 ) {
@@ -91,7 +98,13 @@ class OtaCheckUseCase(
             }
 
             val local = localVersion.ifBlank { "0.0.0" }
-            val result = ThresholdEvaluator.evaluate(ThresholdEvaluator.Input(local, manifest))
+            val result = ThresholdEvaluator.evaluate(
+                ThresholdEvaluator.Input(
+                    localVersion = local,
+                    manifest = manifest,
+                    localVersionCode = localVersionCode,
+                ),
+            )
 
             // 用户已忽略此版 → NoUpdate（§8.3）
             if (result.level == ThresholdEvaluator.Level.Normal && isIgnored(manifest.version)) {

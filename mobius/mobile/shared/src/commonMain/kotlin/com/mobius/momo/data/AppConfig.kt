@@ -66,6 +66,11 @@ expect fun platformBuildBaseUrl(): String
 // 返回实际安装的应用版本号(如 "0.1.4")，供设置页等显示，避免硬编码不同步。
 expect fun platformAppVersion(): String
 
+// 返回实际安装包的 versionCode（与 androidApp/build.gradle.kts 的 versionCode 一致）。
+// 用途：OTA 比对以 versionCode 优先，避开 SemVer 4 段第 4 段被截断的丢段问题。
+// 拿不到（如旧版本 manifest 没填、本机资源异常）时返回 0，让 ThresholdEvaluator 走 SemVer 兜底。
+expect fun platformAppVersionCode(): Int
+
 // 底部 tabbar 额外 bottom padding:
 // iOS: .ignoresSafeArea() 导致 navigationBarsPadding 返回 0(home indicator 遮挡), 需兜底 24dp.
 // Android: navigationBarsPadding 自动适配系统导航栏, 无需额外 padding.
