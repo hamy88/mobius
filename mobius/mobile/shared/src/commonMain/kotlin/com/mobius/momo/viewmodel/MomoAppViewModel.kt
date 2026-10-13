@@ -17,6 +17,7 @@ import com.mobius.momo.data.DoubaoTtsEngine
 import com.mobius.momo.data.MobiusApi
 import com.mobius.momo.data.NotificationGateway
 import com.mobius.momo.data.platformAppVersion
+import com.mobius.momo.data.platformAppVersionCode
 import com.mobius.momo.data.PickedFile
 import com.mobius.momo.data.ReentrantLock
 import com.mobius.momo.data.ServerAddressRepository
@@ -625,6 +626,9 @@ class MomoAppViewModel(
             storage = storage,
             localBaseUrl = currentBaseUrl,
             localVersion = platformAppVersion(),
+            // 0.4.5.4: 透传本地 versionCode，让 OTA 比对以 versionCode 为准、SemVer 兜底。
+            // 4 段 SemVer 第 4 段被截断会导致 compareTo()=0 → 永远 NoUpdate。
+            localVersionCode = platformAppVersionCode(),
         ).also { otaCheckUseCase = it }
     }
 

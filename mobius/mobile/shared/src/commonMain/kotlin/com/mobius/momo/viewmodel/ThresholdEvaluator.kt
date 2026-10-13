@@ -18,6 +18,10 @@ import com.mobius.momo.data.SignatureValidationResult
  * - 未识别的 level 字符串一律降级为 advisory（§10.5.1 契约补充）
  * - 未识别的 reason 不显示"为什么"说明框（仅影响 UX，不影响档位）
  * - 远端 ≤ 本地 直接判定 NoUpdate，不进入阈值链路（§3.3 降级防御）
+ *
+ * v1.1.2（0.4.5.4）：OTA 比对从"只比 SemVer"改为"versionCode 优先 + SemVer 兜底"，
+ * 修复 4 段版本号（0.4.5.x）第 4 段被 [SemVer.parse] 截断导致 compareTo()=0 → 永远
+ * NoUpdate 的 bug。versionCode 是单调递增整数，丢不了段。
  */
 object ThresholdEvaluator {
 
@@ -36,6 +40,15 @@ object ThresholdEvaluator {
     data class Input(
         val localVersion: String,
         val manifest: OtaManifest,
+        /**
+         * 本地已安装包的 versionCode（与 androidApp/build.gradle.kts 的 versionCode 一致）。
+         * 默认 0：拿不到时让 evaluate() 走 SemVer 兜底。
+         *
+         * 用途：4 段 SemVer（如 0.4.5.2 / 0.4.5.3）的第 4 段会被 [SemVer.parse] 截断，导致
+         * compareTo() = 0 → 永远 NoUpdate。versionCode 是单调递增整数，不存在丢段问题，
+         * 因此 OTA 比对以 versionCode 为准，SemVer 仅作为兜底。
+         */
+        val localVersionCode: Int = 0,
         /**
          * 当前设备已安装包支持的签名 scheme（如 `"v2,v3"`），用于 §5.4 跳级检测。
          * null / 空白 → 视为未启用签名 scheme 校验（不阻断）。
@@ -78,8 +91,36 @@ object ThresholdEvaluator {
 
     /**
      * 主入口。失败兜底：解析抛错 / manifest 缺字段 → 返回 Invalid 档（UX 层展示"无法验证"）。
+     *
+     * 比较顺序：
+     * 1. versionCode（双方 > 0 时）：
+     *    - 远端 vc > 本地 vc → 升级方向（继续走阈值判定）
+     *    - 远端 vc < 本地 vc → 防御性 NoUpdate（不要让 manifest 误导用户降级）
+     *    - 远端 vc == 本地 vc → 回退到 SemVer 比较（兼容 manifest 与 versionCode
+     *      同步 bump 前的过渡期，例如本服务器 manifest 还没填 vc 的旧形态）
+     * 2. SemVer 比对（任一方 vc = 0，或上面 vc 相等时）——维持 0.4.5 之前的语义。
      */
     fun evaluate(input: Input): Result {
+        val localVc = input.localVersionCode
+        val remoteVc = input.manifest.versionCode
+
+        // 1. versionCode 优先（双方都填了）
+        if (localVc > 0 && remoteVc > 0) {
+            val cmpVc = remoteVc.compareTo(localVc)
+            if (cmpVc < 0) {
+                // 防御性：远端 vc 反而更低 → 直接 NoUpdate，不进入 SemVer 兜底。
+                return Result(level = Level.NoUpdate, compareDirection = cmpVc)
+            }
+            if (cmpVc > 0) {
+                // 升级方向——继续阈值判定前先解析远端 SemVer 拿版本字符串。
+                val remote = SemVer.parse(input.manifest.version)
+                if (remote == null) return invalid(input)
+                return thresholdDecide(remote = remote, cmp = cmpVc, input = input)
+            }
+            // cmpVc == 0：回退 SemVer（保留 versionCode 同步 bump 前过渡期的兼容）。
+        }
+
+        // 2. SemVer 兜底（含 cmpVc == 0 的回退路径）
         val remote = SemVer.parse(input.manifest.version) ?: return invalid(input)
         val local = SemVer.parse(input.localVersion) ?: return invalid(input)
         val cmp = remote.compareTo(local)
@@ -88,7 +129,14 @@ object ThresholdEvaluator {
         if (cmp <= 0) {
             return Result(level = Level.NoUpdate, compareDirection = cmp)
         }
+        return thresholdDecide(remote = remote, cmp = cmp, input = input)
+    }
 
+    /**
+     * 在已确认"升级方向"后做阈值判定（[cmp] > 0）。[remote] 已解析。
+     * 单独抽出供 versionCode / SemVer 两条入口共用，避免重复。
+     */
+    private fun thresholdDecide(remote: SemVer, cmp: Int, input: Input): Result {
         // 无阈值字段 → normal（§10.5.2 第一行）
         val min = input.manifest.minSupportedVersion?.takeIf { it.isNotBlank() }
         if (min == null) {
@@ -96,9 +144,18 @@ object ThresholdEvaluator {
         }
 
         val minSemver = SemVer.parse(min) ?: return invalid(input)
+        val local = SemVer.parse(input.localVersion)
         // 本地 ≥ 阈值 → 仍按 normal 走（用户已在支持的最低版本之上）
-        if (local >= minSemver) {
+        if (local != null && local >= minSemver) {
             return Result(level = Level.Normal, compareDirection = cmp)
+        }
+        // 本地无法解析但 vc 路径能进入此处 → 保守按 advisory 兜底（让用户看到提示）
+        if (local == null) {
+            return Result(
+                level = Level.Advisory,
+                minSupportedVersion = min,
+                compareDirection = cmp,
+            )
         }
 
         // 本地 < 阈值 → 按 level 分档

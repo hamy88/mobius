@@ -310,6 +310,12 @@ actual fun platformAppVersion(): String = runCatching {
     ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName.orEmpty()
 }.getOrDefault("")
 
+actual fun platformAppVersionCode(): Int = runCatching {
+    val ctx = AndroidContext.application
+    @Suppress("DEPRECATION")
+    ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionCode
+}.getOrDefault(0)
+
 actual fun createFilePicker(): FilePicker = object : FilePicker {
     override fun pickFiles(
         maxFiles: Int,

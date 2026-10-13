@@ -62,6 +62,11 @@ actual fun platformAppVersion(): String =
         ?.takeIf { it.isNotBlank() }
         ?: "0.1.4"
 
+// iOS versionCode: 读 Info.plist 的 CFBundleVersion, 拿不到返回 0。
+actual fun platformAppVersionCode(): Int =
+    (NSBundle.mainBundle.objectForInfoDictionaryKey("CFBundleVersion") as? String)
+        ?.toIntOrNull() ?: 0
+
 // iOS 文件选择: UIDocumentPickerViewController(Files app / iCloud / 相册文件)。
 // 通过 KMPInterop 从 Compose 层调起 — 这里用 UIApplication 顶层 viewController present。
 // 读文件到内存(PickedFile 携带 bytes), 与 Android FilePicker 契约一致。
