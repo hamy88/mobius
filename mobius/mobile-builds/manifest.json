@@ -1,7 +1,7 @@
 {
-  "version": "0.4.4",
+  "version": "0.4.5.1",
   "platform": "android",
-  "generatedAt": "2026-09-20T03:25:00Z",
+  "generatedAt": "2026-10-13T02:50:52.644Z",
   "builds": [
     {
       "platform": "android",
@@ -156,6 +156,28 @@
       "versionCode": 28,
       "sha256": "3a9ca002f609f5360775f49ed8fb1e514fb31f1edc4a8adecfa8b22f0d1cdf60",
       "source": "github-actions run 35485734013 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 08b37410; OTA Phase 4 — OtaDownloadDialog 应用内下载进度条 + 系统通知 deepLink + expect/actual OtaDownloader/OtaInstaller + currentDeviceAbi + 重试/取消 UI + versionCode 27→28 / versionName 0.4.3→0.4.4)"
+    },
+    {
+      "platform": "android",
+      "arch": "arm64",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.5.1-android-arm64.apk",
+      "size": 5185644,
+      "version": "0.4.5.1",
+      "sha256": "9328338df06f431affda6f45c25db535c6b45ca57be396515215df91402f7853",
+      "source": "github-actions run 38338116294 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 5a8e02d2; mobile: allow OTA download over private-network HTTP (0.4.5.1) — OtaDownloader.assertHttpsUrl 放行私网段 http://)",
+      "versionCode": 30
+    },
+    {
+      "platform": "android",
+      "arch": "armeabi-v7a",
+      "format": "apk",
+      "file": "mobius-mobile-0.4.5.1-android-armeabi-v7a.apk",
+      "size": 5193612,
+      "version": "0.4.5.1",
+      "sha256": "aee3d33786bb2b7ec0161cc0a5c81494c8aed4a4b5a60f5622d1d38da40222fa",
+      "source": "github-actions run 38338116294 (release-signed via MOMO_ANDROID_KEYSTORE_* secrets; Mobius production keystore SHA-256=c27718115686ebbe18ef34936b68e7f812af9b785360bafd77312d4c7e65a135; commit 5a8e02d2; mobile: allow OTA download over private-network HTTP (0.4.5.1) — OtaDownloader.assertHttpsUrl 放行私网段 http://)",
+      "versionCode": 30
     }
   ]
 }
