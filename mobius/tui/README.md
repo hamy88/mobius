@@ -95,8 +95,9 @@ to green.
      `<Static>` rows with dynamic UI.
    - The `typing` event drives the working indicator. Press Esc (or Ctrl+C) to
      interrupt a running turn.
-   - Slash commands: `/clear` (new session), `/resume` (history), `/help`,
-     `/quit`. Ctrl+C stops a running turn, or quits when idle.
+   - Slash commands: `/clear` (new session), `/resume` (history), `/upgrade`
+     (install the newest AIMUX from PyPI and reconnect), `/help`, `/quit`.
+     Ctrl+C stops a running turn, or quits when idle.
 
 ## Reusing the web frontend
 

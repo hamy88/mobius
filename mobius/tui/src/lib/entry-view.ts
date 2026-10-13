@@ -31,6 +31,7 @@ export type EntryView =
   | { kind: 'write_file'; filePath: string; content: string }
   | { kind: 'system'; text: string }
   | { kind: 'error'; text: string }
+  | { kind: 'pending'; text: string; count: number }
 
 export interface ToolResultView {
   text: string
@@ -113,7 +114,7 @@ function extractLocalCommandParts(entry: AnyEntry): LocalCommandPart[] {
 }
 
 /**
- * 整卡隐藏的噪声: 对齐 web entry-classify.ts isHiddenJsonlNoiseEntry 的 7 类
+ * 整卡隐藏的噪声: 对齐 web entry-classify.ts isHiddenJsonlNoiseEntry 的 8 类
  *   - token_count         : codex 每轮 token 用量统计 (event_msg)
  *   - environment_context : codex 每轮注入的 <environment_context> 纯系统 user 消息
  *   - session_meta        : codex 会话首条元数据
@@ -121,10 +122,12 @@ function extractLocalCommandParts(entry: AnyEntry): LocalCommandPart[] {
  *   - turn_duration       : Claude Code 每轮结束注入的 system 耗时统计
  *   - skill_listing       : Claude Code 注入的可用 Skill 清单
  *   - agent_listing_delta : Claude Code 注入的可用 subagent 清单
+ *   - mcp_tool_call_end   : MCP 工具调用完成生命周期标记
  * 注: context_compacted 不在此列 (对齐 web — 它保留为可见事件, TUI 显示成 system 行).
  */
 export function isHiddenNoise(entry: AnyEntry): boolean {
   if (entry?.type === 'event_msg' && entry?.payload?.type === 'token_count') return true
+  if (entry?.type === 'event_msg' && entry?.payload?.type === 'mcp_tool_call_end') return true
   if (entry?.type === 'session_meta') return true
   if (entry?.type === 'turn_context') return true
   if (entry?.type === 'system' && entry?.subtype === 'turn_duration') return true
@@ -515,6 +518,10 @@ function parseCustomToolCall(raw: any): { name: string; input: Record<string, an
 export function viewsForBlock(block: Block): EntryView[] {
   const entry = block.entry
   if (!entry || typeof entry !== 'object') return [{ kind: 'skip' }]
+  // 排队行 (合成条目): 显示忙时挂起的用户指令, 与 web 排队卡片同形.
+  if (entry.type === '__pending_queue__') {
+    return [{ kind: 'pending', text: String(entry.text ?? ''), count: Number(entry.count) || 1 }]
+  }
   if (isHiddenNoise(entry)) return [{ kind: 'skip' }]
   const type = entry.type
 
@@ -672,7 +679,7 @@ export function toolLabel(name: string): string {
   return TOOL_LABEL[n] ?? n
 }
 
-// ── 用户输入去重 (对齐 web viewer/rounds.ts buildRounds) ──────────────────────
+// ── 用户输入去重 (对齐 web viewer/display-dedup.ts) ──────────────────────────
 // codex 一次用户输入在 jsonl 里以 3 种形态出现 (type:user / response_item.message[role=user]
 // / event_msg.user_message), 文本相同. 若与上一条用户输入文本相同, 且之间还没出现任何
 // agent 输出, 则视为同一次输入的重复入口 → 丢弃, 避免 TUI 把同一条提问显示多次.
@@ -728,12 +735,51 @@ export function isAssistantOutput(e: AnyEntry): boolean {
   return false
 }
 
+// 开轮 kind 白名单 (与后端 mobius-kinds.ts 同源; TUI 是独立包, 只能各存一份)
+// Round-opening kinds, same rule as the backend's mobius-kinds.ts (the TUI is a separate package)
+const ROUND_OPENING_KINDS = new Set(['user', 'user-sp-command', 'mobius-multiagent', 'mobius-com', 'mobius-extension'])
+// 来源枚举之前的旧 kind, 让改动前入库的老会话仍能认出自己的开轮卡
+// The kinds used before the enum; they keep openers recognisable in sessions stored back then
+const LEGACY_ROUND_OPENING_KINDS = new Set(['user_input', 'compact'])
+
+/*
+ * True when this card is the user prompt that opened its round. The kind decides: a session prompt
+ * (or a slash command in it) and one 小莫 asks itself open a round, every other kind does not.
+ */
+export function isRoundOpenerEntry(e: AnyEntry): boolean {
+  // 只认 Mobius 自己写的 user 卡，agent 侧的原生副本没有 mobius 块
+  // Only Mobius-authored user cards count, the agent's own copies carry no mobius block
+  if (e?.type !== 'user') return false
+  const kind = e?.mobius?.kind
+  if (typeof kind !== 'string') return false
+  return ROUND_OPENING_KINDS.has(kind) || LEGACY_ROUND_OPENING_KINDS.has(kind)
+}
+
+/*
+ * Drops duplicate user-input entries while keeping the round-opener card. One user input reaches
+ * the jsonl in several shapes (type:user / response_item.message[user] / event_msg.user_message)
+ * with the same text; the opener is the authoritative one, so every other shape steps aside.
+ * The older rule is kept as a fallback for backends that emit no opener card at all.
+ */
 export function dedupeUserEntries(entries: AnyEntry[]): AnyEntry[] {
+  // 先收集开轮卡文本，用来判断某条输入是否已由开轮卡承载
+  // Collect the opener texts first, they mark inputs already carried by an opener card
+  const openerTexts = new Set<string>()
+  for (const e of entries) {
+    if (!isRoundOpenerEntry(e)) continue
+    const text = userTextOf(e)
+    if (text) openerTexts.add(text)
+  }
   let lastUserText = ''
   let seenAssistantAfter = false
   return entries.filter((e) => {
     const text = userTextOf(e)
     if (text) {
+      // ✨ 核心：同文的非开轮形态一律让位，开轮卡是这条输入的权威载体
+      // ✨ Core: any non-opener form with the same text gives way to the opener card
+      if (openerTexts.has(text) && !isRoundOpenerEntry(e)) return false
+      // 相邻同文且其间没有 agent 输出，视为同一次输入的重复落盘
+      // Same text with no agent output in between is one input landing twice
       if (text === lastUserText && !seenAssistantAfter) return false
       lastUserText = text
       seenAssistantAfter = false

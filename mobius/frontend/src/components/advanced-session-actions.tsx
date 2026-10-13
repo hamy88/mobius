@@ -1,6 +1,5 @@
 import { BookOpen, Brain, Clock, Cpu, FileDiff, GitBranch, History, Loader2, Network, Puzzle, RotateCcw, Terminal, Wand2 } from 'lucide-react'
 import { RemoteAimuxMcpIcon } from './aimux-link-indicator'
-import { ProjectPortEntryButton } from './project-files'
 import { UnifiedButton } from './unified-button-group'
 
 type AdvancedSessionActionsProps = {
@@ -8,7 +7,6 @@ type AdvancedSessionActionsProps = {
   projectId?: string | null
   issueId?: string | null
   researchId?: string | null
-  vscodeSubPath?: string | null
   jsonlEntryCount: number
   showJsonlMeta: boolean
   connectionReady: boolean
@@ -18,7 +16,6 @@ type AdvancedSessionActionsProps = {
   onOpenBashCommands: () => void
   onOpenInputReplay: () => void
   onToggleJsonlMeta: () => void
-  onRequestRunProject: (mainProjectPortPath: string) => void
   onOpenTerminal: () => void
   onOpenCooperablePc: () => void
   onOpenKnowledge: () => void
@@ -41,7 +38,6 @@ export function AdvancedSessionActions({
   projectId,
   issueId,
   researchId,
-  vscodeSubPath,
   jsonlEntryCount,
   showJsonlMeta,
   connectionReady,
@@ -51,7 +47,6 @@ export function AdvancedSessionActions({
   onOpenBashCommands,
   onOpenInputReplay,
   onToggleJsonlMeta,
-  onRequestRunProject,
   onOpenTerminal,
   onOpenCooperablePc,
   onOpenKnowledge,
@@ -122,16 +117,6 @@ export function AdvancedSessionActions({
         displayLabel={displayLabel}
         className={`${showJsonlMeta ? 'bg-blue-500/15' : ''} ${controlClassName || ''}`}
         icon={<Clock className="h-4 w-4" strokeWidth={1.9} />}
-      />
-      <ProjectPortEntryButton
-        buttonId="project-port"
-        projectId={projectId}
-        subPath={vscodeSubPath}
-        label="进入项目端口"
-        triggerVariant="advanced"
-        advancedDisplayLabel={displayLabel}
-        className={controlClassName}
-        onRequestRunProject={onRequestRunProject}
       />
       <UnifiedButton
         kind="modal"
@@ -232,7 +217,7 @@ export function AdvancedSessionActions({
       data-variant={variant}
       aria-label="高级会话按钮组"
     >
-      {menu && <div className="px-1 text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>当前会话工具</div>}
+      {menu && <div className="px-1 text-[length:var(--fs-xs)] font-medium" style={{ color: 'var(--text-muted)' }}>当前会话工具</div>}
       <div className={`flex flex-wrap items-stretch ${menu ? 'gap-1' : 'gap-2'}`}>
         {actionButtons}
       </div>

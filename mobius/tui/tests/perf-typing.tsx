@@ -47,19 +47,21 @@ async function bench(label: string, entryCount: number) {
     prefs: { model: 'm', language: 'zh', excluded_skill_ids: [], excluded_memory_ids: [] },
   }
   const history = Array.from({ length: entryCount }, (_, i) => longEntry(i))
-  let historySent = false
   ;(globalThis as any).fetch = ((url: any) => {
     const u = String(url)
     if (u.includes('/events')) {
       return new Response(new RS({
         start(c: any) {
           c.enqueue(enc.encode('event: subscribed\ndata: {"event":"subscribed"}\n\n'))
-          if (!historySent) {
-            historySent = true
-            c.enqueue(enc.encode(`event: jsonl_history\ndata: ${JSON.stringify({ event: 'jsonl_history', entries: history })}\n\n`))
-          }
         },
       }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    // agent-history 协议 ①②: 订阅后 bootstrap 拉末尾组的全部条目 (旧 SSE 尾部回放的等价物).
+    if (u.endsWith('/api/sessions/s1/groups')) {
+      return json({ session_version: 1, groups: [{ id: 'g1', seq: 1, opener_ts: null, user_summary: '', version: 1, entry_count: history.length }] })
+    }
+    if (u.includes('/api/sessions/s1/groups/')) {
+      return json({ group_id: 'g1', version: 1, entries: history })
     }
     if (u.endsWith('/api/sessions/s1/status')) return json({ session_id: 's1', alive: true, working: false })
     if (u.endsWith('/messages')) return json({ ok: true, session_id: 's1', turn_number: 1 })

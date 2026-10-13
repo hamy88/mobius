@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.log
 .mobius/
+# npm pack/publish tarballs dropped in the package root: without this npm packs
+# the previous release's tarball into the next release (seen in 0.3.61, which
+# shipped mobius-os-mobius-0.3.56.tgz until it was deleted).
+*.tgz

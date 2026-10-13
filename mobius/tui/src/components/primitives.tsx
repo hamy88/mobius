@@ -429,6 +429,8 @@ export interface SelectItem {
   label: string
   value: string
   desc?: string
+  /** Shown but not choosable — for options this machine cannot provide. */
+  disabled?: boolean
 }
 
 /** Keep a picker explanation on the item's main row; Select truncates that row. */
@@ -453,26 +455,47 @@ export interface SelectProps {
 
 export function Select(props: SelectProps) {
   const mode = props.mode ?? 'single'
-  const [active, setActive] = useState(() => Math.max(0, props.initialActive ?? 0))
   const items = props.items
+  // A disabled row is visible but never reachable: the highlight steps over it
+  // and Enter on it does nothing.
+  const move = (from: number, dir: 1 | -1): number => {
+    const n = items.length
+    if (n === 0) return from
+    let i = from
+    for (let step = 0; step < n; step += 1) {
+      i = (i + dir + n) % n
+      if (!items[i]?.disabled) return i
+    }
+    return from
+  }
+  const [active, setActive] = useState(() => {
+    const start = Math.max(0, props.initialActive ?? 0)
+    return items[start]?.disabled ? move(start, 1) : start
+  })
   const selectedSet = new Set<string>(mode === 'multi' ? (props.selected as string[]) ?? [] : [])
   const { stdout } = useStdout()
 
-  useEffect(() => { setActive(a => Math.min(a, Math.max(0, items.length - 1))) }, [items.length])
+  useEffect(() => {
+    setActive(a => {
+      const clamped = Math.min(a, Math.max(0, items.length - 1))
+      return items[clamped]?.disabled ? move(clamped, 1) : clamped
+    })
+  }, [items.length])
 
   useStableInput((input, key) => {
     if (!items.length) return
     if (isMouseInput(input)) return
-    if (key.upArrow) { setActive(a => (a - 1 + items.length) % items.length); return }
-    if (key.downArrow) { setActive(a => (a + 1) % items.length); return }
+    if (key.upArrow) { setActive(a => move(a, -1)); return }
+    if (key.downArrow) { setActive(a => move(a, 1)); return }
+    const current = items[active]
     if (mode === 'single') {
       if (key.return) {
-        props.onSelect?.(items[active].value)
+        if (current && !current.disabled) props.onSelect?.(current.value)
         return
       }
     } else {
       if (key.return) { props.onConfirm?.(Array.from(selectedSet)); return }
-      if (input === ' ') { props.onToggle?.(items[active].value); return }
+      if (input === ' ') { if (current && !current.disabled) props.onToggle?.(current.value); return }
     }
     if (isEscapeKeypress(input, key)) { props.onBack?.(); return }
   }, { isActive: props.focused !== false })
@@ -504,7 +527,8 @@ export function Select(props: SelectProps) {
       {hiddenAbove > 0 ? <Text color="gray">  ↑ 还有 {hiddenAbove} 项</Text> : null}
       {items.slice(start, end).map((it, i) => {
         const realIdx = start + i
-        const isActive = realIdx === active
+        const disabled = it.disabled === true
+        const isActive = realIdx === active && !disabled
         const checked = mode === 'multi' ? selectedSet.has(it.value) : false
         const marker = mode === 'multi' ? (checked ? '☑' : '☐') : isActive ? '❯' : ' '
         // Keep picker rows compact: descriptions belong on the highlighted
@@ -514,7 +538,7 @@ export function Select(props: SelectProps) {
         return (
           <Box key={it.value}>
             <Text
-              color={isActive ? 'black' : undefined}
+              color={disabled ? 'gray' : isActive ? 'black' : undefined}
               backgroundColor={isActive ? 'cyan' : undefined}
               bold={isActive}
               wrap="truncate-end"

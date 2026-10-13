@@ -23,6 +23,12 @@ let sseController: any = null
 function emit(ev: string, data: Record<string, unknown>) {
   sseController?.enqueue(enc.encode(`event: ${ev}\ndata: ${JSON.stringify({ event: ev, ...data })}\n\n`))
 }
+// SSE live 批次计数 — group_id_version 必须严格递增 (水位线).
+let liveVersion = 0
+function emitEntries(entries: any[]) {
+  liveVersion += 1
+  emit('entries', { session_id: SID, group_id: 'g1', group_id_version: liveVersion, entries })
+}
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
@@ -63,19 +69,21 @@ function mockFetch(url: string, init?: RequestInit): Response {
     if (String(lastMessageBody?.content || '').trim() === '/compact') {
       setTimeout(() => {
         emit('typing', { active: true })
-        emit('jsonl_entry', { session_id: SID, entry: { type: 'user', uuid: 'flow-cmd-echo', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args><local-command-caveat>no need to respond</local-command-caveat>' } } })
-        emit('jsonl_entry', { session_id: SID, entry: { type: 'user', uuid: 'flow-cmd-done', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>Compacted. Your new context length is 8,840 tokens</local-command-stdout>' }] } } })
+        emitEntries([{ type: 'user', uuid: 'flow-cmd-echo', message: { role: 'user', content: '<command-name>/compact</command-name><command-message>compact</command-message><command-args></command-args><local-command-caveat>no need to respond</local-command-caveat>' } }, { type: 'user', uuid: 'flow-cmd-done', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>Compacted. Your new context length is 8,840 tokens</local-command-stdout>' }] } }])
         emit('typing', { active: false })
       }, 200)
       return json({ ok: true, session_id: SID, turn_number: 2 })
     }
     setTimeout(() => {
       emit('typing', { active: true })
-      emit('jsonl_entry', { session_id: SID, entry: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '已收到，这是来自 TUI 的回复。' }] } } })
+      emitEntries([{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '已收到，这是来自 TUI 的回复。' }] } }])
       emit('typing', { active: false })
     }, 200)
     return json({ ok: true, session_id: SID, turn_number: 1 })
   }
+  // agent-history 协议 ①②: 组元数据空表 (无 bootstrap 历史), live 批次由 emitEntries 注入.
+  if (url.endsWith(`/api/sessions/${SID}/groups`)) return json({ session_version: 0, groups: [] })
+  if (url.includes(`/api/sessions/${SID}/groups/`)) return json({ group_id: 'g1', version: 0, entries: [] })
   if (url.endsWith(`/api/sessions/${SID}/status`)) {
     return json({ session_id: SID, alive: true, working: false })
   }

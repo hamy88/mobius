@@ -207,6 +207,7 @@ private class IosSecureStorage : SecureStorage {
 
 actual fun createMobiusHttpClient(
     onUnauthorized: suspend () -> Unit,
+    proxy: ProxyConfig?,
 ): HttpClient = HttpClient(Darwin) {
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true })

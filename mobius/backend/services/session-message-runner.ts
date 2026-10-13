@@ -137,6 +137,7 @@ async function runSessionMessage({
   source?: string;
   logger?: any;
   urgent?: boolean;
+  kind?: string;
 } = {}): Promise<any> {
 
   // 例 1：普通打字（最常见，两者相同）

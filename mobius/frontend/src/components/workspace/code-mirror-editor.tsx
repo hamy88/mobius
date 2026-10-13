@@ -17,6 +17,8 @@ type CodeMirrorEditorProps = {
   wrap?: boolean
   /** Alt+Z / 工具栏按钮触发的切换回调. */
   onToggleWrap?: () => void
+  /** 编辑器实例创建回调; 多 Tab 保活场景下外层拿到 view, 在 Tab 重新可见时 requestMeasure. */
+  onEditorReady?: (view: EditorView) => void
 }
 
 const main_text_color_dark = '#c9c9c9'
@@ -75,7 +77,7 @@ const LANG_LOADERS: Record<string, () => Promise<Extension>> = {
   sql: () => import('@codemirror/lang-sql').then(m => m.sql()),
 }
 
-export function CodeMirrorEditor({ fileName, value, skin, onChange, wrap = false, onToggleWrap }: CodeMirrorEditorProps) {
+export function CodeMirrorEditor({ fileName, value, skin, onChange, wrap = false, onToggleWrap, onEditorReady }: CodeMirrorEditorProps) {
   const [langExt, setLangExt] = useState<Extension | null>(null)
 
   useEffect(() => {
@@ -113,7 +115,8 @@ export function CodeMirrorEditor({ fileName, value, skin, onChange, wrap = false
       theme={theme}
       extensions={extensions}
       height="100%"
-      style={{ height: '100%', fontSize: '12.5px' }}
+      onCreateEditor={onEditorReady}
+      style={{ height: '100%', fontSize: 'var(--fs-md)' }}
     />
   )
 }

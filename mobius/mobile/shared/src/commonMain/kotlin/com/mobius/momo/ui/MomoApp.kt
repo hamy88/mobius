@@ -169,6 +169,8 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.mobius.momo.data.TtsPlaybackMode
 import com.mobius.momo.data.TTS_SYSTEM_VOICE_ID
 import com.mobius.momo.data.RECOMMENDED_MOBIUS_BASE_URL
+import com.mobius.momo.data.ProxyConfig
+import com.mobius.momo.data.ProxyProtocol
 import com.mobius.momo.data.ServerEntry
 import com.mobius.momo.data.ChangelogItem
 import com.mobius.momo.data.ChangelogType
@@ -997,6 +999,7 @@ private fun LoginScreen(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel
 private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: MomoAppViewModel) {
     var expanded by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<ServerEntry?>(null) }
+    var proxyEditTarget by remember { mutableStateOf<ServerEntry?>(null) }
     Column(Modifier.fillMaxWidth()) {
         Text(
             "服务器地址",
@@ -1049,6 +1052,7 @@ private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: Momo
                                 expanded = false
                             },
                             onRename = { renameTarget = it },
+                            onEditProxy = { proxyEditTarget = it },
                             onRemove = {
                                 vm.removeServerEntry(it.url)
                                 expanded = false
@@ -1058,12 +1062,35 @@ private fun LoginServerBaseUrlField(state: AuthState, theme: MomoTheme, vm: Momo
                 }
             }
         }
+        ProxySettingsFields(
+            enabled = state.proxyEnabled,
+            protocol = state.proxyProtocol,
+            host = state.proxyHost,
+            port = state.proxyPort,
+            username = state.proxyUsername,
+            password = state.proxyPassword,
+            theme = theme,
+            onEnabledChange = vm::setProxyEnabled,
+            onProtocolChange = vm::setProxyProtocol,
+            onHostChange = vm::setProxyHost,
+            onPortChange = vm::setProxyPort,
+            onUsernameChange = vm::setProxyUsername,
+            onPasswordChange = vm::setProxyPassword,
+        )
         renameTarget?.let { target ->
             ServerRenameDialog(
                 entry = target,
                 theme = theme,
                 onConfirm = { label -> vm.renameServerEntry(target.url, label) },
                 onDismiss = { renameTarget = null },
+            )
+        }
+        proxyEditTarget?.let { target ->
+            ProxyEditDialog(
+                entry = target,
+                theme = theme,
+                onSave = { enabled, proxy -> vm.updateServerProxy(target.url, enabled, proxy) },
+                onDismiss = { proxyEditTarget = null },
             )
         }
     }
@@ -1078,6 +1105,7 @@ private fun ServerDropdownRow(
     theme: MomoTheme,
     onSelect: () -> Unit,
     onRename: (ServerEntry) -> Unit,
+    onEditProxy: (ServerEntry) -> Unit,
     onRemove: (ServerEntry) -> Unit,
 ) {
     var showActionMenu by remember { mutableStateOf(false) }
@@ -1110,6 +1138,15 @@ private fun ServerDropdownRow(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+                if (entry.proxyEnabled) {
+                    Text(
+                        "🛡 已配置代理",
+                        color = theme.accentPrimary,
+                        style = momoTextStyle(MomoTypography.caption.copy(fontWeight = FontWeight.Medium)),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         },
         onClick = onSelect,
@@ -1127,6 +1164,13 @@ private fun ServerDropdownRow(
                     expanded = showActionMenu,
                     onDismissRequest = { showActionMenu = false },
                 ) {
+                    DropdownMenuItem(
+                        text = { Text("代理设置", color = theme.textPrimary) },
+                        onClick = {
+                            showActionMenu = false
+                            onEditProxy(entry)
+                        },
+                    )
                     DropdownMenuItem(
                         text = { Text("重命名", color = theme.textPrimary) },
                         onClick = {
@@ -1152,6 +1196,218 @@ private fun ServerDropdownRow(
  * ExposedDropdownMenuBox 下拉 (见 LoginServerBaseUrlField / ServerDropdownRow)。
  * 重命名对话框保留(下拉的 ⋮ 菜单触发)。
  */
+
+// ===== 登录页代理设置 =====
+
+@Composable
+private fun ProxySettingsFields(
+    enabled: Boolean,
+    protocol: ProxyProtocol,
+    host: String,
+    port: String,
+    username: String,
+    password: String,
+    theme: MomoTheme,
+    onEnabledChange: (Boolean) -> Unit,
+    onProtocolChange: (ProxyProtocol) -> Unit,
+    onHostChange: (String) -> Unit,
+    onPortChange: (String) -> Unit,
+    onUsernameChange: (String) -> Unit,
+    onPasswordChange: (String) -> Unit,
+) {
+    Spacer(Modifier.height(MomoSpacing.lg))
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "使用代理",
+            color = theme.textPrimary,
+            style = momoTextStyle(MomoTypography.body.copy(fontWeight = FontWeight.SemiBold)),
+        )
+        Spacer(Modifier.weight(1f))
+        Switch(checked = enabled, onCheckedChange = onEnabledChange)
+    }
+    if (enabled) {
+        Spacer(Modifier.height(MomoSpacing.lg))
+        ProxyProtocolDropdown(protocol, theme, onProtocolChange)
+        Spacer(Modifier.height(MomoSpacing.lg))
+        MomoInput(
+            value = host,
+            placeholder = "代理主机 (IP 或域名)",
+            theme = theme,
+            imeAction = ImeAction.Next,
+            keyboardType = KeyboardType.Uri,
+            onChange = onHostChange,
+        )
+        Spacer(Modifier.height(MomoSpacing.lg))
+        MomoInput(
+            value = port,
+            placeholder = "端口",
+            theme = theme,
+            imeAction = ImeAction.Next,
+            keyboardType = KeyboardType.Number,
+            onChange = onPortChange,
+        )
+        Spacer(Modifier.height(MomoSpacing.lg))
+        MomoInput(
+            value = username,
+            placeholder = "用户名(可选)",
+            theme = theme,
+            imeAction = ImeAction.Next,
+            onChange = onUsernameChange,
+        )
+        Spacer(Modifier.height(MomoSpacing.lg))
+        MomoInput(
+            value = password,
+            placeholder = "密码(可选)",
+            theme = theme,
+            password = true,
+            imeAction = ImeAction.Done,
+            onChange = onPasswordChange,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProxyProtocolDropdown(
+    protocol: ProxyProtocol,
+    theme: MomoTheme,
+    onSelect: (ProxyProtocol) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded },
+    ) {
+        OutlinedTextField(
+            value = when (protocol) {
+                ProxyProtocol.HTTP -> "HTTP"
+                ProxyProtocol.SOCKS5 -> "SOCKS5"
+            },
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("代理协议", color = theme.textMuted) },
+            singleLine = true,
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(
+                focusedBorderColor = theme.accentPrimary,
+                unfocusedBorderColor = theme.borderDefault,
+                focusedTextColor = theme.textPrimary,
+                unfocusedTextColor = theme.textPrimary,
+            ),
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            ProxyProtocol.entries.forEach { item ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            when (item) {
+                                ProxyProtocol.HTTP -> "HTTP"
+                                ProxyProtocol.SOCKS5 -> "SOCKS5"
+                            },
+                            color = theme.textPrimary,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(item)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProxyEditDialog(
+    entry: ServerEntry,
+    theme: MomoTheme,
+    onSave: (Boolean, ProxyConfig) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var enabled by remember(entry) { mutableStateOf(entry.proxyEnabled) }
+    var protocol by remember(entry) { mutableStateOf(entry.proxyProtocol) }
+    var host by remember(entry) { mutableStateOf(entry.proxyHost) }
+    var port by remember(entry) { mutableStateOf(entry.proxyPort.takeIf { it > 0 }?.toString().orEmpty()) }
+    var username by remember(entry) { mutableStateOf(entry.proxyUsername) }
+    var password by remember(entry) { mutableStateOf(entry.proxyPassword) }
+    var error by remember(entry) { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("代理设置", color = theme.textPrimary, style = momoTextStyle(MomoTypography.title.copy(fontWeight = FontWeight.Bold)))
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    entry.url,
+                    color = theme.textMuted,
+                    style = momoTextStyle(MomoTypography.caption),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                ProxySettingsFields(
+                    enabled = enabled,
+                    protocol = protocol,
+                    host = host,
+                    port = port,
+                    username = username,
+                    password = password,
+                    theme = theme,
+                    onEnabledChange = { enabled = it; error = null },
+                    onProtocolChange = { protocol = it; error = null },
+                    onHostChange = { host = it; error = null },
+                    onPortChange = { port = it.filter { c -> c.isDigit() }; error = null },
+                    onUsernameChange = { username = it; error = null },
+                    onPasswordChange = { password = it; error = null },
+                )
+                error?.let {
+                    Spacer(Modifier.height(MomoSpacing.md))
+                    Text(it, color = theme.danger, style = momoTextStyle(MomoTypography.caption))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val parsedPort = port.trim().toIntOrNull()
+                if (enabled && (host.isBlank() || parsedPort == null || parsedPort !in 1..65535)) {
+                    error = "请填写有效的主机和端口"
+                } else {
+                    onSave(
+                        enabled,
+                        ProxyConfig(
+                            protocol = protocol,
+                            host = host.trim(),
+                            port = parsedPort ?: 0,
+                            username = username.trim(),
+                            password = password,
+                        ),
+                    )
+                    onDismiss()
+                }
+            }) {
+                Text("保存", color = theme.accentPrimary, style = momoTextStyle(MomoTypography.body.copy(fontWeight = FontWeight.Bold)))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = theme.textMuted, style = momoTextStyle(MomoTypography.body))
+            }
+        },
+        containerColor = theme.bgSecondary,
+        titleContentColor = theme.textPrimary,
+        textContentColor = theme.textMuted,
+    )
+}
+
 
 // 服务器地址重命名对话框: label 备注名可空(清空即恢复只显 URL)。
 @Composable
@@ -1701,6 +1957,7 @@ private fun SettingsScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewMode
                     SettingsGroupCard("连 接", theme) {
                         var expanded by remember { mutableStateOf(false) }
                         var renameTarget by remember { mutableStateOf<ServerEntry?>(null) }
+                        var proxyEditTarget by remember { mutableStateOf<ServerEntry?>(null) }
                         var serverField by remember { mutableStateOf(state.serverBaseUrl) }
                         var lastPushedServer by remember { mutableStateOf(state.serverBaseUrl) }
                         val externalServerUrl = state.serverBaseUrl
@@ -1764,6 +2021,7 @@ private fun SettingsScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewMode
                                                 expanded = false
                                             },
                                             onRename = { renameTarget = it },
+                                            onEditProxy = { proxyEditTarget = it },
                                             onRemove = {
                                                 vm.removeServerEntry(it.url)
                                                 expanded = false
@@ -1779,6 +2037,14 @@ private fun SettingsScreen(state: UiState, theme: MomoTheme, vm: MomoAppViewMode
                                 theme = theme,
                                 onConfirm = { label -> vm.renameServerEntry(target.url, label) },
                                 onDismiss = { renameTarget = null },
+                            )
+                        }
+                        proxyEditTarget?.let { target ->
+                            ProxyEditDialog(
+                                entry = target,
+                                theme = theme,
+                                onSave = { enabled, proxy -> vm.updateServerProxy(target.url, enabled, proxy) },
+                                onDismiss = { proxyEditTarget = null },
                             )
                         }
                         SettingsHairline(theme)

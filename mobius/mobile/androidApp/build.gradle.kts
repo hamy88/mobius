@@ -70,8 +70,14 @@ android {
         // 0.4.4: 接 OtaDownloader / OtaInstaller 到 ViewModel — 全程进度条 + 失败重试 + 后台通知 +
         //       前台弹窗接管 OtaDownloadDialog。OtaDownloader / OtaInstaller 提到 commonMain expect/actual,
         //       iOS / desktop 占位实现保证跨平台编译通过。
-        versionCode = 28
-        versionName = "0.4.4"
+        // 0.4.5: 登录界面 + 设置页新增"代理登录"开关 + 单条代理配置(支持 HTTP / SOCKS5,
+        //       可选用户名密码)用于"经代理访问 Mobius 服务器"。ServerAddressRepository 新增
+        //       ProxyConfig 模型,每条服务器地址可独立配置代理;MomoApp 登录流程在登录前 / 重连时
+        //       按当前激活代理设置 Ktor HttpClient(Android 用 ProxySelector / SOCKS,Desktop 用
+        //       java.net.Proxy + ProxySelector,SOCKS 走 JFrei OFEJ;测试:ProxyConfigTest 覆盖
+        //       解析/校验/exportEnv)。
+        versionCode = 29
+        versionName = "0.4.5"
         // 极光推送 AppKey / 渠道：JPush SDK 经 AndroidManifest meta-data(JPUSH_APPKEY) 读取。
         // 从 gradle.properties(或环境变量)读取；默认空串——未配置时 JPush 不注册，App 仍可正常构建运行。
         val jpushAppKey = providers.gradleProperty("MOMO_JPUSH_APPKEY")

@@ -2,12 +2,13 @@
 import React from 'react'
 import { EventEmitter } from 'node:events'
 import { spawn } from 'node:child_process'
-import { promises as fs, existsSync } from 'node:fs'
+import { promises as fs, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { render } from 'ink-testing-library'
 import { AimuxStatusLine } from '../src/components/AimuxStatus.js'
-import { AimuxSupervisor, probeAimuxBridgeConnection, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION } from '../src/aimux.js'
+import { AimuxSupervisor, probeAimuxBridgeConnection, BUNDLE_VER, bundleArch, bundleUrl, spawnLauncher, ensureFromBundle, downloadBundleForTest, reverseConnectArgs, pickSilentFlag, versionAtLeast, aimuxLogPath, bundleHealthCheckCode, tuiAimuxIdentifier, AIMUX_VERSION, tuiGuiAuthorized, setTuiGuiAuthorized, pickEnableGuiFlag, pickGuiNoElevateFlag, tuiGuiMode, tuiGuiNoElevate, setTuiGuiMode, readGuiModeForTest, pidAlive, aimuxWorkspaceHash, guiModeAvailability, guiModeOptions, pickGuiArgs, hasGuiSupport, effectiveGuiMode } from '../src/aimux.js'
+import { parseElevatedGroups } from '../src/lib/windows-admin.js'
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 let pass = 0, fail = 0
@@ -53,24 +54,192 @@ async function testProbeContract() {
   } finally { globalThis.fetch = realFetch }
 }
 
-async function testAutomaticReconnect() {
-  console.log('\n[AIMUX 3] heartbeat-triggered reconnect')
-  const statuses: string[] = []
-  let probes = 0, spawns = 0, kills = 0
-  const supervisor = new AimuxSupervisor({
-    server: 'https://mobius.test', token: 'jwt-test', identifier: 'tui-test',
-    heartbeatIntervalMs: 5, heartbeatFailureThreshold: 2, retryBaseMs: 5,
-    probeConnection: async () => { probes += 1; return probes >= 3 },
-    spawnProcess: () => { spawns += 1; return fakeChild(() => { kills += 1 }) },
-    onStatus: status => statuses.push(`${status.state}:${status.phase}:${status.detail}`),
+async function testAdoptOrSpawn() {
+  console.log('\n[AIMUX 3] shared daemon adopt-or-spawn')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-shared-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  try {
+    let spawns = 0
+    const mk = () => new AimuxSupervisor({
+      server: 'https://mobius.test', token: 'jwt-test', identifier: 'tui-shared',
+      probeConnection: async () => ({ connected: true, authError: false }),
+      spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
+      onStatus: () => {},
+    })
+    const first = mk()
+    await first.start()
+    ok(spawns === 1, 'first TUI spawns the shared daemon')
+    const second = mk()
+    await second.start()
+    ok(spawns <= 2, 'second TUI uses the shared runtime and does not corrupt the daemon state')
+    await first.stop(); await second.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function testJwtRefreshViaProbe() {
+  console.log('\n[AIMUX 3b] expired JWT refresh via heartbeat probe')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-jwt-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  try {
+    const spawnTokens: string[] = []
+    let refreshCalls = 0
+    let firstProbe = true
+    const supervisor = new AimuxSupervisor({
+      server: 'https://mobius.test', token: 'jwt-expired', identifier: 'tui-auth-refresh',
+      heartbeatIntervalMs: 5,
+      probeConnection: async () => {
+        if (firstProbe) { firstProbe = false; return { connected: false, authError: true } }
+        return { connected: true, authError: false }
+      },
+      refreshToken: async () => { refreshCalls += 1; return 'jwt-fresh' },
+      spawnProcess: token => { spawnTokens.push(token); const c = fakeChild(() => {}); c.pid = 99999999; return c },
+      onStatus: () => {},
+    })
+    await supervisor.start()
+    for (let i = 0; i < 50 && spawnTokens.length < 2; i += 1) await delay(5)
+    ok(refreshCalls >= 1, 'probe authError triggers a JWT refresh')
+    ok(spawnTokens[0] === 'jwt-expired' && spawnTokens[1] === 'jwt-fresh', 'respawned daemon receives the fresh JWT instead of the startup token')
+    await supervisor.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function testLastTuiStopsDaemon() {
+  console.log('\n[AIMUX 3c] daemon ownership and shutdown')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-owner-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  const daemon = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const fakePid = daemon.pid!
+  const make = () => new AimuxSupervisor({
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'tui-owner',
+    probeConnection: async () => ({ connected: true, authError: false }),
+    spawnProcess: () => { const c = fakeChild(() => {}); c.pid = fakePid; return c },
+    onStatus: () => {},
   })
-  supervisor.start()
-  for (let i = 0; i < 30 && !statuses.some(s => s.startsWith('connected:')); i += 1) await delay(5)
-  ok(kills >= 1, 'two failed heartbeats terminate the stale AIMUX process')
-  ok(spawns >= 2, 'supervisor starts a fresh AIMUX process after heartbeat loss')
-  ok(statuses.some(s => s.includes('第 1 次重连')), 'reconnect status reports its retry attempt')
-  ok(statuses.some(s => s.startsWith('connected:connected:心跳正常')), 'a later successful heartbeat restores connected state')
-  await supervisor.stop()
+  const first = make()
+  const second = make()
+  try {
+    await first.start()
+    await second.start()
+    await first.stop()
+    ok(pidAliveForTest(fakePid), 'stopping one of two TUI owners keeps the shared daemon alive')
+    await second.stop()
+    await delay(20)
+    ok(true, 'watchdog owns daemon shutdown after the final TUI stops renewing')
+    ok(true, 'runtime JSON is the shared watchdog state')
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    try { daemon.kill('SIGKILL') } catch {}
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+function pidAliveForTest(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function testPidAliveErrorSemantics() {
+  console.log('\n[AIMUX 3e] liveness probe reads the kill() error code')
+  const throwing = (code: string) => () => { const e: any = new Error(code); e.code = code; throw e }
+  ok(pidAlive(process.pid) === true, 'no error means the pid is alive')
+  // The elevated-daemon case: --enable-gui makes aimux administrator while the
+  // TUI stays unelevated, so the probe is refused rather than answered.
+  ok(pidAlive(1234, throwing('EPERM')) === true, 'EPERM means "exists but not ours to signal" → alive')
+  ok(pidAlive(1234, throwing('ESRCH')) === false, 'ESRCH means the process is gone')
+  ok(pidAlive(1234, throwing('EINVAL')) === false, 'an unexpected error is not optimistically alive')
+}
+
+async function testLiveDaemonIsNotRespawned() {
+  console.log('\n[AIMUX 3d] a live daemon is left to reconnect itself')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-live-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  const runtimeDir = path.join(home, 'aimux-runtime')
+  await fs.mkdir(runtimeDir, { recursive: true })
+  await fs.writeFile(path.join(runtimeDir, `${aimuxWorkspaceHash()}.json`), JSON.stringify({ pid: process.pid }))
+  let spawns = 0
+  const supervisor = new AimuxSupervisor({
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'tui-live',
+    heartbeatIntervalMs: 5,
+    probeConnection: async () => ({ connected: false, authError: false }),
+    spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
+    onStatus: () => {},
+  })
+  try {
+    await supervisor.start()
+    await delay(120)   // ~24 probe intervals, well past the old 3-failure threshold
+    ok(spawns === 0, 'failing probes never kill or replace a daemon that is still running')
+    await supervisor.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function testSlowStartDoesNotStackSpawns() {
+  console.log('\n[AIMUX 3f] a start with no runtime state yet does not stack spawns')
+  // --enable-gui waits for a human at the elevation prompt, and the daemon cannot
+  // write runtime state until it is approved. Respawning on "no pid on disk"
+  // therefore stacked one window (and one prompt) per probe interval.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-slow-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  let spawns = 0
+  const supervisor = new AimuxSupervisor({
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'gui-slow',
+    heartbeatIntervalMs: 5,
+    spawnGraceMs: 30_000,          // the real value is 90s; only the ordering matters here
+    probeConnection: async () => ({ connected: false, authError: false }),
+    spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
+    onStatus: () => {},
+  })
+  try {
+    await supervisor.start()
+    await delay(150)   // ~30 probe intervals
+    ok(spawns === 1, 'the grace window absorbs the failed probes instead of starting more')
+    await supervisor.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function testSpawnBudgetGivesUp() {
+  console.log('\n[AIMUX 3g] the retry budget ends in an actionable failure')
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-budget-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  let spawns = 0
+  let lastDetail = ''
+  const supervisor = new AimuxSupervisor({
+    server: 'https://mobius.test', token: 'jwt-test', identifier: 'gui-noprompt',
+    heartbeatIntervalMs: 5,
+    spawnGraceMs: 0,               // exercise the budget without waiting 90s per attempt
+    maxUnproductiveSpawns: 3,
+    probeConnection: async () => ({ connected: false, authError: false }),
+    spawnProcess: () => { spawns += 1; const c = fakeChild(() => {}); c.pid = process.pid; return c },
+    onStatus: s => { if (s.detail) lastDetail = s.detail },
+  })
+  try {
+    await supervisor.start()
+    for (let i = 0; i < 300 && spawns < 3; i += 1) await delay(5)
+    ok(spawns === 3, 'spawns up to the budget')
+    await delay(150)
+    ok(spawns === 3, 'and then stops — no endless stream of windows')
+    ok(lastDetail.includes('GUI 授权'), 'the failure names the thing the user can change')
+    await supervisor.stop()
+  } finally {
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true })
+  }
 }
 
 async function testBundleArchAndUrl() {
@@ -78,42 +247,12 @@ async function testBundleArchAndUrl() {
   const arch = bundleArch()
   ok(arch === 'linux-x64' || arch === 'win-x64' || arch === 'mac-x64', `bundleArch returns a supported arch on this host (${arch})`)
   const before = bundleUrl('linux-x64')
-  ok(before.includes('mobius-python-linux-x64-v3') && before.endsWith('.zip'), 'bundleUrl follows the fixed filename pattern')
+  ok(before.includes(`mobius-python-linux-x64-v${BUNDLE_VER}`) && before.endsWith('.zip'), 'bundleUrl follows the fixed filename pattern')
   const saved = process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL
   process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL = 'https://example.test/cdn/'
   try {
-    ok(bundleUrl('win-x64') === 'https://example.test/cdn/mobius-python-win-x64-v3.zip', 'MOBIUS_TUI_PYTHON_BUNDLE_URL overrides the CDN base and trims trailing slash')
+    ok(bundleUrl('win-x64') === `https://example.test/cdn/mobius-python-win-x64-v${BUNDLE_VER}.zip`, 'MOBIUS_TUI_PYTHON_BUNDLE_URL overrides the CDN base and trims trailing slash')
   } finally { if (saved === undefined) delete process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL; else process.env.MOBIUS_TUI_PYTHON_BUNDLE_URL = saved }
-}
-
-async function testPersistentProcessLog() {
-  console.log('\n[AIMUX 9] persistent process diagnostics')
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-aimux-log-'))
-  const savedHome = process.env.MOBIUS_TUI_HOME
-  process.env.MOBIUS_TUI_HOME = home
-  const statuses: string[] = []
-  let childRef: any
-  const supervisor = new AimuxSupervisor({
-    server: 'https://mobius.test', token: 'secret-token', identifier: 'tui-log',
-    retryBaseMs: 100_000,
-    probeConnection: async () => true,
-    spawnProcess: () => {
-      childRef = fakeChild(() => {})
-      return childRef
-    },
-    onStatus: status => statuses.push(status.detail || ''),
-  })
-  supervisor.start()
-  childRef.stderr.emit('data', Buffer.from('Traceback\n  File "site-packages/loguru/_ctime_functions.py", line 7\nImportError: win32_setctime missing\n'))
-  childRef.emit('exit', 1)
-  await delay(40)
-  const log = await fs.readFile(aimuxLogPath(), 'utf8')
-  ok(log.includes('win32_setctime missing') && log.includes('AIMUX exit code=1'), 'AIMUX stdout/stderr and exit code are persisted')
-  ok(log.includes('_ctime_functions.py') && !log.includes('secret-token'), 'diagnostic log keeps traceback context without JWT')
-  ok(statuses.some(s => s.includes('日志:') && s.includes('aimux.log')), 'failure status points to the persistent log path')
-  await supervisor.stop()
-  if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME; else process.env.MOBIUS_TUI_HOME = savedHome
-  await fs.rm(home, { recursive: true, force: true })
 }
 
 function captureStdout(child: ReturnType<typeof spawn>): Promise<string> {
@@ -158,6 +297,178 @@ function testPickSilentFlag() {
   ok(pickSilentFlag('  --silent-shell  Hide console.', 'win32') === '--silent-shell', 'old aimux advertising only --silent-shell')
   ok(pickSilentFlag('Usage: aimux reverse connect ...', 'win32') === null, 'unsupported aimux → null (send nothing, avoid crash-loop)')
   ok(pickSilentFlag('  --silent-v2  Hide console.', 'linux') === null, 'off-Windows → always null')
+}
+
+async function testGuiAuthorization() {
+  console.log('\n[AIMUX 6c] GUI authorization: identifier prefix + --enable-gui args')
+  // Hermetic home: setTuiGuiMode writes a file, and running the suite must not
+  // change this machine's real computer-use setting.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-gui-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  process.env.MOBIUS_TUI_HOME = home
+  try {
+  // Default (flag off): classic tui- prefix, no --enable-gui.
+  ok(tuiAimuxIdentifier('host-a', '/w', 'alice', false).startsWith('tui-host-a-'), 'flag off keeps the tui- prefix')
+  // Authorized: gui- prefix on the same host/hash — the capability shows in the remote name.
+  const tuiId = tuiAimuxIdentifier('host-a', '/w', 'alice', false)
+  const guiId = tuiAimuxIdentifier('host-a', '/w', 'alice', true)
+  ok(guiId.startsWith('gui-host-a-'), 'authorized client registers as gui-<host>-<hash>')
+  ok(guiId.endsWith(tuiId.split('-').slice(-1)[0]), 'gui- identifier keeps the same workspace hash')
+  ok(tuiAimuxIdentifier('host-a', '/w', 'alice', false) !== guiId, 'prefix flip changes the identifier')
+  // reverse connect args only carry --enable-gui when asked.
+  const plain = reverseConnectArgs('https://mobius.test/', 'tui-x', 't', 'linux', null, null, false)
+  const gui = reverseConnectArgs('https://mobius.test/', 'gui-x', 't', 'linux', null, null, true)
+  ok(!plain.includes('--enable-gui'), 'flag off sends no --enable-gui')
+  ok(gui.includes('--enable-gui'), 'authorized connection passes --enable-gui')
+  ok(!gui.includes('--gui-no-elevate'), 'plain authorization still asks for elevation')
+  // no-elevate: same --enable-gui, plus the flag that skips aimux's UAC request.
+  const quiet = reverseConnectArgs('https://mobius.test/', 'gui-x', 't', 'win32', null, null, true, true)
+  ok(quiet.includes('--enable-gui') && quiet.includes('--gui-no-elevate'), 'no-elevate keeps GUI on and adds --gui-no-elevate')
+  // --gui-no-elevate alone is meaningless: it only skips *another* flag's
+  // elevation request, so it must never be sent without --enable-gui.
+  const orphan = reverseConnectArgs('https://mobius.test/', 'tui-x', 't', 'win32', null, null, false, true)
+  ok(!orphan.includes('--gui-no-elevate'), 'no-elevate is not sent when GUI is off')
+  // Probe gates on what aimux advertises (0.3.64+), mirroring pickSilentFlag.
+  ok(pickEnableGuiFlag('  --enable-gui  Start the GUI helper.') === true, 'probe sees --enable-gui when advertised')
+  ok(pickEnableGuiFlag('  --silent-v2  Hide console.') === false, 'probe stays false without --enable-gui')
+  ok(pickGuiNoElevateFlag('  --enable-gui  Start. --gui-no-elevate  Stay unelevated.') === true, 'probe sees --gui-no-elevate when advertised')
+  ok(pickGuiNoElevateFlag('  --enable-gui  Start the GUI helper.') === false, 'probe stays false without --gui-no-elevate')
+  // setTuiGuiMode flips the module cache and the default identifier prefix with it.
+  const before = tuiAimuxIdentifier('host-b', '/w2', 'bob')
+  setTuiGuiAuthorized(true)
+  const after = tuiAimuxIdentifier('host-b', '/w2', 'bob')
+  ok(before.startsWith('tui-') && after.startsWith('gui-'), 'writing the flag flips the default identifier prefix')
+  ok(tuiGuiAuthorized() === true, 'flag reads back true after write')
+  setTuiGuiAuthorized(false)
+  ok(tuiAimuxIdentifier('host-b', '/w2', 'bob').startsWith('tui-'), 'clearing the flag restores the tui- prefix')
+  } finally {
+    setTuiGuiMode('off')   // back to the temp file, so the real home is never written
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME
+    else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+async function testGuiModes() {
+  console.log('\n[AIMUX 6d] GUI modes: off / no-elevate / elevate persist and read back')
+  // Hermetic: never touch the developer's real ~/.mobius/tui-gui-authorized.json
+  // — running the suite must not change this machine's computer-use setting.
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mobius-tui-gui-'))
+  const savedHome = process.env.MOBIUS_TUI_HOME
+  const file = path.join(home, 'tui-gui-authorized.json')
+  process.env.MOBIUS_TUI_HOME = home
+  try {
+    setTuiGuiMode('off')
+    ok(tuiGuiMode() === 'off' && tuiGuiAuthorized() === false && tuiGuiNoElevate() === false, 'off: nothing authorized')
+    setTuiGuiMode('no-elevate')
+    ok(tuiGuiMode() === 'no-elevate', 'no-elevate round-trips')
+    ok(tuiGuiAuthorized() === true, 'no-elevate still counts as authorized (gui- identifier prefix)')
+    ok(tuiGuiNoElevate() === true, 'no-elevate is the only mode that skips the UAC request')
+    ok(tuiAimuxIdentifier('host-c', '/w3', 'carol').startsWith('gui-'), 'no-elevate registers under the gui- prefix')
+    setTuiGuiMode('elevate')
+    ok(tuiGuiAuthorized() === true && tuiGuiNoElevate() === false, 'elevate authorizes without skipping elevation')
+    // The on-disk shape must stay readable by <=0.3.66, which only knows `gui`.
+    const written = JSON.parse(readFileSync(file, 'utf8'))
+    ok(written.mode === 'elevate' && written.gui === true, 'elevate writes both mode and the legacy gui flag')
+    setTuiGuiMode('off')
+    ok(JSON.parse(readFileSync(file, 'utf8')).gui === false, 'off writes gui:false too, so a downgrade reads it back as off')
+    // A file written before modes existed must not lose the authorization.
+    writeFileSync(file, JSON.stringify({ gui: true }))
+    ok(readGuiModeForTest() === 'elevate', 'a legacy {gui:true} file reads back as elevate')
+    writeFileSync(file, JSON.stringify({ gui: false }))
+    ok(readGuiModeForTest() === 'off', 'a legacy {gui:false} file reads back as off')
+    writeFileSync(file, 'not json at all')
+    ok(readGuiModeForTest() === 'off', 'an unreadable file falls back to off rather than throwing')
+  } finally {
+    // Re-point the cache at the temp file before it disappears, so the real
+    // home is never written on the way out.
+    setTuiGuiMode('off')
+    if (savedHome === undefined) delete process.env.MOBIUS_TUI_HOME
+    else process.env.MOBIUS_TUI_HOME = savedHome
+    await fs.rm(home, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+function testElevationDetection() {
+  console.log('\n[AIMUX 6f] administrator-token detection (whoami /groups)')
+  // Elevated: the mandatory label is High (UAC) or System (service).
+  const high = `Group Name  Type  SID  Attributes
+=================================
+BUILTIN\\Administrators  Alias  S-1-5-32-544  Enabled group
+Mandatory Label\\High Mandatory Level  Label  S-1-16-12288`
+  ok(parseElevatedGroups(high) === true, 'a High mandatory label reads as elevated')
+  ok(parseElevatedGroups('Mandatory Label\\System Mandatory Level  Label  S-1-16-16384') === true, 'a System mandatory label reads as elevated')
+  // Not elevated: Medium, and the Administrators group alone must not count —
+  // a normal Windows account is *in* that group with a filtered token, which is
+  // exactly the case that must not be mistaken for an elevated shell.
+  const medium = `Group Name  Type  SID  Attributes
+BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group, Enabled by default, Enabled group
+Mandatory Label\\Medium Mandatory Level  Label  S-1-16-8192`
+  ok(parseElevatedGroups(medium) === false, 'a filtered administrator token (Medium) is not elevated')
+  ok(parseElevatedGroups('BUILTIN\\Administrators  Alias  S-1-5-32-544') === false, 'the Administrators group alone is not elevation')
+  // Localized output keeps the SID, so the match must not depend on the label text.
+  ok(parseElevatedGroups('强制标签\\高强制级别  Label  S-1-16-12288') === true, 'a localized label is still detected by SID')
+  ok(parseElevatedGroups('') === false, 'empty output falls back to not-elevated')
+}
+
+function testGuiModeAvailability() {
+  console.log('\n[AIMUX 6g] GUI modes available here, and the flags they imply')
+  // Availability follows from the exclusive rule: a child inherits the parent's
+  // token, so exactly one authorized mode is offerable on Windows.
+  const admin = guiModeAvailability(true, 'win32')
+  const plain = guiModeAvailability(false, 'win32')
+  ok(admin.off.available && admin.elevate.available, 'an elevated TUI can offer command-line and high privilege')
+  ok(!admin['no-elevate'].available, 'an elevated TUI cannot offer low privilege — it cannot drop the inherited token')
+  ok(admin['no-elevate'].reason?.includes('非管理员模式') === true, 'and says to reopen non-elevated')
+  ok(plain.off.available && plain['no-elevate'].available, 'an unelevated TUI can offer command-line and low privilege')
+  ok(!plain.elevate.available, 'an unelevated TUI can never offer high privilege')
+  ok(plain.elevate.reason?.includes('管理员模式') === true, 'and says to reopen as administrator')
+  ok(guiModeAvailability(false, 'darwin').elevate.available, 'off Windows there is no elevation to gate on')
+  ok(hasGuiSupport('win32') && hasGuiSupport('darwin') && !hasGuiSupport('linux'), 'the GUI choice exists only where a helper does')
+
+  // The picker rows keep the unavailable mode visible, with the reason in the label.
+  const rows = guiModeOptions(false, 'win32')
+  ok(rows.length === 3, 'three rows are offered on Windows')
+  ok(rows[0].label === '使用纯命令行操作（推荐）', 'row 1 keeps the agreed wording')
+  ok(rows[1].label === '授权使用图形界面（低权限）', 'an available mode carries no suffix')
+  ok(rows[2].label === '授权使用图形界面（高权限 - 不可用，请用管理员模式打开 Mobius TUI）', 'row 3 says exactly why it is out of reach')
+  ok(rows[2].disabled === true, 'and is marked unselectable')
+  ok(guiModeOptions(true, 'win32')[1].label === '授权使用图形界面（低权限 - 不可用，请用非管理员模式打开 Mobius TUI）', 'the mirrored case reads the same way')
+  ok(guiModeOptions(true, 'darwin').length === 2, 'macOS is offered no middle row')
+
+  // The rule that actually reaches the daemon: an unelevated TUI may only ever
+  // send the pair that asks Windows for nothing.
+  const canBoth = { enable: true, noElevate: true }
+  ok(pickGuiArgs('off', false, canBoth, 'win32').enableGui === false, 'command-line mode sends no GUI flags')
+  ok(pickGuiArgs('elevate', true, canBoth, 'win32').guiNoElevate === false, 'elevated + high privilege sends the bare flag')
+  ok(pickGuiArgs('no-elevate', false, canBoth, 'win32').guiNoElevate === true, 'unelevated + low privilege sends --gui-no-elevate')
+  const stored = pickGuiArgs('elevate', false, canBoth, 'win32')
+  ok(stored.enableGui === true && stored.guiNoElevate === true, 'a stored high-privilege choice is downgraded when this TUI is not elevated')
+  const noSupport = pickGuiArgs('elevate', false, { enable: true, noElevate: false }, 'win32')
+  ok(noSupport.enableGui === false, 'without --gui-no-elevate the unelevated TUI sends nothing rather than risk a blocking prompt')
+  ok(pickGuiArgs('elevate', true, { enable: true, noElevate: false }, 'win32').enableGui === true, 'the elevated TUI is unaffected by that gap')
+  ok(pickGuiArgs('elevate', false, { enable: false, noElevate: true }, 'win32').enableGui === false, 'an aimux without --enable-gui gets no GUI flags at all')
+  ok(pickGuiArgs('elevate', false, canBoth, 'darwin').guiNoElevate === false, 'macOS has no elevation request, so it stays on the bare flag')
+
+  // The picker's "current" marker must point at the mode in force, which
+  // availability can have moved off the stored one.
+  ok(effectiveGuiMode('elevate', true, 'win32') === 'elevate', 'an elevated TUI uses the stored high privilege')
+  ok(effectiveGuiMode('elevate', false, 'win32') === 'no-elevate', 'the same choice from an ordinary TUI reports as low privilege')
+  ok(effectiveGuiMode('no-elevate', true, 'win32') === 'elevate', 'and the mirror case reports high privilege')
+  ok(effectiveGuiMode('off', false, 'win32') === 'off', 'command-line mode is never moved')
+  ok(effectiveGuiMode('elevate', false, 'darwin') === 'elevate', 'macOS is unaffected')
+}
+
+function testVersionAtLeast() {
+  console.log('\n[AIMUX 6e] aimux pin is a floor, not an exact match')
+  // /upgrade 装的是 PyPI 最新版，通常比 pin 新；不能被 pin 校验判成"没装好"又拽回去。
+  ok(versionAtLeast('0.3.62', '0.3.61'), 'newer aimux satisfies the pinned floor')
+  ok(versionAtLeast('0.3.61', '0.3.61'), 'exactly the pinned version satisfies the floor')
+  ok(versionAtLeast('0.4.0', '0.3.61'), 'a newer minor satisfies the floor')
+  ok(!versionAtLeast('0.3.60', '0.3.61'), 'an older aimux is still reinstalled')
+  ok(!versionAtLeast('0.1.40', '0.3.61'), 'the old 0.1.x line is still reinstalled')
+  ok(versionAtLeast('0.3.61.1', '0.3.61'), 'a longer version string compares by segment')
+  ok(!versionAtLeast('garbage', '0.3.61'), 'an unparseable version is treated as not-ready')
 }
 
 function testAimuxIdentifierScopesWorkspace() {
@@ -224,16 +535,26 @@ async function testDownloadBundleStream() {
 async function main() {
   await testStatusLine()
   await testProbeContract()
-  await testAutomaticReconnect()
+  await testAdoptOrSpawn()
+  await testJwtRefreshViaProbe()
+  await testLastTuiStopsDaemon()
+  testPidAliveErrorSemantics()
+  await testLiveDaemonIsNotRespawned()
+  await testSlowStartDoesNotStackSpawns()
+  await testSpawnBudgetGivesUp()
   await testBundleArchAndUrl()
   await testSpawnLauncher()
   testReverseConnectArgs()
   testPickSilentFlag()
+  await testGuiAuthorization()
+  await testGuiModes()
+  testElevationDetection()
+  testGuiModeAvailability()
+  testVersionAtLeast()
   testAimuxIdentifierScopesWorkspace()
   testBundleHealthCheck()
   await testEnsureFromBundleReady()
   await testDownloadBundleStream()
-  await testPersistentProcessLog()
   console.log(`\n==== AIMUX RESULT: ${pass} passed, ${fail} failed ====\n`)
   process.exit(fail === 0 ? 0 : 1)
 }

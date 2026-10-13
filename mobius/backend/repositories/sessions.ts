@@ -96,7 +96,7 @@ interface InsertArgs {
   model?: string;
   language?: SessionLanguage;
   // PC 任务模式 (Electron/TUI): web 端 null/缺省.
-  pc_client_metadata?: { work_mode: string; aimux_id: string; local_path?: string; is_tui?: boolean; add_remote_aimux_mcp?: boolean } | null;
+  pc_client_metadata?: { work_mode: string; aimux_id: string; local_path?: string; is_tui?: boolean; add_remote_aimux_mcp?: boolean; gui_authorized?: boolean } | null;
   // 会话名是否用户钦定 (创建表单手填). 1 → AI 标题生成器跳过覆盖. 缺省 0 (沿用列默认值).
   name_human_edited?: number;
 }

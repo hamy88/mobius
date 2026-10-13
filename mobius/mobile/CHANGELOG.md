@@ -3,6 +3,33 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.5] - 2026-10-13
+
+### 新增
+- **每服务器独立的代理登录设置（HTTP / SOCKS5）**（commit 44474d34）：登录界面 + 设置页对每条服务器地址新增"代理登录"开关，按目标 Mobius 服务器独立保存代理配置。用户在受限网络环境下可经公司代理 / 校园网 / 跳板登录、调试双网络环境登录、与公开服务器共存。
+  - **`ServerAddressRepository.ProxyConfig` 模型**（`shared/src/commonMain/kotlin/com/mobius/momo/data/ServerAddressRepository.kt`）：字段 `enabled` / `scheme`(HTTP / SOCKS) / `host` / `port` / `username?` / `password?`,提供 `validate()` 校验（host 非空、port 1-65535、scheme 枚举）、`exportEnv()` 导出环境变量对（HTTP_PROXY/HTTPS_PROXY 或 ALL_PROXY 兼容；NO_PROXY 包含 localhost/127.*/10.*/192.168.* 以绕开本地服务）、`toProxyDescriptor()` 输出 Ktor HttpClient 引擎配置所需的 `host:port` 字符串。
+  - **登录前 / 重连时按当前激活代理设置 Ktor HttpClient**：`MomoAppViewModel` 在 `attemptLogin()` / `retryConnection()` / 切服 `switchServer()` 时同步读取对应 ServerAddress 的 `ProxyConfig`；启用时把 OkHttp `Proxy`（HTTP）或 SOCKS `Proxy` 注入 `OkHttpClient.Builder().proxy(...)` + `proxyAuthenticator`(Basic 凭据)。Android 走 `ProxySelector` / SOCKS 直连;Desktop 走 `java.net.Proxy` + `ProxySelector` (SOCKS 5 借 JFrei OFEJ)。`Platform.android.kt` / `Platform.desktop.kt` / `Platform.ios.kt` 各暴露 `installProxy(httpConfig, descriptor)` expect/actual,iOS 现阶段保留 NoOp(占位,本版本不主动启用代理)。
+  - **登录 UI 集成**：`MomoApp.kt` 登录表单下方新增 "通过代理登录" 复选框 + 折叠的协议 / 主机 / 端口 / 用户名 / 密码输入区(仅当勾选时显示);切换勾选会调用 ViewModel 持久化(登录成功/失败都写回)。登录成功时如有未启用代理但填了字段,主动禁用;登录失败若网络错误是 `ProxyError`,提示用户检查代理配置。
+  - **设置页"连接"区代理子区块**：进入「设置 → 连接」,对应服务器地址条目可点 "编辑代理" 进入编辑器,能查看/修改/启用/停用/删除该条目的代理配置(随 ServerAddress 一起持久化,删除 ServerAddress 同时清掉代理)。
+- **单元测试** `ProxyConfigTest`：覆盖 `validate()`(空 host / port 越界 / 非法 scheme 都拒)/ `exportEnv()`(HTTP 走 HTTP_PROXY+HTTPS_PROXY,SOCKS 走 ALL_PROXY,NO_PROXY 列举本机/内网段)/ `toProxyDescriptor()`(字符串格式),定位 CI 即时回归。
+- **OTA 仓库测试扩展**：`OtaRepositoryHttpTest` 加 `manifest carries proxy-login changelog notes` 用例,确保下版本 OTA 弹窗仍可拿到含 proxy-login 摘要的 changelog 摘要(0.4.5 OTA 弹窗会显示本节首条摘要)。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=28→29` / `versionName="0.4.4"→"0.4.5"`。
+- `Platform.*.kt` 新增 `installProxy(...)` 函数;Android / Desktop 走真实代理,iOS 仍 NoOp(`Platform.ios.kt` 抛 `UnsupportedOperationException` 占位)。
+- `MomoAppViewModel` 新增 `proxyConfigFor(address): ProxyConfig?` 暴露当前激活代理供 UI 读 / 写。
+
+### 保留
+- 0.4.4 OTA 下载全程进度条 + 失败重试 + 后台通知。
+- 0.4.3 OTA 弹窗显示 changelog 摘要 + 全屏 modal。
+- 0.4.2 OTA 数据链路修复(本服务器 channel + GitHub 兜底 + 数组端点)。
+- 0.4.1 OTA 客户端代码接入主流程。
+
+### 已知限制
+- 仅 Android / Desktop 实际启用代理;iOS 仍占位(登录 UI 上的代理开关在 iOS 隐藏 / 提示"iOS 暂不支持")。
+- 代理认证仅支持 Basic,SOCKS5 无认证 / Digest / NTLM 暂不开放。
+- 代理设置随登录服务器地址保存,**不**做"全局代理"开关;切换服务器时只切换对应代理(如果有)。
+
 ## [0.4.4] - 2026-09-20
 
 ### 新增

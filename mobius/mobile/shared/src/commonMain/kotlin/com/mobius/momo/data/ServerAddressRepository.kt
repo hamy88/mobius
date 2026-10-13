@@ -9,12 +9,41 @@ import kotlinx.serialization.json.Json
 // Android EncryptedSharedPreferences / iOS NSUserDefaults / desktop 内存实现)。
 const val SERVER_LIST_PREFERENCE = "server_address_list"
 
+/** 代理协议类型。HTTP 与 SOCKS5 均按用户名/密码 Basic 认证处理。 */
+@Serializable
+enum class ProxyProtocol {
+    HTTP,
+    SOCKS5,
+}
+
+/**
+ * 实际交给 HTTP client 的代理参数。null 表示不使用代理。
+ * 这里不含 enabled 字段: 是否启用由调用方决定; [ServerEntry] 额外保存 proxyEnabled 供 UI 展示。
+ */
+@Serializable
+data class ProxyConfig(
+    val protocol: ProxyProtocol = ProxyProtocol.HTTP,
+    val host: String = "",
+    val port: Int = 0,
+    val username: String = "",
+    val password: String = "",
+) {
+    val isUsable: Boolean
+        get() = host.isNotBlank() && port in 1..65535
+}
+
 /** 一条已保存的服务器地址。label 可空(用户重命名的备注名, 如 "公司测试机")。 */
 @Serializable
 data class ServerEntry(
     val url: String,
     val label: String = "",
     val lastUsedAt: Long = 0L,
+    val proxyEnabled: Boolean = false,
+    val proxyProtocol: ProxyProtocol = ProxyProtocol.HTTP,
+    val proxyHost: String = "",
+    val proxyPort: Int = 0,
+    val proxyUsername: String = "",
+    val proxyPassword: String = "",
 )
 
 /**
@@ -78,4 +107,35 @@ class ServerAddressRepository(private val storage: SecureStorage) {
         entries[index] = entries[index].copy(label = label.orEmpty())
         saveAll(entries)
     }
+
+    /** 保存某条服务器的代理配置。enabled=false 时保留字段内容但关闭代理。url 不匹配时为空操作。 */
+    fun updateProxy(url: String, enabled: Boolean, proxy: ProxyConfig) {
+        val target = url.trim().trimEnd('/')
+        val entries = getAll().toMutableList()
+        val index = entries.indexOfFirst { it.url == target }
+        if (index < 0) return
+        entries[index] = entries[index].copy(
+            proxyEnabled = enabled,
+            proxyProtocol = proxy.protocol,
+            proxyHost = proxy.host.trim(),
+            proxyPort = proxy.port,
+            proxyUsername = proxy.username.trim(),
+            proxyPassword = proxy.password,
+        )
+        saveAll(entries)
+    }
+}
+
+/** 把 ServerEntry 转成真正的代理参数；未启用或字段无效时返回 null。 */
+fun ServerEntry.toProxyConfigOrNull(): ProxyConfig? {
+    if (!proxyEnabled) return null
+    val host = proxyHost.trim()
+    if (host.isBlank() || proxyPort !in 1..65535) return null
+    return ProxyConfig(
+        protocol = proxyProtocol,
+        host = host,
+        port = proxyPort,
+        username = proxyUsername.trim(),
+        password = proxyPassword,
+    )
 }

@@ -29,6 +29,8 @@ export interface SupervisorOptions {
   probeBridgeConnection: () => Promise<boolean>;
   /** JWT 即将到期时主进程据此重登，返回新 token 或 null */
   onTokenExpired: () => Promise<string | null>;
+  runtimePath: string;
+  watchdogTimeoutSeconds?: number;
 }
 
 export function aimuxLogPath(): string {
@@ -54,6 +56,7 @@ export class AimuxSupervisor {
   private connectionProbeEpoch = 0;
   private bridgeConnected = false;
   private opts: SupervisorOptions;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: SupervisorOptions) {
     this.opts = opts;
@@ -62,6 +65,7 @@ export class AimuxSupervisor {
   start(): void {
     this.stopping = false;
     this.spawnChild();
+    this.startWatchdogFeed();
     this.scheduleTokenRefresh();
   }
 
@@ -70,7 +74,7 @@ export class AimuxSupervisor {
     onStatus({ state: "starting", detail: "正在连接 mobius…", identifier });
 
     appendAimuxLog(`\n==== [${new Date().toISOString()}] spawn reverse connect identifier=${identifier} ====\n`);
-    const args = ["reverse", "connect", bridgeUrl, "--identifier", identifier, "--token", token, "--replace"];
+    const args = ["reverse", "connect", bridgeUrl, "--identifier", identifier, "--token", token, "--replace", "--runtime", this.opts.runtimePath, "--watchdog", this.opts.runtimePath, "--watchdog-timeout", String(this.opts.watchdogTimeoutSeconds ?? 30)];
     // Windows otherwise opens a console window for every remote terminal.
     // v2 uses CREATE_NO_WINDOW + pipes, so there is no flash before hiding;
     // keep --silent-shell in AIMUX for older manually launched clients.
@@ -108,8 +112,33 @@ export class AimuxSupervisor {
     });
   }
 
+  /**
+   * Feed the daemon's watchdog. `last_feed_watchdog` is the liveness signal the
+   * daemon reads, so a feed must never be dropped just because the daemon has
+   * not written its runtime state yet — that would be a missed heartbeat.
+   */
+  private startWatchdogFeed(): void {
+    const feed = () => {
+      if (this.stopping) return;
+      let state: Record<string, unknown> = {};
+      try {
+        state = JSON.parse(fs.readFileSync(this.opts.runtimePath, "utf8")) as Record<string, unknown>;
+      } catch { /* AIMUX has not written the runtime yet — start a fresh record */ }
+      state.last_feed_watchdog = Date.now();
+      try {
+        const tmp = `${this.opts.runtimePath}.tmp-${process.pid}`;
+        fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+        fs.renameSync(tmp, this.opts.runtimePath);
+      } catch { /* directory not writable; nothing useful to do here */ }
+    };
+    feed();
+    this.watchdogTimer = setInterval(feed, 5000);
+  }
+
   private startConnectionProbe(): void {
     this.stopConnectionProbe();
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = null;
     this.bridgeConnected = false;
     const epoch = ++this.connectionProbeEpoch;
     void this.probeBridgeConnection(epoch);

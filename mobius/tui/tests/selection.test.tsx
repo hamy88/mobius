@@ -29,17 +29,21 @@ let sseController: any = null
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
+// SSE live batch counter — group_id_version must strictly increase (watermark).
+let liveVersion = 0
+function emitBatch(entries: any[]) {
+  liveVersion += 1
+  const payload = { event: 'entries', session_id: SID, group_id: 'g1', group_id_version: liveVersion, entries }
+  sseController?.enqueue(enc.encode(`event: entries\ndata: ${JSON.stringify(payload)}\n\n`))
+}
 function emitEntry(n: number) {
-  const payload = { event: 'jsonl_entry', session_id: SID, entry: { type: 'assistant', uuid: `a-${n}`, message: { role: 'assistant', content: [{ type: 'text', text: `回答 ${n}` }] } } }
-  sseController?.enqueue(enc.encode(`event: jsonl_entry\ndata: ${JSON.stringify(payload)}\n\n`))
+  emitBatch([{ type: 'assistant', uuid: `a-${n}`, message: { role: 'assistant', content: [{ type: 'text', text: `回答 ${n}` }] } }])
 }
 function emitAssistantText(text: string) {
-  const payload = { event: 'jsonl_entry', session_id: SID, entry: { type: 'assistant', uuid: `a-${Date.now()}`, message: { role: 'assistant', content: [{ type: 'text', text }] } } }
-  sseController?.enqueue(enc.encode(`event: jsonl_entry\ndata: ${JSON.stringify(payload)}\n\n`))
+  emitBatch([{ type: 'assistant', uuid: `a-${Date.now()}`, message: { role: 'assistant', content: [{ type: 'text', text }] } }])
 }
 function emitUserText(text: string) {
-  const payload = { event: 'jsonl_entry', session_id: SID, entry: { type: 'user', uuid: `u-${Date.now()}`, message: { role: 'user', content: [{ type: 'text', text }] } } }
-  sseController?.enqueue(enc.encode(`event: jsonl_entry\ndata: ${JSON.stringify(payload)}\n\n`))
+  emitBatch([{ type: 'user', uuid: `u-${Date.now()}`, message: { role: 'user', content: [{ type: 'text', text }] } }])
 }
 
 let pass = 0, fail = 0
@@ -65,6 +69,9 @@ function mockFetch(url: string, init?: RequestInit): Response {
     }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
   }
   const method = init?.method ?? 'GET'
+  // agent-history 协议 ①②: 组元数据空表 (无 bootstrap 历史), live 事件由 emitBatch 注入.
+  if (url.endsWith(`/api/sessions/${SID}/groups`)) return json({ session_version: 0, groups: [] })
+  if (url.includes(`/api/sessions/${SID}/groups/`)) return json({ group_id: 'g1', version: 0, entries: [] })
   if (url.endsWith('/api/auth/config')) return json({ password_required: false })
   if (url.endsWith('/api/auth/me')) return json({ id: 'tester', display_name: 'Test User', role: 'admin', work_dir: '/tmp' })
   if (url.endsWith('/api/auth/login')) return json({ token: 'mock-jwt-token', user: { id: 'tester', display_name: 'Test User', role: 'admin' } })

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Marker command scanned by the Mobius conversation viewer.
+exit 0

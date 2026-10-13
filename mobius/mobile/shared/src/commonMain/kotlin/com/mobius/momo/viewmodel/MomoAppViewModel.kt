@@ -21,6 +21,9 @@ import com.mobius.momo.data.PickedFile
 import com.mobius.momo.data.ReentrantLock
 import com.mobius.momo.data.ServerAddressRepository
 import com.mobius.momo.data.ServerEntry
+import com.mobius.momo.data.ProxyConfig
+import com.mobius.momo.data.ProxyProtocol
+import com.mobius.momo.data.toProxyConfigOrNull
 import com.mobius.momo.data.PROJECTS_LITE_MODE_KEY
 import com.mobius.momo.data.SERVER_BASE_URL_PREFERENCE
 import com.mobius.momo.data.GROUP_RELAY_OVERLAY_KEY
@@ -275,6 +278,13 @@ data class UiState(
     val serverBaseUrl: String = "",
     // 登录页「服务器地址列表」: 最近使用倒序。空 = 首次使用, 登录页回退为纯输入框。
     val serverEntries: List<ServerEntry> = emptyList(),
+    // 登录页代理设置(per-server 持久化到 ServerEntry)。proxyPort 用字符串承载输入框中间态。
+    val proxyEnabled: Boolean = false,
+    val proxyProtocol: ProxyProtocol = ProxyProtocol.HTTP,
+    val proxyHost: String = "",
+    val proxyPort: String = "",
+    val proxyUsername: String = "",
+    val proxyPassword: String = "",
     val streamingProcess: String? = null,
     // ===== 群聊 =====
     val conversations: List<ConversationSummary> = emptyList(),
@@ -409,7 +419,10 @@ class MomoAppViewModel(
         buildDefault = buildBaseUrl,
         savedValue = storage.getPreference(SERVER_BASE_URL_PREFERENCE),
     )
-    private var api = createApi(currentBaseUrl)
+    private val initialServerEntry: ServerEntry? =
+        serverAddressRepository.getAll().firstOrNull { it.url == currentBaseUrl }
+    private var currentProxyConfig: ProxyConfig? = initialServerEntry?.toProxyConfigOrNull()
+    private var api = createApi(currentBaseUrl, currentProxyConfig)
     private var doubaoEngine: DoubaoTtsEngine = buildDoubaoEngine(api)
     private var ttsController: TtsController = buildTtsController()
     private var currentSpeakJob: Job? = null
@@ -496,6 +509,12 @@ class MomoAppViewModel(
         UiState(
             serverBaseUrl = currentBaseUrl,
             serverEntries = serverAddressRepository.getAll(),
+            proxyEnabled = initialServerEntry?.proxyEnabled ?: false,
+            proxyProtocol = initialServerEntry?.proxyProtocol ?: ProxyProtocol.HTTP,
+            proxyHost = initialServerEntry?.proxyHost.orEmpty(),
+            proxyPort = initialServerEntry?.proxyPort?.takeIf { it > 0 }?.toString().orEmpty(),
+            proxyUsername = initialServerEntry?.proxyUsername.orEmpty(),
+            proxyPassword = initialServerEntry?.proxyPassword.orEmpty(),
             selectedVoice = storage.getPreference(SECURE_PREF_SELECTED_VOICE) ?: TTS_SYSTEM_VOICE_ID,
             ttsPlaybackMode = TtsPlaybackMode.fromName(storage.getPreference(SECURE_PREF_TTS_PLAYBACK_MODE)),
             ttsEnabled = storage.getPreference(SECURE_PREF_TTS_ENABLED) != "0",
@@ -889,17 +908,30 @@ class MomoAppViewModel(
 
     fun setServerBaseUrl(value: String) = _state.update { it.copy(serverBaseUrl = value, toast = null) }
 
+    fun setProxyEnabled(value: Boolean) = _state.update { it.copy(proxyEnabled = value, toast = null) }
+
+    fun setProxyProtocol(value: ProxyProtocol) = _state.update { it.copy(proxyProtocol = value, toast = null) }
+
+    fun setProxyHost(value: String) = _state.update { it.copy(proxyHost = value, toast = null) }
+
+    fun setProxyPort(value: String) = _state.update { it.copy(proxyPort = value.filter { it.isDigit() }, toast = null) }
+
+    fun setProxyUsername(value: String) = _state.update { it.copy(proxyUsername = value, toast = null) }
+
+    fun setProxyPassword(value: String) = _state.update { it.copy(proxyPassword = value, toast = null) }
+
     fun saveServerBaseUrl() {
         if (applyServerBaseUrlInput()) showToast("服务器地址已保存")
     }
 
     // ===== 登录页「服务器地址列表」=====
 
-    /** 从列表选中一个地址: 应用为当前服务器(与手输保存同路径, 含切服清态)。 */
+    /** 从列表选中一个地址: 还原该地址的代理配置, 再应用服务器(与手输保存同路径, 含切服清态)。 */
     fun selectServerEntry(url: String) {
+        val entry = serverAddressRepository.getAll().firstOrNull { it.url == url.trim().trimEnd('/') }
         // 直接写 state(MutableStateFlow.value 立即可见), 保证紧随的 applyServerBaseUrlInput
         // 读到的是新地址——setServerBaseUrl 走 _state.update 虽同为同步, 显式赋值意图更清晰。
-        _state.update { it.copy(serverBaseUrl = url, toast = null) }
+        _state.update { it.withProxyFromEntry(entry).copy(serverBaseUrl = url, toast = null) }
         if (applyServerBaseUrlInput()) serverAddressRepository.addOrTouch(url)
         _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
     }
@@ -914,6 +946,29 @@ class MomoAppViewModel(
         _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
     }
 
+    /** 保存某条服务器的代理配置；若目标就是当前服务器, 立即重建 client 让代理生效。 */
+    fun updateServerProxy(url: String, enabled: Boolean, proxy: ProxyConfig) {
+        serverAddressRepository.updateProxy(url, enabled, proxy)
+        val normalized = url.trim().trimEnd('/')
+        if (normalized == state.value.serverBaseUrl.trim().trimEnd('/')) {
+            _state.update {
+                it.copy(
+                    proxyEnabled = enabled,
+                    proxyProtocol = proxy.protocol,
+                    proxyHost = proxy.host,
+                    proxyPort = proxy.port.takeIf { p -> p > 0 }?.toString().orEmpty(),
+                    proxyUsername = proxy.username,
+                    proxyPassword = proxy.password,
+                )
+            }
+            val nextProxy = state.value.proxyConfigOrNull()
+            if (nextProxy != currentProxyConfig) {
+                recreateTransport(currentBaseUrl, nextProxy, clearServerState = false)
+            }
+        }
+        _state.update { it.copy(serverEntries = serverAddressRepository.getAll()) }
+    }
+
     private fun applyServerBaseUrlInput(): Boolean {
         val normalized = runCatching { normalizeMobiusBaseUrl(state.value.serverBaseUrl) }
             .onFailure { showToast(it.message ?: "服务器地址无效") }
@@ -922,22 +977,16 @@ class MomoAppViewModel(
             showToast("请输入 Mobius 服务器地址")
             return false
         }
+        val proxy = state.value.proxyConfigOrNull()
+        if (state.value.proxyEnabled && proxy == null) {
+            showToast("代理配置无效，请检查主机和端口")
+            return false
+        }
         storage.savePreference(SERVER_BASE_URL_PREFERENCE, normalized)
-        if (normalized != currentBaseUrl) {
-            stopSpeaking()
-            api.close()
-            currentBaseUrl = normalized
-            api = createApi(normalized)
-            ttsController.dispose()
-            doubaoEngine = buildDoubaoEngine(api)
-            ttsController = buildTtsController()
-            ttsController.setVoice(state.value.selectedVoice)
-            storage.clear()
-            storage.savePreference(SERVER_BASE_URL_PREFERENCE, normalized)
-            clearStreamState()
-            // 服务器地址变更 → 丢弃旧 OTA useCase, 下次 trigger 按新 currentBaseUrl 重建
-            // (OtaCheckUseCase 构造时注入 localBaseUrl, 旧实例持有旧地址会一直命中旧服务器).
-            refreshOtaUseCase()
+        val serverChanged = normalized != currentBaseUrl
+        val proxyChanged = proxy != currentProxyConfig
+        if (serverChanged || proxyChanged) {
+            recreateTransport(normalized, proxy, clearServerState = serverChanged)
         }
         _state.update {
             it.copy(
@@ -949,6 +998,47 @@ class MomoAppViewModel(
         }
         refreshAuthConfig()
         return true
+    }
+
+    private fun recreateTransport(normalized: String, proxy: ProxyConfig?, clearServerState: Boolean) {
+        stopSpeaking()
+        api.close()
+        currentBaseUrl = normalized
+        currentProxyConfig = proxy
+        api = createApi(normalized, proxy)
+        ttsController.dispose()
+        doubaoEngine = buildDoubaoEngine(api)
+        ttsController = buildTtsController()
+        ttsController.setVoice(state.value.selectedVoice)
+        if (clearServerState) {
+            storage.clear()
+            storage.savePreference(SERVER_BASE_URL_PREFERENCE, normalized)
+            clearStreamState()
+            // 服务器地址变更 → 丢弃旧 OTA useCase, 下次 trigger 按新 currentBaseUrl 重建
+            // (OtaCheckUseCase 构造时注入 localBaseUrl, 旧实例持有旧地址会一直命中旧服务器).
+            refreshOtaUseCase()
+        }
+    }
+
+    private fun UiState.withProxyFromEntry(entry: ServerEntry?): UiState = copy(
+        proxyEnabled = entry?.proxyEnabled ?: false,
+        proxyProtocol = entry?.proxyProtocol ?: ProxyProtocol.HTTP,
+        proxyHost = entry?.proxyHost.orEmpty(),
+        proxyPort = entry?.proxyPort?.takeIf { it > 0 }?.toString().orEmpty(),
+        proxyUsername = entry?.proxyUsername.orEmpty(),
+        proxyPassword = entry?.proxyPassword.orEmpty(),
+    )
+
+    private fun UiState.proxyConfigOrNull(): ProxyConfig? {
+        val port = proxyPort.trim().toIntOrNull()
+        if (!proxyEnabled || proxyHost.isBlank() || port == null || port !in 1..65535) return null
+        return ProxyConfig(
+            protocol = proxyProtocol,
+            host = proxyHost.trim(),
+            port = port,
+            username = proxyUsername.trim(),
+            password = proxyPassword,
+        )
     }
 
     fun toggleComposerMode() {
@@ -1080,8 +1170,16 @@ class MomoAppViewModel(
             _state.update { it.copy(loading = true, toast = null) }
             runCatching {
                 val result = api.login(username, password)
-                // 登录成功 → 自动把当前服务器地址记入「最近使用」列表(无需手动保存)。
-                val touchedEntries = serverAddressRepository.addOrTouch(currentBaseUrl)
+                // 登录成功 → 自动把当前服务器地址记入「最近使用」列表(无需手动保存)，
+                // 并把当前代理设置一起持久化到该条目(per-server)。
+                serverAddressRepository.addOrTouch(currentBaseUrl)
+                val enabledProxy = state.value.proxyConfigOrNull()
+                serverAddressRepository.updateProxy(
+                    currentBaseUrl,
+                    enabled = enabledProxy != null,
+                    proxy = enabledProxy ?: ProxyConfig(protocol = state.value.proxyProtocol),
+                )
+                val refreshedEntries = serverAddressRepository.getAll()
                 _state.update {
                     it.copy(
                         user = result.user,
@@ -1089,7 +1187,7 @@ class MomoAppViewModel(
                         loginStep = LoginStep.Password,
                         password = "",
                         loading = false,
-                        serverEntries = touchedEntries,
+                        serverEntries = refreshedEntries,
                     )
                 }
                 ensureSpeechPermission()
@@ -4019,11 +4117,12 @@ class MomoAppViewModel(
         }
     }
 
-    private fun createApi(baseUrl: String): MobiusApi =
+    private fun createApi(baseUrl: String, proxy: ProxyConfig? = null): MobiusApi =
         MobiusApi(
             baseUrl = baseUrl,
             storage = storage,
             onUnauthorized = { logoutFrom401() },
+            proxy = proxy,
         )
 }
 

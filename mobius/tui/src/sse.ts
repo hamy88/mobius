@@ -15,8 +15,12 @@ import type { AnyEntry } from './types.js'
 export interface SseHandlers {
   onOpen?: () => void
   onSubscribed?: (session: any) => void
-  onHistoryEntries?: (entries: AnyEntry[], done: boolean) => void
-  onEntry?: (entry: AnyEntry) => void
+  /** ③ 新组元数据 (开轮卡本身随随后的 entries 事件到达). */
+  onGroupCreated?: (group: any) => void
+  /** ③ 组条目增量: version = 应用该批后的组版本 (调用方水位线判据). */
+  onEntries?: (payload: { group_id: string; group_id_version: number; entries: AnyEntry[] }) => void
+  /** 挂起开轮卡 (忙时提交、尚未出队的用户指令): { id, opener_ts, user_summary }. */
+  onPendingOpener?: (pending: { id: string; opener_ts: string | null; user_summary: string }) => void
   onTyping?: (active: boolean) => void
   onError?: (message: string, category?: string) => void
   onClose?: () => void
@@ -105,11 +109,18 @@ export class SseConnection {
     const ev = p?.event ?? eventName
     switch (ev) {
       case 'subscribed': this.handlers.onSubscribed?.(p.session); break
-      case 'jsonl_history':
-        this.handlers.onHistoryEntries?.(p.entries ?? [], !!p.done)
+      case 'group_created':
+        this.handlers.onGroupCreated?.(p.group)
         break
-      case 'jsonl_entry':
-        this.handlers.onEntry?.(p.entry)
+      case 'entries':
+        this.handlers.onEntries?.({
+          group_id: String(p.group_id ?? ''),
+          group_id_version: Number(p.group_id_version) || 0,
+          entries: Array.isArray(p.entries) ? p.entries : [],
+        })
+        break
+      case 'pending_opener':
+        this.handlers.onPendingOpener?.(p.entry)
         break
       case 'typing':
         this.handlers.onTyping?.(!!p.active)
@@ -119,7 +130,7 @@ export class SseConnection {
         this.handlers.onError?.(p.message ?? p.error ?? '未知错误', p.category)
         break
       default:
-        // history / jsonl_meta / message / stream / etc. — currently unused by the TUI.
+        // history / message / stream / etc. — currently unused by the TUI.
         break
     }
   }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ExternalLink, Loader2, MonitorPlay, Plus, RefreshCw, X } from 'lucide-react'
 import { api } from '../store'
 import { pollRecursive } from '../services/polling'
-import { openAimuxForwardPort, type DevPortEntry } from './project-files'
+import { openAimuxForwardPort, ProjectPortEntryButton, type DevPortEntry } from './project-files'
 
 // kind → 中文标签. 仅当端口条目没有自定义 label 时使用.
 const KIND_LABELS: Record<string, string> = {
@@ -28,6 +28,8 @@ function entryLabel(entry: DevPortEntry): string {
 
 type DevPortsBarProps = {
   projectId?: string | null
+  subPath?: string | null
+  onRequestRunProject?: (mainProjectPortPath: string) => void
   className?: string
   variant?: 'bar' | 'panel'
 }
@@ -41,7 +43,7 @@ type DevPortsBarProps = {
  * 端口来源二选一: ① AI 启动服务后按协议写入 ports.json, 本组件低频轮询自动浮现;
  * ② 用户点 "+" 手动登记 (AI 用自然语言报告了端口、但没写文件时, 即时可用).
  */
-export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsBarProps) {
+export function DevPortsBar({ projectId, subPath, onRequestRunProject, className, variant = 'bar' }: DevPortsBarProps) {
   const [ports, setPorts] = useState<DevPortEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -155,7 +157,7 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
   // 旧横栏无内容时不占位；页签面板始终保留空状态，方便手动登记第一个端口.
   if (!projectId || (variant === 'bar' && ports.length === 0 && !loading && !error && !showAddForm)) return null
 
-  const inputCls = 'h-7 px-2 rounded-md border bg-[var(--bg-primary)] text-[12px] font-mono outline-none focus:border-emerald-500/60'
+  const inputCls = 'h-7 px-2 rounded-md border bg-[var(--bg-primary)] text-[length:var(--fs-md)] font-mono outline-none focus:border-emerald-500/60'
   const inputStyle = { borderColor: 'var(--border-color)', color: 'var(--text-primary)' }
 
   if (variant === 'panel') {
@@ -167,16 +169,23 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
         <div className="flex min-h-9 items-center gap-2 px-1 py-1">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <MonitorPlay className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" strokeWidth={1.9} />
-            <span className="truncate text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>开发服务</span>
-            <span className="rounded border px-1.5 py-0.5 text-[9px]" style={{ color: 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
+            <span className="truncate text-[length:var(--fs-sm)] font-medium" style={{ color: 'var(--text-secondary)' }}>开发服务</span>
+            <span className="rounded border px-1.5 py-0.5 text-[length:var(--fs-2xs)]" style={{ color: 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
               {ports.length}
             </span>
           </div>
+          <ProjectPortEntryButton
+            projectId={projectId}
+            subPath={subPath}
+            label="进入项目端口"
+            triggerVariant="advanced"
+            onRequestRunProject={onRequestRunProject}
+          />
           <button
             type="button"
             onClick={() => setShowAddForm(value => !value)}
             aria-expanded={showAddForm}
-            className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[10px] transition-colors hover:bg-emerald-500/10"
+            className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[length:var(--fs-xs)] transition-colors hover:bg-emerald-500/10"
             style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-color)' }}
           >
             {showAddForm ? <X className="h-3 w-3" /> : <Plus className="h-3 w-3" />}
@@ -224,7 +233,7 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
             <button
               type="submit"
               disabled={adding}
-              className="col-start-2 row-start-1 inline-flex h-7 min-w-12 items-center justify-center rounded-md bg-emerald-500 px-2 text-[10px] font-medium text-white transition-colors hover:bg-emerald-600 disabled:opacity-60"
+              className="col-start-2 row-start-1 inline-flex h-7 min-w-12 items-center justify-center rounded-md bg-emerald-500 px-2 text-[length:var(--fs-xs)] font-medium text-white transition-colors hover:bg-emerald-600 disabled:opacity-60"
             >
               {adding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '登记'}
             </button>
@@ -232,20 +241,20 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
         )}
 
         {error && (
-          <div className="mb-1 rounded-md border border-red-400/20 bg-red-500/5 px-2 py-1.5 text-[10px] text-red-400" role="status">
+          <div className="mb-1 rounded-md border border-red-400/20 bg-red-500/5 px-2 py-1.5 text-[length:var(--fs-xs)] text-red-400" role="status">
             {error}
           </div>
         )}
 
         <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto py-1">
           {loading && ports.length === 0 ? (
-            <div className="flex items-center justify-center gap-2 py-5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="flex items-center justify-center gap-2 py-5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               <Loader2 className="h-3.5 w-3.5 animate-spin" /> 加载端口...
             </div>
           ) : ports.length === 0 ? (
             <div className="rounded-lg border border-dashed px-3 py-5 text-center" style={{ borderColor: 'var(--border-color)' }}>
               <MonitorPlay className="mx-auto mb-2 h-5 w-5 text-emerald-400/70" strokeWidth={1.7} />
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>暂无已登记端口</div>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>暂无已登记端口</div>
             </div>
           ) : ports.map((entry) => {
             const isOpening = openingPort === entry.port
@@ -267,8 +276,8 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
                     {isOpening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>{entryLabel(entry)}</span>
-                    <span className="block font-mono text-[10px] text-emerald-400">localhost:{entry.port}</span>
+                    <span className="block truncate text-[length:var(--fs-sm)] font-medium" style={{ color: 'var(--text-primary)' }}>{entryLabel(entry)}</span>
+                    <span className="block font-mono text-[length:var(--fs-xs)] text-emerald-400">localhost:{entry.port}</span>
                   </span>
                 </button>
                 <button
@@ -294,12 +303,12 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
       className={`dev-ports-bar flex items-center gap-1.5 flex-wrap px-1 py-1 ${className || ''}`}
       data-testid="dev-ports-bar"
     >
-      <span className="inline-flex items-center gap-1 text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>
+      <span className="inline-flex items-center gap-1 text-[length:var(--fs-sm)] shrink-0" style={{ color: 'var(--text-muted)' }}>
         <MonitorPlay className="w-3.5 h-3.5" />
         端口预览
       </span>
       {loading && ports.length === 0 && (
-        <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+        <span className="inline-flex items-center gap-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
           加载中
         </span>
@@ -314,7 +323,7 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
               onClick={() => handleOpen(p.port)}
               disabled={isOpening}
               title={`${entryLabel(p)} · :${p.port} · 点击打开预览`}
-              className="inline-flex items-center gap-1 h-7 pl-2.5 pr-2 rounded-xl border border-emerald-500/25 bg-emerald-500/8 text-emerald-300 text-[11px] font-mono whitespace-nowrap transition-colors hover:bg-emerald-500/20 hover:border-emerald-500/45 disabled:opacity-55 disabled:cursor-wait"
+              className="inline-flex items-center gap-1 h-7 pl-2.5 pr-2 rounded-xl border border-emerald-500/25 bg-emerald-500/8 text-emerald-300 text-[length:var(--fs-sm)] font-mono whitespace-nowrap transition-colors hover:bg-emerald-500/20 hover:border-emerald-500/45 disabled:opacity-55 disabled:cursor-wait"
             >
               {isOpening
                 ? <Loader2 className="w-3 h-3 animate-spin" />
@@ -364,7 +373,7 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
             type="submit"
             disabled={adding}
             title="添加"
-            className="h-7 px-2 rounded-md bg-emerald-500 text-white text-[11px] inline-flex items-center justify-center hover:bg-emerald-600 disabled:opacity-60"
+            className="h-7 px-2 rounded-md bg-emerald-500 text-white text-[length:var(--fs-sm)] inline-flex items-center justify-center hover:bg-emerald-600 disabled:opacity-60"
           >
             {adding ? <Loader2 className="w-3 h-3 animate-spin" /> : '添加'}
           </button>
@@ -384,7 +393,7 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
           type="button"
           onClick={() => setShowAddForm(true)}
           title="手动登记一个端口"
-          className="inline-flex items-center gap-0.5 h-7 px-2 rounded-xl border border-dashed border-[var(--border-color)] text-[var(--text-muted)] text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] hover:text-[var(--text-secondary)]"
+          className="inline-flex items-center gap-0.5 h-7 px-2 rounded-xl border border-dashed border-[var(--border-color)] text-[var(--text-muted)] text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] hover:text-[var(--text-secondary)]"
         >
           <Plus className="w-3 h-3" />
           端口
@@ -401,7 +410,7 @@ export function DevPortsBar({ projectId, className, variant = 'bar' }: DevPortsB
         <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
       </button>
       {error && (
-        <span className="text-[11px] text-red-300 truncate max-w-[60%]" title={error}>{error}</span>
+        <span className="text-[length:var(--fs-sm)] text-red-300 truncate max-w-[60%]" title={error}>{error}</span>
       )}
     </div>
   )
