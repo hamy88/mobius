@@ -29,7 +29,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * - 系统通知文案：标题 "Mobius v{version} 正在下载"，下载完成后系统自动切到 "下载完成" 通知
  *
  * §6 安全红线：
- * - 仅 HTTPS（assertHttpsUrl）：拒绝 http://
+ * - HTTPS 强制（assertHttpsUrl）：公网仅 https://；私网段（10/8、172.16/12、192.168/16、127/8）
+ *   允许 http:// 本服务器 OTA 通道；其他 HTTP 一律 reject（防止误把明文链路暴露到公网）。
  * - SHA256 校验在下载完成后由调用方自行处理（见 OtaInstaller.install）
  */
 actual class OtaDownloader actual constructor() {
@@ -198,9 +199,29 @@ actual class OtaDownloader actual constructor() {
         }
     }
 
-    /** §6 红线：拒绝 HTTP URL（GitHub Releases 全域名 HTTPS）。 */
+    /**
+     * §6 红线：URL 协议白名单。
+     * - https:// 任意 host → 通过（公网 GitHub Releases）
+     * - http:// + host 落在私网段（10/8、172.16/12、192.168/16、127/8、::1、fe80::/10、fc00::/7）→ 通过
+     * - 其它 http:// 公网 → reject
+     * 解析失败、host 取不到 → reject（require 抛 IllegalArgumentException 含 host 便于调试）。
+     */
     private fun assertHttpsUrl(url: String) {
-        require(url.startsWith("https://")) { "OTA 下载仅支持 HTTPS：$url" }
+        if (url.startsWith("https://")) return
+        val host = runCatching { java.net.URI(url).host }.getOrNull()
+        val allowed = host != null && url.startsWith("http://") && isPrivateNetworkHost(host)
+        require(allowed) { "OTA 下载仅支持 HTTPS（或私网 HTTP）：$url (host=$host)" }
+    }
+
+    /** DNS 解析 + 私网判定：纯字节数组判断已抽到 commonMain [OtaUrlPolicy]。 */
+    private fun isPrivateNetworkHost(host: String): Boolean {
+        if (host.equals("localhost", ignoreCase = true)) return true
+        val addr = runCatching { java.net.InetAddress.getByName(host).address }.getOrNull() ?: return false
+        return when (addr.size) {
+            4 -> OtaUrlPolicy.isPrivateIpv4(addr)
+            16 -> OtaUrlPolicy.isPrivateIpv6(addr)
+            else -> false
+        }
     }
 
     companion object {
