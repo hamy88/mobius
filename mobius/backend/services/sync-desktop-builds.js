@@ -358,7 +358,11 @@ async function syncMobileBuilds(options = {}) {
   log(`[mobile-sync] Latest: ${release.tag_name} from ${repo} (${repoSource}), ${assets.length} assets`);
 
   const apkAssets = assets.filter((a) => a.name.endsWith(".apk"));
-  if (apkAssets.length === 0) {
+  // 0.4.5+: CI 在 release 一并上传 ota-manifest.json (build.gradle.kts versionCode + 每 APK sha256/size);
+  // 用作 auto-append 时顶层 version / 每个 build 的 versionCode 的 source of truth, 避免漏写 versionCode
+  // 导致 mobile-ota.ts 端点 maxVersionCode=0 → 客户端 version_code=0 → OTA Invalid。
+  const otaManifestAsset = assets.find((a) => a.name === "ota-manifest.json");
+  if (apkAssets.length === 0 && !otaManifestAsset) {
     return { ok: true, skipped: true, reason: "No apk assets in release" };
   }
 
@@ -382,17 +386,27 @@ async function syncMobileBuilds(options = {}) {
 
   fs.mkdirSync(MOBILE_BUILDS_DIR, { recursive: true });
   const results = [];
-  for (const asset of apkAssets) {
+  // 0.4.5+: 一并下载 ota-manifest.json (作为顶层 version / build.versionCode 的 source of truth).
+  // 若 release 不带该 asset (老 release) 也能继续, 只走 fallback 路径.
+  // 注意: 用新数组避免污染 apkAssets (后面清理逻辑还要按 .apk 文件名取白名单).
+  const downloadTargets = apkAssets.slice();
+  if (otaManifestAsset) downloadTargets.push(otaManifestAsset);
+  for (const asset of downloadTargets) {
     const destPath = path.join(MOBILE_BUILDS_DIR, asset.name);
     try {
       const r = await downloadFile(asset.browser_download_url, destPath, asset.size);
       results.push({ ...r });
-      if (!r.skipped) log(`[mobile-sync]   ↓ ${r.file} (${(r.size / 1024 / 1024).toFixed(1)} MB)`);
+      if (!r.skipped && asset.name.endsWith(".apk")) {
+        log(`[mobile-sync]   ↓ ${r.file} (${(r.size / 1024 / 1024).toFixed(1)} MB)`);
+      } else if (!r.skipped && asset.name === "ota-manifest.json") {
+        log(`[mobile-sync]   ↓ ${r.file} (${(r.size / 1024).toFixed(1)} KB)`);
+      }
     } catch (err) {
       log(`[mobile-sync]   ✗ ${asset.name}: ${err.message}`);
       results.push({ file: asset.name, error: err.message });
     }
   }
+  const apkResults = results.filter((r) => r.file && r.file.endsWith(".apk"));
 
   // 清理旧版本 APK (mobius-mobile-*.apk 且不在当前 release 中; 备份目录 _backup-* 不动)
   // 规则(2026-09-10 治本重写):
@@ -430,6 +444,12 @@ async function syncMobileBuilds(options = {}) {
   // 自动补 manifest 行: 新落盘的 APK 若不在本地 manifest 里, 追加条目 (含实测 size/sha256),
   // 并把顶层 version 推进到更高版本。只增不删, 既有行 (含人工维护的 source/versionCode) 不动。
   // 目的: 0.4.0 发布后 cron 自动拉 APK + 自动登记, 无需人工改 manifest。
+  //
+  // 0.4.5 治本: 顶层 version 与每个 build 的 versionCode 优先取自 release 自带的
+  // ota-manifest.json (CI 从 build.gradle.kts versionCode 注入, 客户端 OtaRepository
+  // 同 schema), 避免 auto-append 时漏写 versionCode → mobile-ota.ts 端点 maxVersionCode=0
+  // → 客户端 version_code=0 触发 OTA Invalid。老 release (无 ota-manifest.json asset) 自动
+  // fallback 到原"无 versionCode"路径, 不崩。
   try {
     const manifestPath = path.join(MOBILE_BUILDS_DIR, "manifest.json");
     let manifest = null;
@@ -440,29 +460,72 @@ async function syncMobileBuilds(options = {}) {
       manifest = { version: releaseVersion || "", platform: "android", generatedAt: new Date().toISOString(), builds: [] };
     }
     const listed = new Set(manifest.builds.map((b) => b.file));
+
+    // 优先解析 release 自带的 ota-manifest.json → file → {versionCode, size, sha256} 映射。
+    // 文件名 (asset name = ota-manifest.json) 与 url 末段都可用, 这里取 file (即 release asset 名,
+    // 通常 "mobius-mobile-x.y.z-android-<abi>.apk", 与 APK 文件名一致) 作为 key, 与 listed Set 同源。
+    // url 字段是 GitHub 完整 download URL, 取末段即可。
+    const otaByFile = new Map();
+    let otaTopVersion = null;
+    let otaTopVersionCode = null;
+    if (otaManifestAsset) {
+      try {
+        const p = path.join(MOBILE_BUILDS_DIR, "ota-manifest.json");
+        const ota = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (ota && typeof ota.version === "string") otaTopVersion = ota.version;
+        if (ota && Number.isFinite(ota.version_code)) otaTopVersionCode = ota.version_code;
+        if (ota && Array.isArray(ota.builds)) {
+          for (const b of ota.builds) {
+            if (!b || typeof b.url !== "string") continue;
+            const file = b.url.split("/").pop();
+            if (!file) continue;
+            otaByFile.set(file, {
+              versionCode: Number.isFinite(b.version_code) ? b.version_code : null,
+              size: Number.isFinite(b.size) ? b.size : null,
+              sha256: typeof b.sha256 === "string" ? b.sha256 : null,
+              abi: typeof b.abi === "string" ? b.abi : null,
+              version: typeof b.version === "string" ? b.version : null,
+            });
+          }
+        }
+      } catch (e) {
+        log(`[mobile-sync]   ⚠ ota-manifest.json parse failed, fallback to non-versionCode path: ${e.message}`);
+      }
+    }
+
     const crypto = require("node:crypto");
     let added = 0;
-    for (const r of results) {
+    for (const r of apkResults) {
       if (r.error || listed.has(r.file)) continue;
       try {
         const p = path.join(MOBILE_BUILDS_DIR, r.file);
         const buf = fs.readFileSync(p);
         const v = compareVersionOf(r.file) || releaseVersion || "";
-        manifest.builds.push({
+        const otaEntry = otaByFile.get(r.file);
+        const entry = {
           platform: "android",
           arch: /armeabi/.test(r.file) ? "armeabi-v7a" : "arm64",
           format: "apk",
           file: r.file,
-          size: buf.length,
+          size: (otaEntry && otaEntry.size != null) ? otaEntry.size : buf.length,
           version: v,
-          sha256: crypto.createHash("sha256").update(buf).digest("hex"),
+          sha256: (otaEntry && otaEntry.sha256) ? otaEntry.sha256 : crypto.createHash("sha256").update(buf).digest("hex"),
           source: `github-release ${release.tag_name} auto-synced`,
-        });
+        };
+        // versionCode 优先用 ota-manifest.json 的顶层 version_code (CI 与 APK 内的 versionCode 同源,
+        // 整版本统一); 也兼容 ota-manifest.builds[].version_code (单 ABI 各自一致, 取做兜底).
+        const vc = (otaTopVersionCode != null) ? otaTopVersionCode
+          : (otaEntry && otaEntry.versionCode != null) ? otaEntry.versionCode
+          : null;
+        if (vc != null) entry.versionCode = vc;
+        manifest.builds.push(entry);
         added++;
       } catch (_) { /* 单文件失败不影响 */ }
     }
-    if (added > 0 || (releaseVersion && compareVersions(releaseVersion, manifest.version || "0") > 0)) {
-      if (releaseVersion && compareVersions(releaseVersion, manifest.version || "0") > 0) manifest.version = releaseVersion;
+    // 顶层 version 优先 ota-manifest.version; 缺则 fallback releaseVersion.
+    const topVersion = otaTopVersion || releaseVersion || "";
+    if (added > 0 || (topVersion && compareVersions(topVersion, manifest.version || "0") > 0)) {
+      if (topVersion && compareVersions(topVersion, manifest.version || "0") > 0) manifest.version = topVersion;
       manifest.generatedAt = new Date().toISOString();
       fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
       log(`[mobile-sync]   ✓ manifest.json: +${added} entries, version → ${manifest.version}`);
