@@ -3,6 +3,32 @@
 本文件记录 Mobius Mobile（移动端 App）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.5.1] - 2026-10-13
+
+### 修复
+- **OTA 私网 HTTP 通道被误拒**（`OtaDownloader.android.kt:203` `assertHttpsUrl`）：0.4.5 之前 `assertHttpsUrl` 直接 `require(url.startsWith("https://"))`，所有 `http://` 一律抛 `IllegalArgumentException`。
+  本服务器（用户自部署 Mobius）多在私网（192.168.x.x、10.x.x.x、172.16-31.x.x、loopback）跑 HTTP，AndroidManifest 已 `usesCleartextTraffic="true"` 放行明文，但 App 代码层主动 require 拒绝。0.4.5.1 放宽白名单：
+  - `https://` 任意 host → 通过（公网 GitHub Releases 主通道不动）
+  - `http://` + host 在私网段（10/8、172.16/12、192.168/16、127/8、::1、fe80::/10、fc00::/7）→ 通过
+  - `http://` + 公网 IP / 域名 → 仍 reject（保留 §6 公网 HTTPS 红线）
+  - 解析失败、host 取不到 → reject
+  - `require` 抛 `IllegalArgumentException` 时错误信息含原始 `url` + `host=` 便于调试
+
+  实现要点：
+  - 纯函数（IPv4/IPv6 字节数组判断）抽到 `commonMain/.../OtaUrlPolicy.kt`，跨 androidMain / desktopMain 共享，避免 JVM-only API 污染 commonMain
+  - `androidMain` 仅做 `java.net.URI` 解析 host + `java.net.InetAddress.getByName` 解析 DNS，剩下全部走 `OtaUrlPolicy`
+  - 不动 `enqueue()` 入口、不动 `desktopMain` / `iosMain` 占位实现
+  - 不动 `mobile-ota.ts` 路由、不动 AndroidManifest（已经 cleartextTrafficPermitted=true）
+
+### 测试
+- 新增 `OtaUrlPolicyTest`（desktopTest 11 用例）：覆盖 IPv4 私网/公网边界（含 172.15/172.32、169.255/170.0）、IPv6 私网（::/128、::1、fe80::/10、fc00::/7）/公网（2001:4860::、fec0::/10、ff00::/8）、URL 协议白名单端到端（https 任意通过、http 私网通过、http 公网 reject、解析失败 reject）、错误信息含 host 便于调试。
+
+### 变更
+- 同步 `androidApp/build.gradle.kts` `versionCode=29→30` / `versionName="0.4.5"→"0.4.5.1"`。
+
+### 保留
+- 0.4.5 代理登录 / 0.4.4 OTA 全程进度 / 0.4.3 changelog modal / 0.4.2 本服务器 channel。
+
 ## [0.4.5] - 2026-10-13
 
 ### 新增
