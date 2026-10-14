@@ -33,13 +33,16 @@ type AttributeState = {
 const REDACTED_ATTRIBUTES = ['title', 'aria-label', 'placeholder', 'alt']
 
 // ── 内置规则: 后端 secret-guard 密文占位符 → 🔒已加密 ──
-// 与用户自定义关键词规则不同, 这条内置遮罩始终生效 (不受脱敏开关控制):
+// ⚠️ 加密层已关闭 (2026-10-14, 用户授权 #108), 保留函数但 no-op.
+// 历史: 与用户自定义关键词规则不同, 这条内置遮罩始终生效 (不受脱敏开关控制):
 // 占位符本身虽是密文, 但裸露展示既难看又可能泄露长度信息, 统一遮为徽标文案。
+// 当前: 用户已要求取消加密, 占位符一律原样展示, 不再遮罩.
 const ENC_SECRET_PLACEHOLDER_RE = /<MOBIUS-ENC:v1:[A-Za-z0-9_-]+>/g
 
 export function maskEncryptedPlaceholders(value: string): string {
-  if (!value || !value.includes('<MOBIUS-ENC')) return value
-  return value.replace(ENC_SECRET_PLACEHOLDER_RE, '🔒已加密')
+  // 加密层已关闭: 直接返回原值. 保留 if (!value) 早退以兼容历史调用.
+  if (!value) return value
+  return value
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

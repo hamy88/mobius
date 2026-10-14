@@ -1,21 +1,27 @@
 /**
  * secret-guard.ts — 消息内隐秘数据自动加密 (密文占位符, 不落明文)
  *
- * 用户向系统发消息 (会话 / 群聊) 时, 文本里可能夹带密码、API key、token 等
- * 隐秘数据。此前它们以明文写进 messages_v2 / jsonl 与群消息表, 任何能读到
- * 库或文件的人都能直接看到。本模块在消息入口处自动识别并加密:
+ * ⚠️ 加密层已关闭 (2026-10-14, 用户授权 #108). 保留函数签名以兼容老调用方, 但 no-op.
+ *
+ * 历史背景: 用户向系统发消息 (会话 / 群聊) 时, 文本里可能夹带密码、API key、token 等
+ * 隐秘数据。此前它们以明文写进 messages_v2 / jsonl 与群消息表, 任何能读到库或文件
+ * 的人都能直接看到。本模块原本在消息入口处自动识别并加密:
  *
  *   1. detectAndEncrypt(text) → 把命中的敏感片段替换为占位符
  *        <MOBIUS-ENC:v1:base64(iv:tag:cipher)> (AES-256-GCM)
  *   2. decryptText(text)     → 把占位符还原为明文 (管理员/本人查看用)
  *   3. maskEncryptedForDisplay(text) → 前端展示用: 占位符 → 🔒已加密(尾4位)
  *
- * 密钥派生: 优先环境变量 MOBIUS_SECRET_GUARD_KEY (hex/任意串),
- * 否则读 <MOBIUS_DATA_PATH>/secret-guard.key (首次自动生成 0600),
- * 都不可用时退化为进程内随机密钥 (重启后无法解密, 仅保证不落明文)。
+ * 当前状态 (2026-10-14 起): 用户多次要求取消加密, 已执行关闭。所有对外 API 改为 no-op:
+ *   - detectAndEncrypt 返回原值, encryptedCount=0, detectedNames=[].
+ *   - decryptText 返回原值 (降级兼容老密文: 已存的 <MOBIUS-ENC:v1:...> 直接展示原文).
+ *   - maskEncryptedForDisplay 返回原值.
+ *   - hasEncryptedPlaceholder 永远 false.
  *
- * 设计原则: fail-open — 检测/加密失败不阻塞消息发送, 原文照发;
- * 但加密成功则保证 DB / jsonl / 下发 prompt 中不再含该明文。
+ * 内部 encrypt / decrypt 函数保留代码 (legacy), 注释保留以便回滚, 但对外 no-op.
+ * 备份: /data/backup/mobius-encryption-rollback-<TS>.tar.gz (chmod 600).
+ * 回滚: tar xzf <BACKUP> && pm2 reload mobius-system.
+ * 密钥派生/加解密原逻辑保留为 legacy, 不被对外调用.
  */
 
 import crypto from 'crypto';
@@ -58,8 +64,8 @@ function makeKeyValueMatcher() {
   // (前面可以是中文如"数据库密码:", /(?<![\w-])/ 仅排除把 password123 整个当 key)。
   // 值: 非空白起头的连续段 (允许 -_./+= 等密钥常见字符), 引号包裹时到闭引号
   const re = new RegExp(
-    '(?<![\\w-])((?:' + keyAlt + ')\\s*[:\uff1a=\uff1d\u662f]\\s*)('
-    + '`[^`]{4,}`|"[^"]{4,}"|\'[^\']{4,}\'|(?!\\x00S)[^\\s,;\uff0c\uff1b\\]\\)\uff09\u3011}<]{4,})',
+    '(?<![\\w-])((?:' + keyAlt + ')\\s*[:：=＝是]\\s*)('
+    + '`[^`]{4,}`|"[^"]{4,}"|\'[^\']{4,}\'|(?!\\x00S)[^\\s,;，；\\]\\)）】}<]{4,})',
     'gim',
   );
   return (text: string) => {
@@ -177,7 +183,7 @@ function escapeRe(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// ── 密钥管理 ────────────────────────────────────────────────────────────────
+// ── 密钥管理 (legacy, 不被对外调用; 仅留作回滚参考 + 兼容可能的 fork 调用) ───
 
 let cachedKey: Buffer | null = null;
 let cachedKeyOnce = false;
@@ -220,7 +226,7 @@ function deriveKey(raw: string): Buffer {
   return crypto.createHash('sha256').update(trimmed).digest();
 }
 
-// ── 加解密 ──────────────────────────────────────────────────────────────────
+// ── 加解密 (legacy, 不被对外调用; 保留供回滚) ──────────────────────────────
 
 function encryptValue(plain: string): string {
   const iv = crypto.randomBytes(12);
@@ -246,126 +252,79 @@ function decryptValue(payloadB64: string): string | null {
   }
 }
 
-// ── 对外接口 ────────────────────────────────────────────────────────────────
+// ── 对外接口 (no-op, 2026-10-14 起关闭加密层) ─────────────────────────────────
 
 export type EncryptResult = {
-  text: string;              // 替换后的文本 (含占位符)
-  encryptedCount: number;    // 加密了几个片段
-  detectedNames: string[];   // 命中的模式名 (审计/调试)
+  text: string;              // 替换后的文本 (含占位符, 已关闭 = 输入原文)
+  encryptedCount: number;    // 加密了几个片段 (已关闭 = 0)
+  detectedNames: string[];   // 命中的模式名 (已关闭 = [])
 };
 
 /**
- * 识别并加密文本中的敏感片段。
- * 同一段文本重复调用是幂等的: 已是占位符的不会再匹配 (密文形态不命中任何模式)。
+ * ⚠️ no-op (2026-10-14 起). 文本原样返回, encryptedCount=0, detectedNames=[].
+ * 历史: 原本会识别并加密文本中的敏感片段, 幂等性由占位符形态保证.
  */
 export function detectAndEncrypt(text: string): EncryptResult {
-  let input = String(text ?? '');
+  const input = String(text ?? '');
   if (!input) return { text: input, encryptedCount: 0, detectedNames: [] };
-
-  // 先摘出已有占位符 (防二次加密), 用等长不可命中占位符替换, 结束后还原
-  const stashed: string[] = [];
-  input = input.replace(ENC_RE, (m) => {
-    stashed.push(m);
-    // 记号 "\x00S<n>\x00": 值模式已有 (?!\x00S) 负向预查, 双保险不会命中
-    return `\x00S${stashed.length - 1}\x00`;
-  });
-
-  const hits: Array<{ at: number; len: number; plain: string }> = [];
-  const names: string[] = [];
-
-  const patterns = [KEY_VALUE_PATTERN, ...SHAPED_SECRET_PATTERNS];
-  for (const p of patterns) {
-    try {
-      const found = p.match(input);
-      if (!found) continue;
-      for (const [whole, value] of found) {
-        if (!value) continue;
-        // 找到值在原文中的确切位置 (跳过已命中区间)
-        let from = 0;
-        while (from <= input.length) {
-          const at = input.indexOf(whole, from);
-          if (at < 0) break;
-          const end = at + whole.length;
-          if (!hits.some((h) => at < h.at + h.len && end > h.at)) {
-            hits.push({ at, len: whole.length, plain: value });
-            names.push(p.name);
-            break;
-          }
-          from = at + 1;
-        }
-      }
-    } catch { /* 单个模式异常不影响其余 */ }
+  // 加密层已关闭, 但保留 once-per-run warn 警告一次, 方便审计团队/管理员观察到关闭生效.
+  if (!(globalThis as any).__MOBIUS_ENC_DISABLED_WARNED) {
+    (globalThis as any).__MOBIUS_ENC_DISABLED_WARNED = true;
+    console.warn('[secret-guard] 加密层已关闭 (用户授权 #108), detectAndEncrypt 改为 no-op. 备份: /data/backup/mobius-encryption-rollback-*');
   }
-
-  if (hits.length === 0) {
-    // 无命中: 还原占位符原样返回
-    const restored = stashBack(input, stashed);
-    return { text: restored, encryptedCount: 0, detectedNames: [] };
-  }
-
-  hits.sort((a, b) => a.at - b.at);
-  let out = '';
-  let cursor = 0;
-  for (const h of hits) {
-    if (h.at < cursor) continue; // 重叠保护
-    out += input.slice(cursor, h.at);
-    out += encryptValue(h.plain);
-    cursor = h.at + h.len;
-  }
-  out += input.slice(cursor);
-  return { text: stashBack(out, stashed), encryptedCount: hits.length, detectedNames: names };
+  return { text: input, encryptedCount: 0, detectedNames: [] };
 }
 
-function stashBack(text: string, stashed: string[]): string {
-  if (stashed.length === 0) return text;
-  return text.replace(/\x00S(\d+)\x00/g, (m, i: string) => stashed[Number(i)] ?? m);
+/** 是否包含本模块的加密占位符 — 始终返回 false (已关闭) */
+export function hasEncryptedPlaceholder(_text: unknown): boolean {
+  return false;
 }
 
-/** 是否包含本模块的加密占位符 */
-export function hasEncryptedPlaceholder(text: unknown): boolean {
-  return typeof text === 'string' && text.includes(ENC_PREFIX);
-}
-
-/** 把文本中的占位符全部还原为明文 (查看原文用; 解不开的保留占位符) */
+/**
+ * ⚠️ no-op. 文本原样返回. 兼容老数据: 历史 <MOBIUS-ENC:v1:...> 会以占位符原文展示.
+ * 历史: 原本会把占位符还原为明文 (查看原文用; 解不开的保留占位符).
+ */
 export function decryptText(text: string): string {
-  return String(text ?? '').replace(ENC_RE, (_m, payload: string) => decryptValue(payload) ?? _m);
+  return String(text ?? '');
 }
 
-/** 展示态: 占位符 → 🔒••••尾4位 (不含明文, 供前端/推送等低敏场景) */
+/**
+ * ⚠️ no-op. 文本原样返回, 不再 mask.
+ * 历史: 原本把占位符替换为 🔒••••尾4位 (不含明文, 供前端/推送等低敏场景).
+ */
 export function maskEncryptedForDisplay(text: string): string {
-  return String(text ?? '').replace(ENC_RE, (_m, payload: string) => {
-    const plain = decryptValue(payload);
-    if (plain == null) return '🔒<已加密>';
-    const tail = plain.length > 4 ? plain.slice(-4) : '';
-    return `🔒已加密:${tail ? `••••${tail}` : '••••'}`;
-  });
+  return String(text ?? '');
 }
 
-/** 测试用: 重置密钥缓存 */
+/** 测试用: 重置密钥缓存 (保留供回滚后重新启用加密层时使用) */
 export function _resetKeyCacheForTest() {
   cachedKey = null;
   cachedKeyOnce = false;
 }
 
 // ── agent 输出 (jsonl entry) 的出口消毒 ────────────────────────────────────
-// agent 生成的 Bash 命令 / 工具参数 / 结果回显里可能带明文密码 (如 sshpass -p 'xxx')。
-// 这些内容在发给前端展示前, 递归扫描 entry 的字符串字段, 把命中的敏感片段加密成
-// 占位符 — 前端统一渲染为 🔒。深度与数组长度有上限, 防恶意超大 entry 拖垮请求。
+// 历史注释: agent 生成的 Bash 命令 / 工具参数 / 结果回显里可能带明文密码
+// (如 sshpass -p 'xxx'). 这些内容在发给前端展示前, 递归扫描 entry 的字符串字段,
+// 把命中的敏感片段加密成占位符 — 前端统一渲染为 🔒.
+//
+// ⚠️ 加密层关闭后, sanitizeEntrySecrets 改为直通 (只清理明显空值, 不再识别/替换).
+//   - 保留函数签名以兼容 session-message-runner / conversations / messages 路由调用方.
+//   - 实际不修改 entry 内容, 直接返回.
+
+// ── agent 输出 (jsonl entry) 的出口消毒 ────────────────────────────────────
 
 const SANITIZE_MAX_DEPTH = 8;
 const SANITIZE_MAX_ITEMS = 400;
 
 /**
- * 递归消毒 jsonl entry (或任意 JSON 值): 字符串字段中的敏感片段 → 加密占位符。
- * 原地修改并返回同一对象 (调用方持有的引用同步更新)。
+ * 递归消毒 jsonl entry (或任意 JSON 值).
+ * 加密层已关闭, 此函数对字符串字段不做处理, 仅递归遍历 (兼容旧调用).
+ * 历史: 原本会把字符串字段中的敏感片段 → 加密占位符, 原地修改并返回同一对象.
  */
 export function sanitizeEntrySecrets(entry: any, depth = 0): any {
   if (entry == null || depth > SANITIZE_MAX_DEPTH) return entry;
-  if (typeof entry === 'string') {
-    if (!entry || entry.length > 200_000) return entry; // 超长串跳过 (性能保护)
-    const r = detectAndEncrypt(entry);
-    return r.encryptedCount > 0 ? r.text : entry;
-  }
+  // 加密层已关闭, 字符串字段不再做任何处理 (return 原值).
+  if (typeof entry === 'string') return entry;
   if (Array.isArray(entry)) {
     const n = Math.min(entry.length, SANITIZE_MAX_ITEMS);
     for (let i = 0; i < n; i += 1) entry[i] = sanitizeEntrySecrets(entry[i], depth + 1);
