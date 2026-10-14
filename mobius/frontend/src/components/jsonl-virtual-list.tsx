@@ -89,6 +89,8 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
   onScrollToKeyDone?: () => void
   // 具体条目已实际挂载并完成精确滚动时触发。搜索定位以此为完成点，不能只按轮次到位计时。
   onScrollToEntryDone?: () => void
+  diagLabel?: string
+  onNavigationCancel?: () => void
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   // scrollToKey 的滚动用 root: 两条渲染路径 (虚拟/非虚拟) 都挂这个 ref, 使跳转逻辑统一.

@@ -365,6 +365,7 @@ export function JsonlView({
         />
       )
     }
+    if (block.kind === 'pending') return null
     const openerEntry = block.round.items[0]?.entry
     const openerUuid = openerEntry?.uuid || openerEntry?.id || null
     const openerTs = openerEntry?.timestamp || openerEntry?.created_at || null

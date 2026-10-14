@@ -143,12 +143,20 @@ export interface RoundItem {
   lineNo: number  // 全局行号 (1-based)
 }
 
+export interface RoundHiddenGap {
+  at: number
+  count: number
+}
+
 export interface Round {
   roundNum: number  // 可见窗口内 1-based 编号
   items: RoundItem[]
+  hiddenGaps?: RoundHiddenGap[]
+  essential_dict?: { opener: any | null; final: any | null }
 }
 
 export type JsonlRenderBlock =
   | { key: string; kind: 'continuation'; items: JsonlViewItem[] }
   | { key: string; kind: 'preItem'; item: JsonlViewItem }
   | { key: string; kind: 'round'; round: Round; index: number }
+  | { key: string; kind: 'pending'; pending: { id: string; user_summary?: string }[] }

@@ -265,6 +265,7 @@ export function ResearchAgentTeamModal({
   onClose,
   onDone,
   onRefresh,
+  initialMode,
 }: {
   researchId: string
   existingSessions: ExistingSession[]
@@ -273,6 +274,8 @@ export function ResearchAgentTeamModal({
   onClose: () => void
   onDone: (session: any) => void
   onRefresh: () => void
+  assistantLimit?: number
+  initialMode?: 'single' | 'team'
 }) {
   const { theme } = useStore()
   const isDark = theme !== 'light'
@@ -290,7 +293,7 @@ export function ResearchAgentTeamModal({
   const [defaultExcludedMemoryIds, setDefaultExcludedMemoryIds] = useState<string[]>([])
   const [agents, setAgents] = useState<TeamAgent[]>([])
   const [editingTarget, setEditingTarget] = useState<EditingTarget | null>(null)
-  const [mode, setMode] = useState<'single' | 'team'>('team')
+  const [mode, setMode] = useState<'single' | 'team'>(initialMode || 'team')
   const [sceneKind, setSceneKind] = useState<SceneKind>('space')
   const [avatarKind, setAvatarKind] = useState<AvatarKind>('robot')
   const [selectionPanel, setSelectionPanel] = useState<SelectionPanel | null>(null)

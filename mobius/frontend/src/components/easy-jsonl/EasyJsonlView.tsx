@@ -58,7 +58,7 @@ function activityIcon(kind: EasyActivityKind) {
 
 function EasyActivityItem({ activity }: { activity: EasyActivity }) {
   const [expanded, setExpanded] = useState(!!activity.defaultExpanded)
-  const canExpand = activity.details.length > 0 || !!activity.imageUrls?.length
+  const canExpand = (activity.details ?? []).length > 0 || !!activity.imageUrls?.length
   return (
     <div className={`easy-jsonl-activity easy-jsonl-activity--${activity.kind}${expanded ? ' is-expanded' : ''}`} data-easy-activity={activity.kind}>
       <span className="easy-jsonl-activity__node" aria-hidden="true">
@@ -79,9 +79,9 @@ function EasyActivityItem({ activity }: { activity: EasyActivity }) {
       </button>
       {expanded && (
         <div className="easy-jsonl-activity__detail">
-          {activity.details.length > 0 && (
+          {(activity.details ?? []).length > 0 && (
             <ul>
-              {activity.details.map((detail, index) => <li key={`${activity.id}:${index}`}>{detail}</li>)}
+              {(activity.details ?? []).map((detail, index) => <li key={`${activity.id}:${index}`}>{detail}</li>)}
             </ul>
           )}
           {!!activity.imageUrls?.length && (
@@ -221,7 +221,7 @@ export default function EasyJsonlView({
 
               {(round.activities.length > 0 || roundWorking) && (
                 <div className="easy-jsonl-rail" aria-label="执行过程">
-                  {round.activities.map(activity => <EasyActivityItem key={activity.id} activity={activity} />)}
+                  {round.activities.map((activity: any) => <EasyActivityItem key={activity.id} activity={activity} />)}
                   {roundWorking && (
                     <div className="easy-jsonl-live" role="status">
                       <span><LoaderCircle className="animate-spin" /></span>

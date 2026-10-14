@@ -16,6 +16,11 @@ export type ContextSetupDemoState = {
   issueDescription: string;
   sessionName: string;
   sessionDescription: string;
+  preparedAt?: number;
+  memorySyncedAt?: number;
+  skillImportedAt?: number;
+  memoryName: string;
+  skillName: string;
 };
 
 export const CONTEXT_SETUP_DEMO_DEFAULTS = {
@@ -26,6 +31,8 @@ export const CONTEXT_SETUP_DEMO_DEFAULTS = {
   issueDescription: '请基于项目记忆中已注入的工具函数, 完成一个日期格式化任务。',
   sessionName: '完成一个日期格式化小任务',
   sessionDescription: '直接调用项目记忆里已经准备好的日期格式化函数, 输出三种格式。',
+  memoryName: '日期格式化工具函数',
+  skillName: 'mobius-format-date',
 } satisfies Omit<ContextSetupDemoState, 'active' | 'startedAt' | 'completedAt' | 'projectId' | 'issueId' | 'sessionId'>;
 
 export function createContextSetupDemoState(): ContextSetupDemoState {

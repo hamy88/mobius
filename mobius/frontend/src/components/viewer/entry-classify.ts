@@ -305,7 +305,12 @@ export function isLocalCommandEntry(entry: AnyEntry): boolean {
   return extractLocalCommandParts(entry).length > 0
 }
 
-
-export function isUnreadableEncryptedReasoningEntry(_entry: unknown): boolean {
-  return false;
+// 该 entry 是否为 \"不可读的加密 reasoning\" 卡片：response_item 且 payload.type === 'reasoning'，
+// 且携带非空的 encrypted_content (无法直接展示明文推理，只能显示占位标签)。
+export function isUnreadableEncryptedReasoningEntry(entry: AnyEntry): boolean {
+  if (entry?.type !== 'response_item') return false
+  const payload = entry?.payload
+  if (payload?.type !== 'reasoning') return false
+  const encrypted = payload?.encrypted_content
+  return typeof encrypted === 'string' && encrypted.length > 0
 }

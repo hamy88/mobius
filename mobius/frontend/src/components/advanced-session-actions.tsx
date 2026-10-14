@@ -11,6 +11,8 @@ type AdvancedSessionActionsProps = {
   showJsonlMeta: boolean
   connectionReady: boolean
   projectKnowledgeSending: boolean
+  vscodeSubPath?: string | null
+  onRequestRunProject?: (mainProjectPortPath: string) => void
   variant?: 'default' | 'compact' | 'menu'
   onOpenFileChanges: () => void
   onOpenBashCommands: () => void

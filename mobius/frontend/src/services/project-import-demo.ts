@@ -23,6 +23,7 @@ export type ProjectImportDemoState = {
   uploadSampleZipRelPath: string;
   uploadSampleDownloadedAt?: number;
   uploadSampleUploadedAt?: number;
+  uploadSampleClearedAt?: number;
 };
 
 export const PROJECT_IMPORT_DEMO_DEFAULTS = {

@@ -16,4 +16,4 @@ export type EasyActivity = {
   defaultExpanded?: boolean;
   [k: string]: any;
 };
-export function buildEasyJsonlRounds(_entries: AnyEntry[]): any[] { return []; }
+export function buildEasyJsonlRounds(_entries: AnyEntry[], _preItems?: any[]): any[] { return []; }

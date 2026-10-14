@@ -1,12 +1,10 @@
 export const SELF_EVOLVE_DEMO_TOUR_EVENT = 'imac:self-evolve-demo-tour:start';
 export const SELF_EVOLVE_DEMO_STATE_KEY = 'imac-demo:self-evolve';
-// modals.tsx 的「自进化示例」功能用到下列常量 — 跟 8bd20089 wip 分支对齐,
-// 原本 main 缺这几个 export, vite build 在 SELF_EVOLVE_REQUIRED_MEMORY_NAME 处断;
-// 这里补齐, 行为保持与原分支一致 (string 名称 / string[] 名称数组)。
-export const SELF_EVOLVE_REQUIRED_SKILL_NAME = 'mobius-extension';
-export const SELF_EVOLVE_REQUIRED_MEMORY_NAME = '莫比乌斯自主开发项目知识';
-export const SELF_EVOLVE_PROJECT_KNOWLEDGE_MEMORY_NAME = 'MOBIUS中台开发的项目知识';
-export const SELF_EVOLVE_GUIDE_STYLE_MEMORY_NAMES = ['用户引导文案写法', '引导文案与路线设计规则', 'guide-copywriting-style'];
+
+export const SELF_EVOLVE_REQUIRED_MEMORY_NAME = 'MOBIUS 核心上下文';
+export const SELF_EVOLVE_PROJECT_KNOWLEDGE_MEMORY_NAME = '项目知识';
+export const SELF_EVOLVE_GUIDE_STYLE_MEMORY_NAMES = ['引导文案', '文案风格'];
+export const SELF_EVOLVE_REQUIRED_SKILL_NAME = 'mobius-core';
 
 export type SelfEvolveDemoState = {
   active?: boolean;

@@ -24,6 +24,8 @@ export type LogoReviewDemoState = {
   cleanupProjectRelPath?: string;
   issueId?: string;
   sessionId?: string;
+  extensionProjectId: string;
+  extensionUrl: string;
 };
 
 export const LOGO_REVIEW_DEMO_DEFAULTS = {
@@ -31,7 +33,9 @@ export const LOGO_REVIEW_DEMO_DEFAULTS = {
   projectName: LOGO_REVIEW_PROJECT_NAME,
   issueTitle: LOGO_REVIEW_ISSUE_TITLE,
   sessionName: LOGO_REVIEW_SESSION_NAME,
-} satisfies Pick<LogoReviewDemoState, 'projectId' | 'projectName' | 'issueTitle' | 'sessionName'>;
+  extensionProjectId: 'dot-logo-3d',
+  extensionUrl: '/u/me/p/dot-logo-3d',
+} satisfies Pick<LogoReviewDemoState, 'projectId' | 'projectName' | 'issueTitle' | 'sessionName' | 'extensionProjectId' | 'extensionUrl'>;
 
 export function createLogoReviewDemoState(): LogoReviewDemoState {
   return { active: true, startedAt: Date.now(), ...LOGO_REVIEW_DEMO_DEFAULTS };

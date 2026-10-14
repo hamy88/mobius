@@ -129,7 +129,7 @@ function modalShellStyle(isDark: boolean): React.CSSProperties {
 // ---------------------------------------------------------------------
 // 通用小组件
 // ---------------------------------------------------------------------
-function SectionLabel({ children, hint }: { children: React.ReactNode; hint?: string }) {
+export function SectionLabel({ children, hint }: { children: React.ReactNode; hint?: string }) {
   return (
     <div className="flex items-baseline justify-between mb-1.5">
       <label className="block text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>{children}</label>
@@ -138,7 +138,20 @@ function SectionLabel({ children, hint }: { children: React.ReactNode; hint?: st
   )
 }
 
-function TextInput(props: { value: string; onChange: (v: string) => void; placeholder?: string; autoFocus?: boolean; onEnter?: () => void; dark: boolean }) {
+export function LabelWithRefresh({ label, loading = false, onRefresh }: { label: React.ReactNode; loading?: boolean; onRefresh?: () => void }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      {label}
+      {onRefresh && (
+        <button type="button" onClick={onRefresh} title="刷新列表" className="inline-flex items-center justify-center rounded hover:bg-[var(--bg-card-hover)]">
+          <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
+        </button>
+      )}
+    </span>
+  )
+}
+
+export function TextInput(props: { value: string; onChange: (v: string) => void; placeholder?: string; autoFocus?: boolean; onEnter?: () => void; dark: boolean }) {
   const { value, onChange, placeholder, autoFocus, onEnter, dark } = props
   return (
     <input
@@ -153,7 +166,7 @@ function TextInput(props: { value: string; onChange: (v: string) => void; placeh
   )
 }
 
-export function LanguageSelect({ value, onChange }: { value: SessionLanguage; onChange: (v: SessionLanguage) => void }) {
+export function LanguageSelect({ value, onChange, dark }: { value: SessionLanguage; onChange: (v: SessionLanguage) => void; dark?: boolean }) {
   return (
     <div className="grid grid-cols-2 gap-1.5">
       {LANGUAGE_CHOICES.map(opt => {
@@ -173,7 +186,7 @@ export function LanguageSelect({ value, onChange }: { value: SessionLanguage; on
 }
 
 // 通用项目/issue/research 下拉选择 — 支持动态刷新 (需求: 中途新建的数据可被读到)
-export function useAsyncList<T>(fetcher: () => Promise<T[]>, deps: any[]): { list: T[]; loading: boolean; refresh: () => void } {
+export function useAsyncList<T>(fetcher: () => Promise<T[]>, deps: any[], _cache?: { scope?: string; userId?: string }): { list: T[]; loading: boolean; refresh: () => void } {
   const [list, setList] = useState<T[]>([])
   const [loading, setLoading] = useState(false)
   const load = useCallback(() => {
@@ -185,7 +198,7 @@ export function useAsyncList<T>(fetcher: () => Promise<T[]>, deps: any[]): { lis
   return { list, loading, refresh: load }
 }
 
-function SelectShell({ label, hint, current, placeholder, loading, onRefresh, children, dark }: {
+export function SelectShell({ label, hint, current, placeholder, loading, onRefresh, children, dark }: {
   label: string; hint?: string; current?: string; placeholder?: string; loading?: boolean
   onRefresh?: () => void; children: React.ReactNode; dark: boolean
 }) {
@@ -213,15 +226,15 @@ function SelectShell({ label, hint, current, placeholder, loading, onRefresh, ch
 //   3. native 下拉用 OS 主题, dark 下变白底 (本组件完全跟随主题)
 //   4. 列表项只能纯文本 (本组件支持 description / badge / disabled)
 // 自动反向展开: 若下方空间不足且上方足够, 自动向上展开.
-type DropdownOption = {
+export type DropdownOption = {
   value: string
   label: string
   description?: string
   disabled?: boolean
   badge?: { text: string; color: string; bg: string }
 }
-function DropdownSelect({
-  value, onChange, options, placeholder, dark, disabled, emptyText, forceSearch, panelAction,
+export function DropdownSelect({
+  value, onChange, options, placeholder, dark, disabled, emptyText, forceSearch, panelAction, size = 'md', icon, iconOnly = false,
 }: {
   value: string
   onChange: (v: string) => void
@@ -232,6 +245,9 @@ function DropdownSelect({
   emptyText?: string
   forceSearch?: boolean
   panelAction?: { label: string; onClick: () => void; disabled?: boolean }
+  size?: 'sm' | 'md' | 'lg'
+  icon?: React.ReactNode
+  iconOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
@@ -295,12 +311,13 @@ function DropdownSelect({
   return (
     <>
       <button ref={triggerRef} type="button" disabled={disabled} onClick={() => setOpen(v => !v)}
-        className="w-full h-10 px-2.5 rounded-xl text-[13px] text-left flex items-center justify-between gap-2 focus:outline-none focus:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors hover:border-[var(--border-color-strong,#475569)]"
+        className={`w-full ${size === 'sm' ? 'h-8 px-2 text-[12px]' : size === 'lg' ? 'h-11 px-3 text-[14px]' : 'h-10 px-2.5 text-[13px]'} rounded-xl text-left flex items-center justify-between gap-2 focus:outline-none focus:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors hover:border-[var(--border-color-strong,#475569)]`}
         style={{ background: 'var(--input-bg)', border: open ? '1px solid rgba(59,130,246,0.55)' : '1px solid var(--input-border)', color: dark ? '#f1f5f9' : '#1e293b' }}>
-        <span className={`truncate ${selected ? '' : 'opacity-60'}`}>
-          {selected ? selected.label : (placeholder || '— 请选择 —')}
+        <span className={`truncate flex items-center gap-1.5 ${selected ? '' : 'opacity-60'} ${iconOnly ? 'justify-center' : ''}`}>
+          {icon}
+          {!iconOnly && <span className="truncate">{selected ? selected.label : (placeholder || '— 请选择 —')}</span>}
         </span>
-        <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} style={{ color: 'var(--text-muted)' }} />
+        {!iconOnly && <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} style={{ color: 'var(--text-muted)' }} />}
       </button>
       {open && pos && createPortal(
         <div ref={panelRef} className="fixed z-[100]" style={{ top: pos.top, left: pos.left, width: pos.width }}>
@@ -502,6 +519,8 @@ export function SkillMemoryPicker({
   dark: boolean
   emptySkillText?: string
   emptyMemoryText?: string
+  singleTrigger?: boolean
+  iconOnlyTrigger?: boolean
 }) {
   const [panel, setPanel] = useState<null | 'skill' | 'memory'>(null)
   const [q, setQ] = useState('')
@@ -680,7 +699,7 @@ function SessionCreateSuccess({ name, canView, onView, onCreateAnother, onClose,
 }
 
 // 弹窗外壳 — 统一容器 (响应式: 窄屏顶部对齐可滚动)
-function CreateModalShell({ title, onClose, children, footer, dark, width = 560, headerExtra }: {
+export function CreateModalShell({ title, onClose, children, footer, dark, width = 560, headerExtra }: {
   title: string; onClose: () => void; children: React.ReactNode; footer: React.ReactNode; dark: boolean; width?: number; headerExtra?: React.ReactNode
 }) {
   return (
@@ -704,11 +723,16 @@ function CreateModalShell({ title, onClose, children, footer, dark, width = 560,
   )
 }
 
-function Footer({ loading, submitText, onClose, onSubmit, disabled }: { loading: boolean; submitText: string; onClose: () => void; onSubmit: () => void; disabled?: boolean }) {
+export function Footer({ loading, submitText, onClose, onSubmit, disabled, preview }: { loading: boolean; submitText: string; onClose: () => void; onSubmit: () => void; disabled?: boolean; preview?: { onClick: () => void; disabled?: boolean } }) {
   return (
     <div className="flex gap-2">
       <button onClick={onClose} className="flex-1 h-9 rounded-xl text-[13px] border transition-colors hover:bg-[var(--bg-card-hover)]"
         style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>取消</button>
+      {preview && (
+        <button onClick={preview.onClick} disabled={preview.disabled}
+          className="flex-1 h-9 rounded-xl text-[13px] border transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40"
+          style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>预览</button>
+      )}
       <button onClick={onSubmit} disabled={loading || disabled}
         className="flex-1 h-9 rounded-xl text-[13px] btn-primary transition-colors disabled:opacity-40">
         {loading ? '创建中...' : submitText}
