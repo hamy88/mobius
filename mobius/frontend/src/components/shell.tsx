@@ -268,7 +268,7 @@ function CpuIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHO
   // 常规模式传 0 常显; 默认 70 → 低占用隐藏降噪 (与内存一致)
   if (pct == null || pct < visibleThresholdPercent) return null
 
-  const danger = pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
+  const danger = pct > visibleThresholdPercent
   const color = danger ? '#ef4444' : 'var(--text-muted)'
 
   return (
@@ -302,9 +302,10 @@ function MemoryIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRE
   }, [])
 
   const pct = mem?.usedPercent
-  if (pct == null || pct < RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT) return null
+  // 常规模式传 0 常显; 默认 70 → 低占用隐藏降噪
+  if (pct == null || pct < visibleThresholdPercent) return null
 
-  const danger = pct != null && pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
+  const danger = pct > visibleThresholdPercent
   const color = danger ? '#ef4444' : 'var(--text-muted)'
 
   return (
