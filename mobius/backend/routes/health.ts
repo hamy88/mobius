@@ -80,6 +80,56 @@ router.get('/memory', (_req: express.Request, res: express.Response) => {
   res.json({ ...memCache.payload, cached: !fresh });
 });
 
+
+// ── 服务器 CPU 占用 ──
+// 后台 /proc/stat 采样, 30s 间隔, 模块级 60s 缓存兜底多标签页并发.
+// 差分 (idle/total) 算占用率; 读取完全非阻塞, 不会卡 dashboard.
+const CPU_CACHE_TTL_MS = 60 * 1000;
+let cpuPrev: { idle: number; total: number } | null = null;
+let cpuCache: { ts: number; payload: any } = { ts: 0, payload: null };
+
+function readCpuUsage(): { usedPercent: number; cores: number; loadavg1: number; loadavg5: number; loadavg15: number } {
+  let idle = 0, total = 0;
+  try {
+    const stat = fs.readFileSync('/proc/stat', 'utf8');
+    const line = stat.split('\n').find(l => l.startsWith('cpu '));
+    if (line) {
+      const parts = line.trim().split(/\s+/).slice(1).map(Number);
+      // parts: user nice system idle iowait irq softirq steal guest guest_nice
+      idle = (parts[3] || 0) + (parts[4] || 0);
+      total = parts.reduce((a, b) => a + (b || 0), 0);
+    }
+  } catch { /* 读取失败则 0/0, 前端显示 '--' */ }
+  let usedPercent = 0;
+  if (cpuPrev && total > cpuPrev.total) {
+    const idleDelta = idle - cpuPrev.idle;
+    const totalDelta = total - cpuPrev.total;
+    if (totalDelta > 0) usedPercent = round1((1 - idleDelta / totalDelta) * 100);
+  }
+  cpuPrev = { idle, total };
+  const la = os.loadavg();
+  return {
+    usedPercent,
+    cores: os.cpus().length,
+    loadavg1: round1(la[0]),
+    loadavg5: round1(la[1]),
+    loadavg15: round1(la[2]),
+  };
+}
+
+router.get('/cpu', (_req: express.Request, res: express.Response) => {
+  const now = Date.now();
+  const fresh = !cpuCache.payload || now - cpuCache.ts >= CPU_CACHE_TTL_MS;
+  if (fresh) {
+    cpuCache = {
+      ts: now,
+      payload: { ...readCpuUsage(), sampledAt: new Date(now).toISOString() },
+    };
+  }
+  const r = cpuCache.payload;
+  res.json({ ...r, cached: !fresh });
+});
+
 // ── 系统主盘占用 ──
 // 以根目录所在文件系统作为系统主盘。优先用 statfs 读取, 回退到 POSIX df。
 // 与内存端点一样使用模块级 60s 缓存, 避免多标签页并发时频繁采样。
