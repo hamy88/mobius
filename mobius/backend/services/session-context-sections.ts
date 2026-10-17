@@ -77,10 +77,6 @@ export interface SectionCtx {
   language?: 'zh' | 'en';
   env?: SectionEnv;
   builtin_memories?: any[];
-  blackboard_session_token?: string;
-  blackboard_token_header?: string;
-  chief_team_token?: string;
-  team_token_header?: string;
   worktree_is_repo_root?: boolean;
   pc_task_mode_prompt_zh?: string;
   pc_task_mode_prompt_en?: string;
@@ -206,105 +202,30 @@ export const ResearchSection = defineSection({
   },
 });
 
-function researchBlackboardUrl(c: SectionCtx): string {
-  return `http://localhost:${c.env?.port}/api/research-blackboard/${c.research.id}`;
-}
-
 export const BlackboardSection = defineSection({
   key: 'blackboard',
   title: { zh: '## Research Blackboard', en: '## Research Blackboard' },
   build: {
     zh: (c, t) => {
       if (!(c.research && c.research.id)) return null;
-      const url = researchBlackboardUrl(c);
       const sessionId = c.session?.session_id && c.session.session_id !== '(待创建)' ? c.session.session_id : '';
-      const sessionToken = c.blackboard_session_token || '';
-      const author = c.session?.research_role || 'research_assistant';
       return md`
         ${t.zh}
-        当前研究的 Blackboard 只能通过 Mobius HTTP API 读写。不要直接编辑 \`${c.env?.hiddenFolderName}/blackboard/${c.research.id}/blackboard.jsonl\` 文件。
-
-        读取完整 Blackboard:
-
-        \`\`\`bash
-        ${`curl${sessionToken ? ` -H '${c.blackboard_token_header}: ${sessionToken}'` : ''} ${url}`}
-        \`\`\`
-
-        写入 Blackboard:
-
-        \`\`\`bash
-        ${`curl -X POST ${url} \\`}
-        ${`  -H 'Content-Type: application/json' \\`}
-        ${sessionToken ? `  -H '${c.blackboard_token_header}: ${sessionToken}' \\` : ''}
-        ${`  -d '{"author":"${author}${sessionId ? ` (${sessionId})` : ''}","session_id":"${sessionId}","content":"这里写入你的研究进展、发现或需要同步给团队的信息"}'`}
-        \`\`\`
-
-        Blackboard 内容只记录写入者和内容，不指定接收者。任意写入都会在后台投递给本 Research 中其他已创建 session。
+        请通过命令行读写黑板：
+        - 读取：\`research_blackboard_read --from=${sessionId || '<self_id>'} --research=${c.research.id}\` （禁止轮询，有更新时系统会通知你）
+        - 写入：\`research_blackboard_write --from=${sessionId || '<self_id>'} --research=${c.research.id} "研究进展或需要同步的信息"\`
+        - 写入（定向）（不建议使用，除非用户强烈要求）：\`research_blackboard_write --from=${sessionId || '<self_id>'} --research=${c.research.id} --limit-receiver --receiver=<receiver_id> "研究进展或需要同步的信息"\`
       `;
     },
     en: (c, t) => {
       if (!(c.research && c.research.id)) return null;
-      const url = researchBlackboardUrl(c);
       const sessionId = c.session?.session_id && c.session.session_id !== '(待创建)' ? c.session.session_id : '';
-      const sessionToken = c.blackboard_session_token || '';
-      const author = c.session?.research_role || 'research_assistant';
       return md`
         ${t.en}
-        This research's Blackboard can only be read and written through the Mobius HTTP API. Do not directly edit the \`${c.env?.hiddenFolderName}/blackboard/${c.research.id}/blackboard.jsonl\` file.
-
-        Read the full Blackboard:
-
-        \`\`\`bash
-        ${`curl${sessionToken ? ` -H '${c.blackboard_token_header}: ${sessionToken}'` : ''} ${url}`}
-        \`\`\`
-
-        Write to the Blackboard:
-
-        \`\`\`bash
-        ${`curl -X POST ${url} \\`}
-        ${`  -H 'Content-Type: application/json' \\`}
-        ${sessionToken ? `  -H '${c.blackboard_token_header}: ${sessionToken}' \\` : ''}
-        ${`  -d '{"author":"${author}${sessionId ? ` (${sessionId})` : ''}","session_id":"${sessionId}","content":"Write your research progress, findings, or anything to sync with the team here"}'`}
-        \`\`\`
-
-        A Blackboard entry records only its author and content, with no designated recipient. Any write is delivered in the background to the other sessions already created in this Research.
-      `;
-    },
-  },
-});
-
-export const ChiefSection = defineSection({
-  key: 'chief',
-  title: { zh: '## Chief 团队管理能力', en: '## Chief team-management capability' },
-  build: {
-    zh: (c, t) => {
-      if (!(c.research && c.research.id && c.session?.research_role === 'chief_researcher' && c.session?.session_id && c.research?.mode === 'chief_led')) return null;
-      const teamUrl = `http://localhost:${c.env?.port}/api/researches/${c.research.id}/team`;
-      return md`
-        ${t.zh}
-        - 当前 Assistant limit: ${c.research.assistant_limit || 3}（Chief 不占名额，且你不能修改 limit）
-        - 只有在用户明确授权后才能招募 Assistant；能由现有成员完成时不要扩编。
-        - 招募前必须说明现有团队为什么无法完成、缺少什么能力、预期产出是什么。
-        - 删除 Agent 必须提供删除理由和未完成任务交接；你不能创建或删除 Chief。
-        - 查询团队: GET ${teamUrl}
-        - 创建 Assistant: POST ${teamUrl}/agents
-        - 移除 Assistant: DELETE ${teamUrl}/agents/<session_id>
-        - 请求头: ${c.team_token_header}: ${c.chief_team_token}
-        - 创建请求必填: name, purpose, model, skill_ids, memory_ids, memory_selection_confirmed=true, initial_prompt, recruit_reason, expected_outcome, request_id，以及按钮 authorization_id 或自然语言 authorization_quote。
-      `;
-    },
-    en: (c, t) => {
-      if (!(c.research && c.research.id && c.session?.research_role === 'chief_researcher' && c.session?.session_id && c.research?.mode === 'chief_led')) return null;
-      const teamUrl = `http://localhost:${c.env?.port}/api/researches/${c.research.id}/team`;
-      return md`
-        ${t.en}
-        - Current Assistant limit: ${c.research.assistant_limit || 3}; the Chief does not count and cannot change it.
-        - Recruit only after explicit user authorization and record why the current team cannot do the work.
-        - Removing an Agent requires a reason and unfinished-work handoff. You cannot create or remove a Chief.
-        - Team state: GET ${teamUrl}
-        - Recruit Assistant: POST ${teamUrl}/agents
-        - Remove Assistant: DELETE ${teamUrl}/agents/<session_id>
-        - Header: ${c.team_token_header}: ${c.chief_team_token}
+        Use the CLI to read and write the Blackboard:
+        - Read: \`research_blackboard_read --from=${sessionId || '<self_id>'} --research=${c.research.id}\` (do not poll; the system notifies you when there are updates)
+        - Write: \`research_blackboard_write --from=${sessionId || '<self_id>'} --research=${c.research.id} "progress or findings to share"\`
+        - Targeted write (discouraged unless the user strongly requires it): \`research_blackboard_write --from=${sessionId || '<self_id>'} --research=${c.research.id} --limit-receiver --receiver=<receiver_id> "progress or findings to share"\`
       `;
     },
   },
@@ -361,10 +282,12 @@ function knowledgeHintLines(c: SectionCtx, lang: 'zh' | 'en'): string[] {
       '此外，如果需要记住一些信息供未来使用，请写入对应的知识文件（不要写入 ~/.codex 或 ~/.claude）：',
       `- 如果是项目通用知识（整体事实、通用做法、跨任务可复用的经验，写入 project_knowledge 的内容务必非常非常精简、克制）→ \`${pkPath}\`；`,
       `- 如果是仅与当前任务相关、通用性有限的知识，写入 issue_knowledge（简洁、不要废话） → \`${ikPath}\`；`,
+      `无论记录在哪里，都要记住：必须按照功能模块作为索引，分门别类写入。绝不允许记流水账。发现过时的、矛盾的知识，直接清除！`,
     ] : [
       'Additionally, if you need to remember information for future sessions, write it to the appropriate knowledge file (do not write to ~/.codex or ~/.claude):',
       `- For project-wide general knowledge (overall facts, common practices, cross-task reusable experience; keep what you write into project_knowledge concise and restrained) → \`${pkPath}\`;`,
       `- For knowledge relevant only to the current task with limited generality, write to issue_knowledge → \`${ikPath}\`;`,
+      `No matter where the knowledge are kept, remember: they must be indexed by functional module and written in categories. Never allow diary-like knowledge record. If outdated or contradictory knowledge is found, remove it immediately!`,
     ];
   }
   return lang === 'zh' ? [
@@ -464,7 +387,7 @@ export const WorktreeSection = defineSection({
 
         此后所有代码改动都在该 worktree 内进行. (备注：可能存在不止一个git仓库，请随机应变）
 
-        ${c.session_is_assistant ? '### 任务完成时 (成功或失败)' : '### 任务完成时 (成功或失败, 在删除下方 running.flag 之前必须做)'}
+        ${c.session_is_assistant ? '### 任务完成时 (成功或失败)' : '### 任务完成时 (成功或失败, 在运行下方命令之前必须做)'}
         ${`把分支 \`${wt.branch}\` 合并到 \`agent_smart_dev\` 分支:`}
 
         \`\`\`bash
@@ -478,7 +401,6 @@ export const WorktreeSection = defineSection({
 
         若合并有冲突, 必须解决全部冲突后再完成合并; 合并完成后重新运行测试验证需求是否满足. 若仍有冲突或测试不通过, 继续修复 → 重新合并 → 重新测试, **直到没有冲突且测试通过为止**.
         一切结束后，尝试git push，如果因为认证，失败了也没关系，跳过即可。
-        ${!c.session_is_assistant ? `提示: running.flag 位于仓库根 \`${wt.root}/${c.env?.hiddenFolderName}/...\`, 不在 worktree 内 — 重建/删除 worktree 目录时不要误删它.` : ''}
       `;
     },
     en: (c, t) => {
@@ -512,7 +434,7 @@ export const WorktreeSection = defineSection({
 
         From now on, make all code changes inside this worktree. (Note: there may be more than one git repo, so adapt as needed.)
 
-        ${c.session_is_assistant ? '### When the task is done (success or failure)' : '### When the task is done (success or failure, must do this before deleting the running.flag below)'}
+        ${c.session_is_assistant ? '### When the task is done (success or failure)' : '### When the task is done (success or failure, do this before running the command below)'}
         ${`Merge branch \`${wt.branch}\` into the \`agent_smart_dev\` branch:`}
 
         \`\`\`bash
@@ -526,7 +448,6 @@ export const WorktreeSection = defineSection({
 
         If the merge has conflicts, you must resolve all of them before completing the merge; after merging, re-run the tests to verify the requirements are met. If conflicts remain or tests fail, keep fixing → re-merging → re-testing, **until there are no conflicts and the tests pass**.
         When everything is done, try git push; if it fails due to authentication, that is fine, just skip it.
-        ${!c.session_is_assistant ? `Note: running.flag lives at the repo root \`${wt.root}/${c.env?.hiddenFolderName}/...\`, not inside the worktree — do not accidentally delete it when rebuilding/removing the worktree directory.` : ''}
       `;
     },
   },
@@ -541,23 +462,50 @@ export const CompletionFlagSection = defineSection({
     zh: (c, t) => {
       if (!(c.session && c.session.session_id && c.session.session_id !== '(待创建)')) return null;
       if (c.session_is_assistant) return null;
-      const flagRoot = c.project?.bind_path ? c.project.bind_path : '.';
-      const flagPath = `${flagRoot}/${c.env?.hiddenFolderName}/flags/${c.session.session_id}/running.flag`;
       return md`
         ${t.zh}
-        当任务最终成功或者最终失败时，你需要删除标记文件 ${flagPath}。但是，不要轻易放弃，尝试一切可能解决问题的方法，直到你确信无法继续为止。
-        每当用户提出新问题新指令时，都会创建新的running.flag。
+        当任务最终成功时，运行 \`declare_job_done ${c.session.session_id}\` 删除 running.flag 文件；当任务最终失败时，运行 \`declare_job_failed ${c.session.session_id} "失败原因"\` 写入 failed.flag 并删除 running.flag。不要轻易放弃，尝试一切可能解决问题的方法，直到你确信无法继续为止。每当用户提出新问题或新指令时，都会创建新的 flag 文件。
       `;
     },
     en: (c, t) => {
       if (!(c.session && c.session.session_id && c.session.session_id !== '(待创建)')) return null;
       if (c.session_is_assistant) return null;
-      const flagRoot = c.project?.bind_path ? c.project.bind_path : '.';
-      const flagPath = `${flagRoot}/${c.env?.hiddenFolderName}/flags/${c.session.session_id}/running.flag`;
       return md`
         ${t.en}
-        When the task ultimately succeeds or ultimately fails, you must delete the marker file ${flagPath}. But do not give up easily — try every possible way to solve the problem until you are convinced you cannot continue.
-        When user gives new instruction again, running.flag will be recreated.
+        When the task ultimately succeeds, run \`declare_job_done ${c.session.session_id}\` to remove running.flag; when it ultimately fails, run \`declare_job_failed ${c.session.session_id} "failure reason"\` to write failed.flag and remove running.flag. Do not give up easily — try every possible way to solve the problem until you are convinced you cannot continue. Whenever the user provides a new question or instruction, a new flag file will be created.
+      `;
+    },
+  },
+});
+
+export const ScheduledWakeupSection = defineSection({
+  key: 'scheduledWakeup',
+  title: { zh: '## Mobius 定时唤醒', en: '## Mobius scheduled wake-ups' },
+  build: {
+    zh: (c, t) => {
+      const sessionId = c.session?.session_id;
+      if (!sessionId || sessionId === '(待创建)') return null;
+      return md`
+        ${t.zh}
+        当用户要求稍后或周期性继续工作时，使用后台定时唤醒（不要使用CronCreate等ClaudeCode工具，所有定时任务，mobius_schedule_*是唯一可以使用的工具）：
+        - 单次：\`mobius_schedule_wake_me_up ${sessionId} --once --after-time 30m --reminder "检查构建结果"\`
+        - 周期：\`mobius_schedule_wake_me_up ${sessionId} --interval --interval-time 1h --reminder "检查服务状态"\`
+        - 查看：\`mobius_schedule_list\`
+        - 取消本 Session 全部定时唤醒：\`mobius_schedule_cancel_all --session-id ${sessionId}\`
+        时长支持 30s、10m、2h、1d 格式；\`--once\` 与 \`--interval\` 必须二选一，interval 最短 10m。\`--reminder\` 要写唤醒后应执行的具体工作。
+      `;
+    },
+    en: (c, t) => {
+      const sessionId = c.session?.session_id;
+      if (!sessionId || sessionId === '(pending)' || sessionId === '(待创建)') return null;
+      return md`
+        ${t.en}
+        When the user asks to continue work later or periodically, use the backend scheduler instead of sleeping or polling:
+        - Once: \`mobius_schedule_wake_me_up ${sessionId} --once --after-time 30m --reminder "check the build result"\`
+        - Interval: \`mobius_schedule_wake_me_up ${sessionId} --interval --interval-time 1h --reminder "check service health"\`
+        - List: \`mobius_schedule_list\`
+        - Cancel every wake-up for this Session: \`mobius_schedule_cancel_all --session-id ${sessionId}\`
+        Durations use forms such as 30s, 10m, 2h, and 1d. Exactly one of \`--once\` or \`--interval\` is required; intervals are at least 10m. The \`--reminder\` is the concrete work to perform after wake-up.
       `;
     },
   },
@@ -636,11 +584,11 @@ export const SESSION_SECTIONS: SectionDef[] = [
   ProjectSection,
   ResearchSection,
   BlackboardSection,
-  ChiefSection,
   PeersSection,
   MemorySection,
   SkillsSection,
   WorktreeSection,
+  ScheduledWakeupSection,
   CompletionFlagSection,
   IssueSection,
   SessionSection,

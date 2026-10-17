@@ -1,27 +1,29 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
-import { Bot, Bookmark, Wrench, MoreHorizontal, History, Copy, Check, Replace, Archive, Maximize2, Minimize2, X, ZoomIn, FileDiff, Terminal, GitCompare, Loader2, Mic, RefreshCw, SendHorizontal, Zap, Square, Plus, Paperclip, ExternalLink, Server, FolderOpen, FolderPlus, ChevronDown, ChevronRight, FileText, AtSign, ArrowLeftRight, Search, Clock, Sparkles, Eye, MessageCircle } from 'lucide-react'
+import { MARKDOWN_COMPONENTS } from './markdown-components'
+import { Bot, Bookmark, Wrench, MoreHorizontal, History, Copy, Check, Replace, Archive, Maximize2, Minimize2, X, ZoomIn, FileDiff, Terminal, GitCompare, Loader2, Mic, RefreshCw, SendHorizontal, Zap, Square, Plus, Paperclip, ExternalLink, Server, FolderOpen, FolderPlus, ChevronDown, ChevronRight, FileText, Search, Sparkles, Download, FolderTree } from 'lucide-react'
 import { useStore, api, HIDDEN_FOLDER_NAME } from '../store'
-import { formatCstDateTimeShort } from '../utils/time-format'
-import { timeAgo, isRecentlyActive } from './shell'
+import { timeAgo } from './shell'
 import { AgentStatusDot } from './AgentStatusDot'
-import { SessionWelcomeCards, SessionStartModal, SessionSkillMemoryEditor, SessionSkillMemoryModal } from './session-welcome'
+import { SessionWelcomeCards, SessionStartModal, SessionSkillMemoryEditor, SessionSkillMemoryModal, type SessionSearchHit } from './session-welcome'
 import { NewSessionModal } from './modals'
-import { FileTreeLevel, OpenInVSCodeButton, type DirState, type Entry } from './project-files'
+import { CreateSessionForm } from './quick-create-session'
+import { OpenInVSCodeButton } from './project-files'
+import { ResizablePanel, useNarrowContainer } from './resizable-panel'
+import { useEditorAvailability } from './workspace/use-editor-availability'
 import { WebTerminalModal, type WebTerminalMode } from './web-terminal-modal'
 import { SessionJsonlPanel } from './session-jsonl-panel'
-import { useVisibleJsonl } from './session-jsonl-filter'
+import { scrollDebug } from './scroll-debug'
+import { registerDiagProbe, ms, px, bool } from '../services/scroll-diagnostics'
 import { JsonlCopyButton } from './viewer/JsonlCopyButton'
 import { SessionStatusChip } from './session-status-chip'
 import { AimuxLinkIndicator, RemoteAimuxMcpIndicator } from './aimux-link-indicator'
 import { AnnouncePcButton } from './announce-pc-button'
-import { renderWithSecretChips } from './encrypted-secrets'
-import { MessageContentWithAttachments } from './message-attachments'
-import { isGuidedDemoSession, patchGuidedDemoSessionCompleted } from '../services/guided-demo'
-import { readJsonlCacheSync, readJsonlCacheFromIdb, writeJsonlCache } from '../services/session-jsonl-cache'
+import { useAgentHistoryStore, useHistorySnapshotOf, useLoadedEntryCount, useTotalEntryCount, useSessionJsonlPath, type SessionHistoryStore } from '../services/agent-history-store'
+import { findLatestEntryTimestamp } from './session-jsonl-panel'
 import {
   preloadSessionInputCache,
   prependSessionInputCache,
@@ -30,16 +32,15 @@ import {
   type SessionInputEntry,
 } from '../services/session-input-cache'
 import { MobiusLogo } from './mobius-logo'
+import { RemoteFileMentionDrawer, type AgentMentionMode, type MentionAgentSession } from './mention-drawer'
 import { PlanningEditor } from './planning-editor'
 import { KnowledgeEditorModal } from './knowledge-editor-modal'
 import { RemoteComputeMemoryModal } from './memories'
 import { AdvancedInteractionBtn } from './advanced-interaction-btn'
+import { EasySessionChatInput } from './easy-session-chat-input'
 import { AdvancedSessionActions } from './advanced-session-actions'
-import { UnifiedButtonGroup } from './unified-button-group'
-import { SessionGroupTree } from './session-group-tree'
-import { buildRecentSessionTreeGroups } from '../services/recent-session-tree'
-import { normalizeRecentSessions, type RecentSession } from '../services/recent-sessions'
-import { RecentSessionRow } from './recent-session-row'
+import { UnifiedButtonGroup, type VisibilityOption } from './unified-button-group'
+import { EasySessionToolBar } from './easy-session-tool-bar'
 import { draftClear, draftLoad, draftSave } from '../services/input-drafts'
 import { extensionAppUrlForProject } from '../services/extension-entry'
 import { isFireAndForgetSession } from '../services/session-start-policy'
@@ -53,7 +54,9 @@ import {
   VOICE_RECORDING_MAX_MS,
 } from '../services/assistant-voice'
 
-const GUIDED_DEMO_TOUR_EVENT = 'imac:guided-demo-tour:start'
+// LIVE 卡乐观窗口时长: 提交问题后强制显示 5s, 点击终止后强制隐藏 10s.
+const LIVE_OPTIMISTIC_SHOW_MS = 5000
+const LIVE_OPTIMISTIC_HIDE_MS = 10000
 const CHAT_INPUT_SPLIT_STORAGE_KEY = 'mobius:ui:split:chat-input'
 // 回车自动加急开关持久化 key: '1'=开启, 其他=关闭.
 const AUTO_URGENT_ENTER_STORAGE_KEY = 'mobius:ui:auto-urgent-enter'
@@ -62,6 +65,29 @@ const CHAT_INPUT_MIN_RATIO = 0.14
 const CHAT_INPUT_MIN_WIDTH = 224
 const CHAT_INPUT_MAX_WIDTH = 720
 const CHAT_HISTORY_MIN_WIDTH = 360
+// 会话体中栏窄于此宽度即转纵向堆叠 (历史在上, 输入在下). 与 index.css 里
+// @media(max-width:900px) 同一断点, 区别是这里量的是中栏自己的宽度: 左侧会话栏和
+// 右侧文件编辑栏 (原生文件编辑器) 都会占掉中栏宽度, 视口宽 ≠ 中栏宽.
+const CHAT_BODY_STACK_BREAKPOINT = 900
+// 「会话统一按钮组」的显示设置清单: 标准布局的侧栏与简易模式的工具浮层共用同一份,
+// 否则两处的显示开关会漂移 (存储 key 相同, 清单不同会互相隐藏对方的按钮).
+const SESSION_TOOL_VISIBILITY_OPTIONS: VisibilityOption[] = [
+  { id: 'file-changes', label: '查看文件修改' },
+  { id: 'bash-commands', label: '查看运行命令' },
+  { id: 'input-replay', label: '回放输入' },
+  { id: 'jsonl-meta', label: '显示时间与序号' },
+  { id: 'terminal', label: '打开终端' },
+  { id: 'cooperable-pc', label: '可合作计算机' },
+  { id: 'knowledge', label: '查看当前项目知识/任务知识' },
+  { id: 'send-knowledge', label: '项目知识沉淀到记忆' },
+  { id: 'continue-model', label: '修改模型并继续' },
+  { id: 'skill', label: 'Skill' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'git', label: 'Git' },
+  { id: 'ports', label: '端口' },
+  { id: 'time', label: '定时任务与耗时' },
+  { id: 'search', label: '会话内搜索' },
+]
 
 type LiveDebugTailEntry = {
   type: string | null
@@ -78,6 +104,12 @@ type LiveDebugSnapshot = {
   variant: 'standard' | 'easy'
   backendAlive: boolean | null
   backendWorking: boolean | null
+  // 乐观窗口 (提交后强开 / 终止后强关), null = 无窗口, 按轮询结果.
+  liveOverride: 'on' | 'off' | null
+  // 发送阶段 (发送按钮灰着, 左下角 正在发送/正在唤醒中/唤醒超时 黄字期间).
+  sendingPhase: boolean
+  // 实际生效模式: 终止窗 > 提交窗/发送阶段 > 后端状态.
+  liveMode: 'on' | 'off' | null
   parentGate: {
     standardVariant: boolean
     alive: boolean
@@ -121,28 +153,294 @@ function parseDebugTimestamp(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null
 }
 
-function findLatestEntryTimestamp(entries: any[]): {
-  value: string | null
-  index: number | null
-  source: LiveDebugSnapshot['lastTimestampSource']
-} {
-  const candidates: Array<{ source: NonNullable<LiveDebugSnapshot['lastTimestampSource']>; get: (entry: any) => unknown }> = [
-    { source: 'timestamp', get: (entry) => entry?.timestamp },
-    { source: 'created_at', get: (entry) => entry?.created_at },
-    { source: 'payload.timestamp', get: (entry) => entry?.payload?.timestamp },
-    { source: 'message.created_at', get: (entry) => entry?.message?.created_at },
-  ]
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index]
-    for (const candidate of candidates) {
-      const value = candidate.get(entry)
-      if ((typeof value === 'string' || typeof value === 'number') && parseDebugTimestamp(value) !== null) {
-        return { value: String(value), index, source: candidate.source }
-      }
-    }
-  }
-  return { value: null, index: null, source: null }
+// ── 历史快照的"轻消费点"小组件 (Chat 本体不订阅快照, 见 useAgentHistoryStore) ──
+// 计数槽 (render-prop): 只随已加载/总条数变化重渲染, 供 header / 溢出菜单等.
+function JsonlCountSlot({ store, children }: { store: SessionHistoryStore | null; children: (loaded: number, total: number) => React.ReactNode }) {
+  const loaded = useLoadedEntryCount(store)
+  const total = useTotalEntryCount(store)
+  return <>{children(loaded, total)}</>
 }
+
+// 新条目到达自动滚底 (null 渲染): 方案 2 — 帧同步增量跟随.
+// lerp 跟随系数 (调参台定稿 0.06, 见 tmp/frontend_unit_mock): 每帧走"距底剩余距离"的比例.
+const LERP_FOLLOW_K = 0.06
+
+// 吸附阈值: lerp 单帧增量 = 剩余距离 * 0.06, 剩余不足 ~17px 时增量已小于 1px, 而 scrollTop
+// 按整像素生效 —— 增量被整个吞掉, 环既追不平 (delta 永远 > 0.5) 也推不动一格, 于是每帧空转
+// 并把视野死钉在底部, 任何程序滚动 (轮次跳转按钮/摘要跳转) 都被它逐帧按回去 = "按钮无效".
+// 剩余距离进这个阈值就直接吸附到底并收环. 24px 留足整像素余量, 视觉上仍是"到底".
+const LERP_SNAP_PX = 24
+
+// 两个触发源 (条数变化 / 内容长高) 共用同一个自续 RAF 追赶环: 每帧只走剩余距离的
+// LERP_FOLLOW_K — 落后越多追得越快, 逼近底部自动减速, 高卡/批量呈现为先快后慢的
+// 缓动, 小增量轻带即到; 底部在长高中途变化也自然 retarget. 系数按 60Hz 手感调的,
+// 高刷屏会略快. 不用 behavior:'smooth' (重发会打断进行中的动画). 配套: 解除钉底
+// 改为方向性判定 (仅"向上滚"才算用户, 见 session-jsonl-panel), 追赶途中 dist 再大
+// 也不误判. 消息/typing 触发的滚底仍由 Chat 自己的 effect 负责.
+function EntriesAutoScroll({ store, containerRef, matchActiveRef, searchHighlightActiveRef, userScrolledUpRef, onBlocked }: {
+  store: SessionHistoryStore | null
+  containerRef: React.RefObject<HTMLDivElement | null>
+  // 用 MutableRefObject (而非 RefObject): 后者在 React 18 类型里 .current 是 T | null,
+  // 与本组件"同步可变 ref"的实际语义不符.
+  // MutableRefObject, because RefObject<boolean>.current is boolean | null in React 18 types.
+  matchActiveRef: React.MutableRefObject<boolean>
+  searchHighlightActiveRef: React.MutableRefObject<boolean>
+  userScrolledUpRef: React.MutableRefObject<boolean>
+  onBlocked: () => void
+}) {
+  const count = useLoadedEntryCount(store)
+  // onBlocked 是每渲染重建的闭包, 用 ref 存最新值供追底 RAF / 条数变化 effect 读取.
+  const onBlockedRef = useRef(onBlocked)
+  onBlockedRef.current = onBlocked
+
+  // lerp 追赶环: 触发只是"点火" (环没转就点一帧); 环每帧走剩余距离的 6%,
+  // 没追平 (delta > 0.5px) 就自续下一帧, 追平即停 — 两个触发源共用一个环.
+  const rafRef = useRef(0)
+  const chaseFrameRef = useRef(0)
+  // 诊断计数 (只写 ref, 不触发重渲染): 供 debug_panel 浮窗判断环是否已死.
+  // Diagnostic counters written to a ref only, so the panel can tell a dead loop from an idle one.
+  const diagRef = useRef({ mountAt: Date.now(), frames: 0, lastFrameAt: 0, scheduleAttempts: 0, scheduleBlocked: 0, lastStop: '—' })
+  const countRef = useRef(count)
+  countRef.current = count
+  const chase = () => {
+    rafRef.current = 0
+    // userScrolledUpRef 是同步可变 ref (事件处理器里直接改它), 追底每帧直接读,
+    // 不用等 React 重渲染, 避免"第一次 wheel 上滚仍被拽回一帧".
+    if (matchActiveRef.current || searchHighlightActiveRef.current) {
+      diagRef.current.lastStop = '搜索定位/命中高亮进行中'
+      scrollDebug('chase: skip (search navigation/highlight active)')
+      return
+    }
+    if (userScrolledUpRef.current) {
+      diagRef.current.lastStop = 'userScrolledUp=true (用户接管)'
+      scrollDebug('chase: STOP (userScrolledUp=true)')
+      return
+    }
+    const el = containerRef.current
+    if (!el) { diagRef.current.lastStop = '滚动容器不存在'; return }
+    const delta = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (delta <= 0.5) { diagRef.current.lastStop = '已在底部 (delta<=0.5)'; scrollDebug('chase: done (delta<=0.5)'); return }
+    // 剩余距离已在 lerp 分辨率之下: 直接吸附到底并收环, 否则环空转不休 (见 LERP_SNAP_PX)
+    // Inside the lerp's dead zone: snap to the bottom and end the loop, or it would spin forever
+    if (delta <= LERP_SNAP_PX) {
+      el.scrollTop = el.scrollHeight
+      diagRef.current.lastStop = '已在底部 (吸附收环)'
+      scrollDebug('chase: snap to bottom then stop, delta=', delta.toFixed(1))
+      return
+    }
+    diagRef.current.frames += 1
+    diagRef.current.lastFrameAt = Date.now()
+    diagRef.current.lastStop = '追赶中'
+    if (chaseFrameRef.current % 30 === 0) {
+      scrollDebug('chase: lerp', { delta: delta.toFixed(1), scrollTop: Math.round(el.scrollTop), scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, userScrolledUp: userScrolledUpRef.current })
+    }
+    chaseFrameRef.current += 1
+    el.scrollTop += delta * LERP_FOLLOW_K
+    rafRef.current = requestAnimationFrame(chase)
+  }
+  const schedulePin = () => {
+    const diag = diagRef.current
+    diag.scheduleAttempts += 1
+    // 被守卫挡下 = rafRef 非 0. 若它永远非 0 而一帧都没跑过, 环就是死了 (见浮窗"因 A").
+    // Blocked by the guard means rafRef is non-zero; if it never runs a frame, the loop is dead.
+    if (rafRef.current) { diag.scheduleBlocked += 1; return }
+    rafRef.current = requestAnimationFrame(chase)
+  }
+  // 卸载时取消在跑的帧, 并把句柄归零: 取消掉的帧不算"环还在跑", 留着非 0 句柄会让
+  // schedulePin 的守卫永远挡下后续排帧, 环再也不会启动 (dev StrictMode 双调用必现).
+  // Cancel the pending frame and clear the handle: a cancelled frame is not a running loop,
+  // and a stale non-zero handle would make schedulePin's guard block every later start.
+  useEffect(() => () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    rafRef.current = 0
+  }, [])
+
+  // 浮窗探针: 读实时 DOM + 计数器, 给出"环是否还活着"和"被谁挡住"的结论.
+  // Panel probe: reads live DOM plus the counters to say whether the loop is alive and what blocks it.
+  useEffect(() => registerDiagProbe(() => {
+    const el = containerRef.current
+    const diag = diagRef.current
+    const now = Date.now()
+    const idleSince = diag.lastFrameAt || diag.mountAt
+    // rafRef 非 0 却长时间没有帧跑出来 = 排的帧被取消但句柄没归零 (StrictMode 双调用踩中)
+    const loopDead = diag.frames === 0 && rafRef.current !== 0 && now - diag.mountAt > 3000
+    const dist = el ? el.scrollHeight - el.scrollTop - el.clientHeight : null
+    const contentRoot = el?.firstElementChild
+    return {
+      key: 'chase',
+      title: '追底环 (EntriesAutoScroll)',
+      tone: loopDead ? 'bad' : 'ok',
+      rows: [
+        { label: '环状态', value: loopDead ? `已死 — 排帧被取消后 rafRef 未归零 (距今 ${ms(now - idleSince)})` : diag.lastStop, tone: loopDead ? 'bad' : undefined },
+        { label: '已执行帧数', value: String(diag.frames), tone: diag.frames === 0 && now - diag.mountAt > 3000 ? 'bad' : undefined },
+        { label: '上次执行', value: diag.lastFrameAt ? `${ms(now - diag.lastFrameAt)} 前` : '从未执行' },
+        { label: '排帧次数', value: `${diag.scheduleAttempts} 次, 被守卫挡下 ${diag.scheduleBlocked} 次` },
+        { label: 'rafRef 句柄', value: rafRef.current ? `${rafRef.current} (待执行)` : '0 (空闲)' },
+        { label: 'lerp 系数', value: String(LERP_FOLLOW_K) },
+        { label: '已加载条目数', value: String(countRef.current) },
+        { label: '容器 scrollTop', value: el ? px(el.scrollTop) : '容器不存在' },
+        { label: '容器 scrollHeight', value: el ? px(el.scrollHeight) : '—' },
+        { label: '容器 clientHeight', value: el ? px(el.clientHeight) : '—' },
+        { label: '距底 delta', value: dist == null ? '—' : px(dist), tone: dist != null && dist > 0.5 ? 'warn' : 'ok' },
+        { label: '内容根高度', value: contentRoot instanceof HTMLElement ? px(contentRoot.getBoundingClientRect().height) : '—' },
+      ],
+      flags: [
+        { key: 'chase.loop-dead', label: '环已死', active: loopDead, blocking: true, detail: '因 A: 排帧被取消但 rafRef 未归零 (vite dev 的 StrictMode 双调用必现)' },
+        { key: 'chase.blocked.search', label: '搜索定位中', active: !!(matchActiveRef.current || searchHighlightActiveRef.current), blocking: true, detail: '因 B: URL 命中参数或未清除的红框仍生效' },
+        { key: 'chase.blocked.user', label: '用户接管', active: userScrolledUpRef.current, blocking: true, detail: '因 C: 该标志为真时追底与"新消息"按钮的判定都停在这里' },
+        { key: 'chase.at-bottom', label: '已在底部', active: dist != null && dist <= 0.5 },
+      ],
+    }
+  }), [containerRef, matchActiveRef, searchHighlightActiveRef, userScrolledUpRef])
+
+  // 触发源 1: 条数变化 (新条目到达). 用户已上滚 → 亮"新消息"按钮, 不抢滚条.
+  useEffect(() => {
+    if (matchActiveRef.current || searchHighlightActiveRef.current) return
+    if (userScrolledUpRef.current) {
+      scrollDebug('count-effect: count=', count, 'userScrolledUp=true → onBlocked (不追底, 亮"新消息")')
+      onBlockedRef.current()
+      return
+    }
+    scrollDebug('count-effect: count=', count, 'userScrolledUp=false → schedulePin (追底)')
+    schedulePin()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count])
+
+  // 触发源 2: 内容长高 (F-a 追滚) — 一次性快照滚底追不上异步长高,
+  // 盯内容根的 ResizeObserver 让钉底态持续跟随. 搜索跳转进行中不干扰.
+  useEffect(() => {
+    const el = containerRef.current
+    const contentRoot = el?.firstElementChild
+    if (!el || !(contentRoot instanceof HTMLElement)) return
+    const ro = new ResizeObserver(schedulePin)
+    ro.observe(contentRoot)
+    return () => ro.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerRef, matchActiveRef, searchHighlightActiveRef])
+  return null
+}
+
+// 简易视图"加载/展开全部"控件: 计数来自 store, 信号/回调来自 Chat.
+function EasyLoadAllControls({ store, loading, onLoadAll, expandAllSignal }: {
+  store: SessionHistoryStore | null
+  loading: boolean
+  onLoadAll: () => void
+  expandAllSignal: number
+}) {
+  const loaded = useLoadedEntryCount(store)
+  const total = useTotalEntryCount(store)
+  return (
+    <>
+      {(total > loaded || (loaded > 200 && expandAllSignal === 0)) && (
+        <button
+          type="button"
+          className="easy-session-summary__action"
+          disabled={loading}
+          onClick={onLoadAll}
+          title={loading ? '正在加载全部对话' : total > loaded ? `加载全部对话（${total} 条）` : `展开全部对话（${loaded} 条）`}
+        >
+          {loading ? '加载中…' : total > loaded ? `加载全部 · ${total}` : `展开全部 · ${loaded}`}
+        </button>
+      )}
+      {loaded > 200 && expandAllSignal > 0 && (
+        <span className="easy-session-summary__complete">已加载全部</span>
+      )}
+    </>
+  )
+}
+
+// 原始 JSONL 弹窗「下载」的取数: 把所有未加载组按 ② 逐组补齐后摊平成 JSONL 文本
+// (用户显式动作, 不截断). 渲染层有预算限制, 但导出走全量.
+async function collectRawJsonlText(store: SessionHistoryStore | null): Promise<string> {
+  if (!store) return ''
+  for (const group of store.groups) {
+    await store.ensureGroupEntries(group.id)
+  }
+  return (store.flattenEntries() as any[]).map(e => JSON.stringify(e)).join('\n')
+}
+
+// 下载文件名: 优先沿用磁盘上的 jsonl 文件名 (与后端 watch 的同一份), 缺失时用会话 id 兜底.
+function rawJsonlFileName(jsonlPath: string | null, sessionId?: string | null): string {
+  const base = (jsonlPath || '').split('/').pop() || ''
+  if (base.endsWith('.jsonl')) return base
+  return `${sessionId || 'session'}.jsonl`
+}
+
+// 原始 JSONL 弹窗正文的渲染预算.
+// 全量 JSON.stringify(entry, null, 2) 的 DOM 节点数/字符数随会话线性增长, 会话一长
+// 就会把前端拖死 (用户反馈: jsonl 太长页面卡死). 超预算的条目不再进 DOM, 只渲染
+// 前若干条, 完整内容引导用户点右上角「下载 JSONL」拿文件.
+const RAW_JSONL_RENDER_MAX_ENTRIES = 200
+const RAW_JSONL_RENDER_MAX_CHARS = 200_000
+
+type RawJsonlRenderWindow = {
+  text: string
+  shownCount: number
+  totalCount: number
+  truncated: boolean
+}
+
+/*
+ * Builds the body of the "raw JSONL" modal: one pretty-printed block per entry, accumulated until
+ * either the entry-count or the character budget runs out. The last block may be cut mid-way so the
+ * budget is used exactly; a truncated window is reported back so the UI can point at the download.
+ */
+function buildRawJsonlRenderWindow(entries: any[]): RawJsonlRenderWindow {
+  const blocks: string[] = []
+  let used = 0
+  let shownCount = 0
+  let truncated = false
+  for (let i = 0; i < entries.length; i++) {
+    // 条数预算先到就停，避免超长会话把 DOM 撑爆
+    // Stop once the entry budget is hit so a long session cannot blow up the DOM
+    if (shownCount >= RAW_JSONL_RENDER_MAX_ENTRIES) { truncated = true; break }
+    const block = `// #${i + 1}\n${JSON.stringify(entries[i], null, 2)}`
+    const remain = RAW_JSONL_RENDER_MAX_CHARS - used
+    // 字符预算不够放下整块时，截断后收工（剩余空间为 0 就整块丢弃）
+    // When the block does not fit, cut it to the remaining budget and stop (nothing left = drop it)
+    if (block.length > remain) {
+      if (remain > 0) { blocks.push(block.slice(0, remain)); shownCount++ }
+      truncated = true
+      break
+    }
+    // ✨ 核心：拼进渲染窗口并累计已用字符数
+    // ✨ Core: append the block to the window and account for the characters it used
+    blocks.push(block)
+    used += block.length
+    shownCount++
+  }
+  return { text: blocks.join('\n\n'), shownCount, totalCount: entries.length, truncated }
+}
+
+// 原始 JSONL 弹窗的正文 (条目列表): 自订阅快照, 打开弹窗才随数据更新.
+function RawJsonlList({ store }: { store: SessionHistoryStore | null }) {
+  const snapshot = useHistorySnapshotOf(store)
+  const entries = useMemo(
+    () => (store ? store.flattenEntries() : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store, snapshot.rev],
+  )
+  const renderWindow = useMemo(() => buildRawJsonlRenderWindow(entries), [entries])
+  if (entries.length === 0) {
+    return <div className="text-center text-[length:var(--fs-lg)] py-8" style={{ color: 'var(--text-muted)' }}>暂无 JSONL 数据 (会话尚未产生输出)</div>
+  }
+  return (
+    <>
+      <pre className="text-[length:var(--fs-sm)] leading-relaxed p-5 m-0 whitespace-pre font-mono select-text" style={{ color: 'var(--text-secondary)' }}>
+        {renderWindow.text}
+      </pre>
+      {renderWindow.truncated && (
+        <div
+          className="sticky bottom-0 px-5 py-2 text-[length:var(--fs-sm)] border-t"
+          style={{ background: 'var(--modal-bg)', borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}
+        >
+          内容过长, 仅显示前 {renderWindow.shownCount} / {renderWindow.totalCount} 条 — 完整内容请点右上角「下载 JSONL」。
+        </div>
+      )}
+    </>
+  )
+}
+
 
 function debugTailEntry(entry: any): LiveDebugTailEntry {
   const payload = entry?.payload
@@ -163,38 +461,6 @@ declare global {
   interface Window {
     mobiusLiveDebug?: () => LiveDebugSnapshot
   }
-}
-
-// 按 uuid/id 去重合并两个 entries 数组 (骨架/切片与已加载内容可能重叠), 合并后按时间戳归位.
-function mergeJsonlEntriesByIdentity(prev: any[], incoming: any[]): any[] {
-  if (!incoming || incoming.length === 0) return prev
-  const seen = new Set<string>()
-  for (const e of prev) {
-    const k = e?.uuid || e?.id
-    if (k) seen.add(k)
-  }
-  const add = incoming.filter((e: any) => {
-    const k = e?.uuid || e?.id
-    if (!k) return true
-    if (seen.has(k)) return false
-    seen.add(k)
-    return true
-  })
-  if (add.length === 0) return prev
-  const merged = prev.concat(add)
-  // ts 候选位与后端 parseTimestampMs 对齐 (codex 条目在 payload.timestamp);
-  // 无 ts 的条目比较视为相等 (稳定排序保持原位), 绝不落到队首.
-  const ts = (e: any) => {
-    const ms = Date.parse(e?.timestamp || e?.created_at || e?.payload?.timestamp || e?.message?.created_at || '')
-    return Number.isFinite(ms) ? ms : NaN
-  }
-  merged.sort((a: any, b: any) => {
-    const ta = ts(a)
-    const tb = ts(b)
-    if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0
-    return ta - tb
-  })
-  return merged
 }
 
 function clampChatInputRatio(value: number) {
@@ -283,7 +549,7 @@ function SessionTitle({ name, theme }: { name?: string | null; theme: string }) 
   const full = String(name || '')
   return (
     <h2
-      className="min-w-0 flex items-baseline gap-1 font-semibold text-[14px]"
+      className="min-w-0 flex items-baseline gap-1 font-semibold text-[length:var(--fs-lg)]"
       style={{ color: theme !== 'light' ? '#f1f5f9' : '#1e293b' }}
       title={full || undefined}
     >
@@ -439,14 +705,14 @@ function AttachmentChip({ att, theme, onRemove, onPreview }: {
             </div>
           )}
           {att.status === 'error' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-red-500/60 text-white text-[10px] font-semibold" title={att.error}>
+            <div className="absolute inset-0 flex items-center justify-center bg-red-500/60 text-white text-[length:var(--fs-xs)] font-semibold" title={att.error}>
               失败
             </div>
           )}
         </button>
       ) : (
         <div
-          className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 relative text-[9px] font-semibold leading-none"
+          className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 relative text-[length:var(--fs-2xs)] font-semibold leading-none"
           style={{ ...baseStyle, color: isDark ? '#bfdbfe' : '#2563eb' }}>
           <span>{fileLabel}</span>
             {att.status === 'uploading' && (
@@ -458,7 +724,7 @@ function AttachmentChip({ att, theme, onRemove, onPreview }: {
               </div>
             )}
             {att.status === 'error' && (
-              <div className="absolute inset-0 rounded-md flex items-center justify-center bg-red-500/70 text-white text-[8px] font-semibold" title={att.error}>
+              <div className="absolute inset-0 rounded-md flex items-center justify-center bg-red-500/70 text-white text-[length:var(--fs-2xs)] font-semibold" title={att.error}>
                 !
               </div>
             )}
@@ -492,7 +758,7 @@ function AttachmentImagePreviewModal({ preview, onClose }: {
     <div className="fixed inset-0 z-[80] flex flex-col bg-black/80 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={`图片预览 ${preview.name}`}>
       <button className="absolute inset-0 cursor-zoom-out" type="button" aria-label="关闭图片预览" onClick={onClose} />
       <div className="relative z-10 h-12 flex items-center justify-between gap-3 px-4 border-b border-white/10 text-white">
-        <div className="min-w-0 text-[13px] font-medium truncate">{preview.name}</div>
+        <div className="min-w-0 text-[length:var(--fs-lg)] font-medium truncate">{preview.name}</div>
         <button
           type="button"
           onClick={onClose}
@@ -547,8 +813,9 @@ function previewTextOf(entry: SessionInputEntry) {
 
 function formatFeatureTime(value?: string | null) {
   if (!value) return '未知时间'
-  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
-  return formatCstDateTimeShort(value) || value
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
 }
 
 async function copyTextToClipboard(text: string) {
@@ -677,35 +944,35 @@ function SessionInputReplayModal({ sessionId, onPick, onClose }: {
         <div className="px-5 py-3 border-b flex items-center gap-3 flex-shrink-0" style={{ borderColor: 'var(--border-color)' }}>
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <History className="w-4 h-4 text-blue-400 flex-shrink-0" strokeWidth={1.8} />
-            <span className="text-[14px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>回放输入</span>
-            <span className="text-[11px] font-normal flex-shrink-0" style={{ color: 'var(--text-muted)' }}>· {entries.length} 条</span>
+            <span className="text-[length:var(--fs-xl)] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>回放输入</span>
+            <span className="text-[length:var(--fs-sm)] font-normal flex-shrink-0" style={{ color: 'var(--text-muted)' }}>· {entries.length} 条</span>
           </div>
           <button onClick={onClose}
-            className="h-7 px-2.5 text-[11px] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
+            className="h-7 px-2.5 text-[length:var(--fs-sm)] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
             style={{ color: 'var(--text-secondary)' }}>关闭</button>
         </div>
 
         <div className="px-5 py-3 border-b flex-shrink-0" style={{ borderColor: 'var(--border-color)' }}>
           <input value={query} onChange={e => setQuery(e.target.value)}
             placeholder="搜索输入内容"
-            className="w-full h-9 px-3 rounded-lg text-[13px] focus:outline-none focus:border-blue-500/40"
+            className="w-full h-9 px-3 rounded-lg text-[length:var(--fs-lg)] focus:outline-none focus:border-blue-500/40"
             style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} />
-          {copyError && <div className="mt-2 text-[11px] text-red-400">{copyError}</div>}
+          {copyError && <div className="mt-2 text-[length:var(--fs-sm)] text-red-400">{copyError}</div>}
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {loading && (
-            <div className="text-center py-10 text-[13px]" style={{ color: textMuted }}>加载中...</div>
+            <div className="text-center py-10 text-[length:var(--fs-lg)]" style={{ color: textMuted }}>加载中...</div>
           )}
           {!loading && error && (
-            <pre className="text-[12px] text-red-400 whitespace-pre-wrap break-words rounded-lg p-3"
+            <pre className="text-[length:var(--fs-md)] text-red-400 whitespace-pre-wrap break-words rounded-lg p-3"
               style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)' }}>{error}</pre>
           )}
           {!loading && !error && entries.length === 0 && (
-            <div className="text-center py-10 text-[13px]" style={{ color: textMuted }}>暂无可回放输入</div>
+            <div className="text-center py-10 text-[length:var(--fs-lg)]" style={{ color: textMuted }}>暂无可回放输入</div>
           )}
           {!loading && !error && entries.length > 0 && filteredEntries.length === 0 && (
-            <div className="text-center py-10 text-[13px]" style={{ color: textMuted }}>没有匹配的输入</div>
+            <div className="text-center py-10 text-[length:var(--fs-lg)]" style={{ color: textMuted }}>没有匹配的输入</div>
           )}
           {!loading && !error && filteredEntries.length > 0 && (
             <div className="space-y-2">
@@ -720,17 +987,17 @@ function SessionInputReplayModal({ sessionId, onPick, onClose }: {
                     <div className="flex items-start gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 mb-1.5">
-                          <span className="text-[11px] flex-1 min-w-0 truncate" style={{ color: textMuted }}>
+                          <span className="text-[length:var(--fs-sm)] flex-1 min-w-0 truncate" style={{ color: textMuted }}>
                             {entry.created_at ? timeAgo(entry.created_at) : '未知时间'}
                           </span>
                           {entry.turn_number ? (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
+                            <span className="text-[length:var(--fs-xs)] px-1.5 py-0.5 rounded flex-shrink-0"
                               style={{ color: textMuted, background: 'var(--bg-card-hover)' }}>
                               turn {entry.turn_number}
                             </span>
                           ) : null}
                         </div>
-                        <div className="text-[13px] leading-relaxed max-h-36 overflow-y-auto whitespace-pre-wrap break-words select-text pr-1"
+                        <div className="text-[length:var(--fs-lg)] leading-relaxed max-h-36 overflow-y-auto whitespace-pre-wrap break-words select-text pr-1"
                           style={{ color: 'var(--text-primary)' }}>
                           {previewTextOf(entry)}
                         </div>
@@ -783,22 +1050,22 @@ function CompactContextConfirmModal({ onConfirm, onClose }: {
         className="relative w-[360px] max-w-[calc(100vw-32px)] rounded-2xl p-6 shadow-2xl"
         onClick={e => e.stopPropagation()}
         style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
-        <h3 className="text-[15px] font-semibold mb-2" style={{ color: textPrimary }}>压缩上文</h3>
-        <p className="text-[13px] leading-relaxed mb-5" style={{ color: textMuted }}>
+        <h3 className="text-[length:var(--fs-2xl)] font-semibold mb-2" style={{ color: textPrimary }}>压缩上文</h3>
+        <p className="text-[length:var(--fs-lg)] leading-relaxed mb-5" style={{ color: textMuted }}>
           是否继续，将消耗一段时间压缩上文；压缩期间，您可以继续发送后续指令，但响应会延后。期间点击“终止”可以打断压缩。
         </p>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 h-9 rounded-xl text-[13px] bg-[var(--bg-card-hover)] border"
+            className="flex-1 h-9 rounded-xl text-[length:var(--fs-lg)] bg-[var(--bg-card-hover)] border"
             style={{ color: textMuted, borderColor: 'var(--input-border)' }}>
             取消
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className="flex-1 h-9 rounded-xl text-[13px] text-white bg-blue-500 hover:bg-blue-600 transition-colors">
+            className="flex-1 h-9 rounded-xl text-[length:var(--fs-lg)] text-white bg-blue-500 hover:bg-blue-600 transition-colors">
             继续
           </button>
         </div>
@@ -827,7 +1094,7 @@ function diffLineClass(line: string) {
 function GitDiffBlock({ diff }: { diff: string }) {
   const lines = diff ? diff.split('\n') : []
   return (
-    <div className="min-w-max py-1 font-mono text-[11px] leading-[1.45]">
+    <div className="min-w-max py-1 font-mono text-[length:var(--fs-sm)] leading-[1.45]">
       {lines.map((line, index) => (
         <div key={`${index}-${line.slice(0, 24)}`} className={`grid grid-cols-[3.25rem_minmax(0,1fr)] ${diffLineClass(line)}`}>
           <span className="code-diff-line-number select-none border-r border-[var(--border-color)]/50 px-2 text-right">
@@ -921,44 +1188,44 @@ function SessionFileChangesModal({ sessionId, onClose }: {
         <div className="flex flex-shrink-0 items-center gap-3 border-b px-5 py-3" style={{ borderColor: 'var(--border-color)' }}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <FileDiff className="h-4 w-4 flex-shrink-0 text-blue-400" strokeWidth={1.8} />
-            <span className="truncate text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>文件修改清单</span>
-            <span className="flex-shrink-0 text-[11px]" style={{ color: 'var(--text-muted)' }}>· {files.length} 个文件</span>
+            <span className="truncate text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>文件修改清单</span>
+            <span className="flex-shrink-0 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>· {files.length} 个文件</span>
           </div>
           <button
             type="button"
             onClick={() => void loadFiles()}
             disabled={loading}
             title="重新扫描"
-            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border-color-strong)] px-2.5 text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40"
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border-color-strong)] px-2.5 text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40"
             style={{ color: 'var(--text-secondary)' }}>
             {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitCompare className="h-3.5 w-3.5" />}
             重新扫描
           </button>
           <button onClick={onClose}
-            className="h-7 px-2.5 text-[11px] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
+            className="h-7 px-2.5 text-[length:var(--fs-sm)] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
             style={{ color: 'var(--text-secondary)' }}>关闭</button>
         </div>
 
         {(error || workspaceError) && (
-          <div className="mx-5 mt-3 rounded-lg border px-3 py-2 text-[12px] text-red-300 bg-red-500/10 border-red-500/25">
+          <div className="mx-5 mt-3 rounded-lg border px-3 py-2 text-[length:var(--fs-md)] text-red-300 bg-red-500/10 border-red-500/25">
             {error || workspaceError}
           </div>
         )}
 
         <div className="flex min-h-0 flex-1">
           <div className="flex w-[34%] min-w-[260px] flex-col border-r" style={{ borderColor: 'var(--border-color)' }}>
-            <div className="border-b px-4 py-2 text-[11px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
+            <div className="border-b px-4 py-2 text-[length:var(--fs-sm)]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
               修改文件来自 session JSONL 特征，右侧 diff 来自当前 Git 仓库。
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-3">
               {loading && (
-                <div className="flex items-center justify-center gap-2 py-10 text-[13px]" style={{ color: 'var(--text-muted)' }}>
+                <div className="flex items-center justify-center gap-2 py-10 text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>
                   <Loader2 className="h-4 w-4 animate-spin" />
                   扫描中...
                 </div>
               )}
               {!loading && files.length === 0 && !error && (
-                <div className="py-10 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>暂无文件修改记录</div>
+                <div className="py-10 text-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>暂无文件修改记录</div>
               )}
               {!loading && files.length > 0 && (
                 <div className="space-y-1">
@@ -971,14 +1238,14 @@ function SessionFileChangesModal({ sessionId, onClose }: {
                         onClick={() => setSelectedPath(file.path)}
                         className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${active ? 'border-blue-500/35 bg-blue-500/10' : 'border-transparent hover:bg-[var(--bg-card-hover)]'}`}>
                         <div className="flex min-w-0 items-center gap-2">
-                          <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={file.display_path} style={{ color: 'var(--text-primary)' }}>
+                          <span className="min-w-0 flex-1 truncate font-mono text-[length:var(--fs-md)]" title={file.display_path} style={{ color: 'var(--text-primary)' }}>
                             {file.display_path}
                           </span>
-                          <span className="flex-shrink-0 rounded px-1.5 py-0.5 text-[10px]" style={{ color: 'var(--text-muted)', background: 'var(--bg-card-hover)' }}>
+                          <span className="flex-shrink-0 rounded px-1.5 py-0.5 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)', background: 'var(--bg-card-hover)' }}>
                             {file.count}
                           </span>
                         </div>
-                        <div className="mt-1 truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                        <div className="mt-1 truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
                           {formatFeatureTime(file.last_timestamp)}
                         </div>
                       </button>
@@ -992,39 +1259,39 @@ function SessionFileChangesModal({ sessionId, onClose }: {
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-auto">
               {!selectedFile && !loading && (
-                <div className="py-16 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>请选择一个文件</div>
+                <div className="py-16 text-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>请选择一个文件</div>
               )}
               {selectedFile && (
                 <div className="min-w-0">
                   <div className="sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b px-4 py-2"
                     style={{ background: 'var(--modal-bg)', borderColor: 'var(--border-color)' }}>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={selectedFile.display_path} style={{ color: 'var(--text-primary)' }}>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[length:var(--fs-md)]" title={selectedFile.display_path} style={{ color: 'var(--text-primary)' }}>
                       {selectedFile.display_path}
                     </span>
                     {!diffLoading && diff?.mode && (
-                      <span className="flex-shrink-0 rounded-md border border-blue-500/25 bg-blue-500/10 px-2 py-0.5 text-[11px] text-blue-300">
+                      <span className="flex-shrink-0 rounded-md border border-blue-500/25 bg-blue-500/10 px-2 py-0.5 text-[length:var(--fs-sm)] text-blue-300">
                         {DIFF_MODE_LABELS[diff.mode]}
                       </span>
                     )}
                     {!diffLoading && diff && !diff.diff && diff.fallback_content !== undefined && (
-                      <span className="flex-shrink-0 rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+                      <span className="flex-shrink-0 rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[length:var(--fs-sm)] text-amber-300">
                         文件内容
                       </span>
                     )}
                     {diffLoading && <Loader2 className="h-4 w-4 animate-spin text-blue-400" />}
                   </div>
                   {diffError && (
-                    <pre className="m-4 whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-[12px] text-red-300">{diffError}</pre>
+                    <pre className="m-4 whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-[length:var(--fs-md)] text-red-300">{diffError}</pre>
                   )}
                   {!diffLoading && !diffError && diff && !diff.diff && diff.fallback_content !== undefined && (
                     <div className="overflow-auto">
-                      <pre className="min-w-max whitespace-pre p-4 font-mono text-[11px] leading-[1.5]" style={{ color: 'var(--text-secondary)' }}>
+                      <pre className="min-w-max whitespace-pre p-4 font-mono text-[length:var(--fs-sm)] leading-[1.5]" style={{ color: 'var(--text-secondary)' }}>
                         {diff.fallback_content || ' '}
                       </pre>
                     </div>
                   )}
                   {!diffLoading && !diffError && (!diff || (!diff.diff && diff.fallback_content === undefined)) && (
-                    <div className="py-16 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>没有可显示的 diff 或文件内容</div>
+                    <div className="py-16 text-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>没有可显示的 diff 或文件内容</div>
                   )}
                   {!diffError && diff?.diff && diff.diff.trim() !== '' && (
                     <div className="overflow-auto">
@@ -1103,20 +1370,20 @@ function SessionBashCommandsModal({ sessionId, onClose }: {
         <div className="flex flex-shrink-0 items-center gap-3 border-b px-5 py-3" style={{ borderColor: 'var(--border-color)' }}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <Terminal className="h-4 w-4 flex-shrink-0 text-emerald-400" strokeWidth={1.8} />
-            <span className="truncate text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>会话 Bash 命令</span>
-            <span className="flex-shrink-0 text-[11px]" style={{ color: 'var(--text-muted)' }}>· {commands.length} 条</span>
+            <span className="truncate text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>会话 Bash 命令</span>
+            <span className="flex-shrink-0 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>· {commands.length} 条</span>
           </div>
           <button
             type="button"
             onClick={() => void loadCommands()}
             disabled={loading}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border-color-strong)] px-2.5 text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40"
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border-color-strong)] px-2.5 text-[length:var(--fs-sm)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40"
             style={{ color: 'var(--text-secondary)' }}>
             {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitCompare className="h-3.5 w-3.5" />}
             重新扫描
           </button>
           <button onClick={onClose}
-            className="h-7 px-2.5 text-[11px] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
+            className="h-7 px-2.5 text-[length:var(--fs-sm)] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
             style={{ color: 'var(--text-secondary)' }}>关闭</button>
         </div>
 
@@ -1125,26 +1392,26 @@ function SessionBashCommandsModal({ sessionId, onClose }: {
             value={query}
             onChange={e => setQuery(e.target.value)}
             placeholder="搜索命令、描述或工作目录"
-            className="h-9 w-full rounded-lg px-3 text-[13px] focus:outline-none focus:border-blue-500/40"
+            className="h-9 w-full rounded-lg px-3 text-[length:var(--fs-lg)] focus:outline-none focus:border-blue-500/40"
             style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
           />
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {loading && (
-            <div className="flex items-center justify-center gap-2 py-10 text-[13px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="flex items-center justify-center gap-2 py-10 text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>
               <Loader2 className="h-4 w-4 animate-spin" />
               扫描中...
             </div>
           )}
           {!loading && error && (
-            <pre className="whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-[12px] text-red-300">{error}</pre>
+            <pre className="whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-[length:var(--fs-md)] text-red-300">{error}</pre>
           )}
           {!loading && !error && commands.length === 0 && (
-            <div className="py-10 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>暂无 Bash 命令记录</div>
+            <div className="py-10 text-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>暂无 Bash 命令记录</div>
           )}
           {!loading && !error && commands.length > 0 && filtered.length === 0 && (
-            <div className="py-10 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>没有匹配的命令</div>
+            <div className="py-10 text-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>没有匹配的命令</div>
           )}
           {!loading && !error && filtered.length > 0 && (
             <div className="space-y-3">
@@ -1154,16 +1421,16 @@ function SessionBashCommandsModal({ sessionId, onClose }: {
                   <div key={command.id || index} className="rounded-xl border p-3.5" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
                     <div className="mb-2 flex min-w-0 items-start gap-3">
                       <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        <div className="flex flex-wrap items-center gap-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                           <span>{formatFeatureTime(command.timestamp)}</span>
                           {command.timestamp && <span>· {timeAgo(command.timestamp)}</span>}
                           {command.source && <span className="rounded px-1.5 py-0.5" style={{ background: 'var(--bg-card-hover)' }}>{command.source}</span>}
                         </div>
                         {command.description && (
-                          <div className="mt-1 text-[12px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>{command.description}</div>
+                          <div className="mt-1 text-[length:var(--fs-md)] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>{command.description}</div>
                         )}
                         {command.cwd && (
-                          <div className="mt-1 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }}>{command.cwd}</div>
+                          <div className="mt-1 truncate font-mono text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>{command.cwd}</div>
                         )}
                       </div>
                       <button
@@ -1176,7 +1443,7 @@ function SessionBashCommandsModal({ sessionId, onClose }: {
                         {copied ? <Check className="h-3.5 w-3.5" strokeWidth={2} /> : <Copy className="h-3.5 w-3.5" strokeWidth={1.9} />}
                       </button>
                     </div>
-                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg px-3 py-2 font-mono text-[11px] leading-relaxed"
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg px-3 py-2 font-mono text-[length:var(--fs-sm)] leading-relaxed"
                       style={{ background: 'var(--prose-bg)', border: '1px solid var(--border-color)', color: 'var(--text-primary)' }}>
                       {command.command}
                     </pre>
@@ -1191,148 +1458,9 @@ function SessionBashCommandsModal({ sessionId, onClose }: {
   )
 }
 
-// 读取并展示当前 Claude Code 会话所属项目目录下的活跃定时任务 (durable scheduled tasks).
-// 数据来自后端 /api/sessions/:id/features/scheduled-tasks (读 <bind_path>/.claude/scheduled_tasks.json + .lock).
-function SessionScheduledTasksModal({ sessionId, onClose }: {
-  sessionId: string
-  onClose: () => void
-}) {
-  const [data, setData] = useState<any>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError('')
-    try {
-      const d = await api(`/api/sessions/${sessionId}/features/scheduled-tasks`)
-      setData(d)
-    } catch (e: any) {
-      setError(e?.message || '读取定时任务失败')
-      setData(null)
-    } finally {
-      setLoading(false)
-    }
-  }, [sessionId])
-
-  useEffect(() => { void load() }, [load])
-
-  const tasks: any[] = Array.isArray(data?.tasks) ? data.tasks : []
-  const sessionTasks: any[] = Array.isArray(data?.session_tasks) ? data.session_tasks : []
-  const lock = data?.lock || null
-  const schedulerAlive = !!data?.scheduler_alive
-  const available = data?.available !== false
-
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative flex h-[80vh] w-[min(860px,94vw)] flex-col overflow-hidden rounded-2xl shadow-2xl"
-        onClick={e => e.stopPropagation()}
-        style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
-        <div className="flex flex-shrink-0 items-center gap-3 border-b px-5 py-3" style={{ borderColor: 'var(--border-color)' }}>
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            <Clock className="h-4 w-4 flex-shrink-0 text-amber-400" strokeWidth={1.8} />
-            <span className="truncate text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>定时任务</span>
-            <span className="flex-shrink-0 text-[11px]" style={{ color: 'var(--text-muted)' }}>· {tasks.length + sessionTasks.length} 个</span>
-          </div>
-          <button type="button" onClick={() => void load()} disabled={loading}
-            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border-color-strong)] px-2.5 text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-40"
-            style={{ color: 'var(--text-secondary)' }}>
-            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            刷新
-          </button>
-          <button onClick={onClose}
-            className="h-7 px-2.5 text-[11px] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
-            style={{ color: 'var(--text-secondary)' }}>关闭</button>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {loading && (
-            <div className="flex items-center justify-center gap-2 py-10 text-[13px]" style={{ color: 'var(--text-muted)' }}>
-              <Loader2 className="h-4 w-4 animate-spin" /> 读取中...
-            </div>
-          )}
-          {!loading && error && (
-            <pre className="whitespace-pre-wrap break-words rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-[12px] text-red-300">{error}</pre>
-          )}
-          {!loading && !error && !available && (
-            <div className="py-10 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>当前会话所属项目未绑定路径 (bind_path), 无法读取定时任务</div>
-          )}
-          {!loading && !error && available && (
-            <>
-              <div className="mb-3 rounded-xl border px-3.5 py-3 text-[12px]" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}>
-                <div className="flex items-center gap-2" style={{ color: 'var(--text-secondary)' }}>
-                  <span className="inline-block h-2 w-2 flex-shrink-0 rounded-full" style={{ background: lock ? (schedulerAlive ? '#22c55e' : '#fbbf24') : '#6b7280' }} />
-                  <span>
-                    {lock
-                      ? (schedulerAlive ? '调度器运行中' : '锁文件存在但持锁进程未运行 (任务休眠, 下个 Claude Code 会话接管后恢复)')
-                      : '无活跃调度器 (当前没有 Claude Code 会话在此项目持锁)'}
-                  </span>
-                </div>
-                {lock && (
-                  <div className="mt-1.5 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    持锁 session: {lock.sessionId || '-'} · pid: {lock.pid || '-'}{lock.acquiredAt ? ` · 接管于 ${formatFeatureTime(lock.acquiredAt)}` : ''}
-                  </div>
-                )}
-                {data?.root && (
-                  <div className="mt-1 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }} title={String(data.root)}>
-                    读取目录{data?.worktree ? ' (worktree)' : ''}: {String(data.root)}
-                  </div>
-                )}
-                <div className="mt-1.5 text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-                  durable 任务持久化在 <code className="font-mono">.claude/scheduled_tasks.json</code>, 由持锁会话触发 (创建者 ≠ 触发者)。session-only 任务 (durable:false) 只存在于本会话内存、Claude 退出即消失, 从会话转录重建, 下方以「仅本会话」标记列出。
-                </div>
-              </div>
-
-              {tasks.length === 0 && sessionTasks.length === 0 ? (
-                <div className="py-10 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>暂无活跃定时任务</div>
-              ) : (
-                <div className="space-y-3">
-                  {[...tasks.map((t: any) => ({ t, sessionOnly: false })), ...sessionTasks.map((t: any) => ({ t, sessionOnly: true }))].map(({ t, sessionOnly }, i: number) => {
-                    const created = t.createdAt ? formatFeatureTime(t.createdAt) : '-'
-                    const recurring = t.recurring === true
-                    const permanent = t.permanent === true
-                    const promptStr = typeof t.prompt === 'string' ? t.prompt : ''
-                    return (
-                      <div key={(t.id || '') + '-' + i} className="rounded-xl border p-3.5" style={{ background: 'var(--bg-primary)', borderColor: sessionOnly ? 'rgba(251,191,36,0.35)' : 'var(--border-color)' }}>
-                        <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                          <span className="rounded px-1.5 py-0.5 font-mono" style={{ background: 'var(--bg-card-hover)', color: 'var(--text-primary)' }}>{t.id || '?'}</span>
-                          <span className="font-mono" style={{ color: 'var(--text-secondary)' }}>{t.cron || '-'}</span>
-                          {sessionOnly
-                            ? <span className="rounded px-1.5 py-0.5" style={{ background: 'rgba(251,191,36,0.12)', color: '#fbbf24' }}>仅本会话</span>
-                            : <span className="rounded px-1.5 py-0.5" style={{ background: 'rgba(96,165,250,0.12)', color: '#60a5fa' }}>durable</span>}
-                          {recurring
-                            ? <span className="rounded px-1.5 py-0.5" style={{ background: 'var(--bg-card-hover)' }}>循环</span>
-                            : <span className="rounded px-1.5 py-0.5" style={{ background: 'var(--bg-card-hover)' }}>一次性</span>}
-                          {permanent && <span className="rounded px-1.5 py-0.5" style={{ background: 'rgba(34,197,94,0.12)', color: '#22c55e' }}>永久</span>}
-                          {!sessionOnly && created !== '-' && <span>· 创建于 {created}</span>}
-                          {t.lastFiredAt && <span>· 上次触发 {formatFeatureTime(t.lastFiredAt)}</span>}
-                        </div>
-                        {promptStr && (
-                          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg px-3 py-2 font-mono text-[11px] leading-relaxed"
-                            style={{ background: 'var(--prose-bg)', border: '1px solid var(--border-color)', color: 'var(--text-primary)' }}>
-                            {promptStr}
-                          </pre>
-                        )}
-                        {sessionOnly
-                          ? <div className="mt-1.5 text-[10px]" style={{ color: 'var(--text-muted)' }}>session-only: 只存在于本会话内存, Claude 退出即消失</div>
-                          : (t.createdBySessionId && <div className="mt-1.5 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }}>创建 session: {t.createdBySessionId}{t.createdByPid ? ` · pid ${t.createdByPid}` : ''}</div>)}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // =====================================================================
 // HeaderActionButton — 顶栏操作按钮统一元件.
-// 尺寸/圆角/字号与 SessionStatusChip 严格对齐 (text-[11px] + py-0.5 + rounded-full),
+// 尺寸/圆角/字号与 SessionStatusChip 严格对齐 (text-[length:var(--fs-sm)] + py-0.5 + rounded-full),
 // 让 终止 / 新会话 / 打开应用 / 更多 等不再比 [执行中] 状态 chip 高出一截.
 // tone 复刻各按钮原有的语义色; iconOnly 用于纯图标按钮 (如 [...] 菜单触发器).
 // =====================================================================
@@ -1343,7 +1471,9 @@ const HEADER_ACTION_TONE_CLASS: Record<HeaderActionTone, string> = {
   emerald: 'border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/10',
   violet:  'border-violet-500/25 text-violet-400 hover:bg-violet-500/10',
   blue:    'border-blue-500/20 text-blue-400 hover:bg-blue-500/10',
-  neutral: 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--bg-card-hover)]',
+  // neutral 仅用于顶栏「…」按钮: 去描边只留底色, 底色与悬停见 index.css .session-more-button
+  // neutral is used only by the header "…" button: borderless fill, colors live in .session-more-button
+  neutral: 'text-[var(--text-secondary)]',
 }
 
 type HeaderActionButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className'> & {
@@ -1365,7 +1495,7 @@ function HeaderActionButton({
     <button
       type="button"
       className={[
-        'text-[11px] rounded-full border inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed',
+        'text-[length:var(--fs-sm)] rounded-full border inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed',
         iconOnly ? 'h-[22px] w-[22px] p-0' : 'px-2.5 py-0.5',
         HEADER_ACTION_TONE_CLASS[tone],
         className,
@@ -1383,16 +1513,12 @@ function HeaderActionButton({
 // (原始数据 / 隐藏次要 / 显示时间与序号)
 // =====================================================================
 function ChatHeaderOverflowMenu({
-  jsonlCount, minorCount, hideMinor, onToggleHideMinor, onOpenRaw,
+  jsonlCount, onOpenRaw,
   showJsonlMeta, onToggleShowJsonlMeta,
   autoUrgentOnEnter, onToggleAutoUrgentOnEnter,
   onStop, canStop,
-  onViewScheduledTasks,
 }: {
   jsonlCount: number
-  minorCount: number
-  hideMinor: boolean
-  onToggleHideMinor: () => void
   onOpenRaw: () => void
   showJsonlMeta: boolean
   onToggleShowJsonlMeta: () => void
@@ -1400,7 +1526,6 @@ function ChatHeaderOverflowMenu({
   onToggleAutoUrgentOnEnter: () => void
   onStop: () => void
   canStop: boolean
-  onViewScheduledTasks: () => void
 }) {
   const [open, setOpen] = useState(false)
   useEffect(() => {
@@ -1411,14 +1536,18 @@ function ChatHeaderOverflowMenu({
   }, [open])
   // 统一到顶栏「新建」下拉风格 (global-create): py-1.5 / hover var(--bg-hover) / gap-2.
   // 保留 justify-between — 本菜单项含右侧计数徽标需两端对齐.
-  const itemClass = "w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center justify-between gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+  const itemClass = "w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center justify-between gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
   return (
     <div className="relative">
+      {/* 去描边只留底色; iconOnly 已是固定 22x22, 去掉边框不影响尺寸.
+          Borderless fill only; the iconOnly box is a fixed 22x22 so dropping the border costs no size. */}
       <HeaderActionButton
         tone="neutral"
         iconOnly
         title="更多操作"
         onClick={(e) => { e.stopPropagation(); setOpen(v => !v) }}
+        style={{ borderWidth: 0 }}
+        className="session-more-button"
         icon={<MoreHorizontal className="w-4 h-4" strokeWidth={1.75} />}
       />
       {open && (
@@ -1439,21 +1568,12 @@ function ChatHeaderOverflowMenu({
           <button className={itemClass} disabled={jsonlCount === 0}
             onClick={() => { setOpen(false); onOpenRaw() }}>
             <span>原始 JSONL 数据</span>
-            {jsonlCount > 0 && <span className="text-[10px] text-[var(--text-muted)]">{jsonlCount}</span>}
-          </button>
-          <button className={itemClass} disabled={jsonlCount === 0}
-            onClick={() => { setOpen(false); onToggleHideMinor() }}>
-            <span>{hideMinor ? '显示次要条目' : '隐藏次要条目'}</span>
-            {minorCount > 0 && <span className="text-[10px] text-[var(--text-muted)]">{minorCount}</span>}
+            {jsonlCount > 0 && <span className="text-[length:var(--fs-xs)] text-[var(--text-muted)]">{jsonlCount}</span>}
           </button>
           <button className={itemClass}
             onClick={() => { setOpen(false); onToggleAutoUrgentOnEnter() }}>
             <span>{autoUrgentOnEnter ? '关闭回车自动加急' : '启动回车自动加急'}</span>
-            {autoUrgentOnEnter && <span className="text-[10px]" style={{ color: '#fbbf24' }}>已开启</span>}
-          </button>
-          <button className={itemClass}
-            onClick={() => { setOpen(false); onViewScheduledTasks() }}>
-            <span>查看定时任务</span>
+            {autoUrgentOnEnter && <span className="text-[length:var(--fs-xs)]" style={{ color: '#fbbf24' }}>已开启</span>}
           </button>
           <button className={itemClass} disabled={jsonlCount === 0}
             onClick={() => { setOpen(false); onToggleShowJsonlMeta() }}>
@@ -1495,7 +1615,7 @@ export function MessageBubble({
   }
 
   if (m.role === 'system') return (
-    <div className="msg-enter flex justify-center"><span className={`text-[11px] px-3 py-1 rounded-full border ${isDark ? 'text-gray-400 bg-white/[0.03] border-white/[0.05]' : 'text-gray-500 bg-black/[0.02] border-black/[0.06]'}`}>{m.content}</span></div>
+    <div className="msg-enter flex justify-center"><span className={`text-[length:var(--fs-sm)] px-3 py-1 rounded-full border ${isDark ? 'text-gray-400 bg-white/[0.03] border-white/[0.05]' : 'text-gray-500 bg-black/[0.02] border-black/[0.06]'}`}>{m.content}</span></div>
   )
   // v2 兜底: 未知 SDK 事件(raw role). 不像 Claude 气泡, 折成一行紫色小标. 默认折叠.
   if (m.role === 'raw') {
@@ -1505,12 +1625,12 @@ export function MessageBubble({
     return (
       <div className="msg-enter flex justify-center">
         <details className="group max-w-[78%]">
-          <summary className="text-[11px] px-3 py-1 rounded-full border cursor-pointer flex items-center gap-1.5"
+          <summary className="text-[length:var(--fs-sm)] px-3 py-1 rounded-full border cursor-pointer flex items-center gap-1.5"
             style={{ color: '#a78bfa', background: 'rgba(167,139,250,0.08)', borderColor: 'rgba(167,139,250,0.25)' }}>
             <svg className="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
             🔬 SDK 事件 · {sdkType}
           </summary>
-          <pre className="mt-1.5 px-3 py-2 rounded-lg text-[10px] font-mono overflow-x-auto max-h-48 leading-snug"
+          <pre className="mt-1.5 px-3 py-2 rounded-lg text-[length:var(--fs-xs)] font-mono overflow-x-auto max-h-48 leading-snug"
             style={{ background: 'var(--prose-bg)', border: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}>
             {m.raw_event || m.content}
           </pre>
@@ -1539,23 +1659,23 @@ export function MessageBubble({
   if (m.role === 'thinking') return (
     <div className="msg-enter ml-11">
       <details className="group">
-        <summary className="text-[11px] text-indigo-400/60 cursor-pointer hover:text-indigo-400/80 flex items-center gap-1">
+        <summary className="text-[length:var(--fs-sm)] text-indigo-400/60 cursor-pointer hover:text-indigo-400/80 flex items-center gap-1">
           <svg className="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
           思考过程
         </summary>
-        <div className={`border-l-2 border-indigo-500/20 rounded-r-lg px-4 py-2 mt-1 text-[12px] italic max-h-40 overflow-y-auto ${isDark ? 'bg-[#0d1117] text-gray-500' : 'bg-gray-100 text-gray-500'}`}>{m.content?.slice(0, 500)}</div>
+        <div className={`border-l-2 border-indigo-500/20 rounded-r-lg px-4 py-2 mt-1 text-[length:var(--fs-md)] italic max-h-40 overflow-y-auto ${isDark ? 'bg-[#0d1117] text-gray-500' : 'bg-gray-100 text-gray-500'}`}>{m.content?.slice(0, 500)}</div>
       </details>
     </div>
   )
   if (m.role === 'tool') return (
     <div className="msg-enter ml-11 group/tool relative">
       <details className={`rounded-2xl overflow-hidden group ${isDark ? 'bg-white/[0.015] border border-white/[0.04]' : 'bg-gray-50 border border-black/[0.06]'}`}>
-        <summary className={`px-3 py-1.5 cursor-pointer text-[12px] flex items-center gap-1.5 transition-colors ${isDark ? 'text-gray-500 hover:text-gray-400 hover:bg-white/[0.02]' : 'text-gray-500 hover:text-gray-600 hover:bg-black/[0.02]'}`}>
+        <summary className={`px-3 py-1.5 cursor-pointer text-[length:var(--fs-md)] flex items-center gap-1.5 transition-colors ${isDark ? 'text-gray-500 hover:text-gray-400 hover:bg-white/[0.02]' : 'text-gray-500 hover:text-gray-600 hover:bg-black/[0.02]'}`}>
           <svg className="w-3 h-3 transition-transform group-open:rotate-90 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
           <Wrench className="w-3 h-3 flex-shrink-0" strokeWidth={1.75} />
           <span className="truncate">{m.tool_summary || '工具调用'}</span>
         </summary>
-        <pre className={`px-3 py-2 text-[10px] overflow-x-auto font-mono max-h-48 ${isDark ? 'text-gray-600 border-t border-white/[0.03] bg-[#0a0e14]' : 'text-gray-500 border-t border-black/[0.04] bg-gray-100'}`}>{m.content?.slice(0, 2000)}</pre>
+        <pre className={`px-3 py-2 text-[length:var(--fs-xs)] overflow-x-auto font-mono max-h-48 ${isDark ? 'text-gray-600 border-t border-white/[0.03] bg-[#0a0e14]' : 'text-gray-500 border-t border-black/[0.04] bg-gray-100'}`}>{m.content?.slice(0, 2000)}</pre>
       </details>
       <div className="absolute -right-10 top-0 opacity-0 group-hover/tool:opacity-100 transition-opacity">
         <ActionButton icon={copied
@@ -1572,9 +1692,8 @@ export function MessageBubble({
   const sessionMentions = isUser && Array.isArray(m.session_mentions) ? m.session_mentions : []
   const formatMentionContextTime = (value: any) => {
     if (!value) return ''
-    // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
-    const formatted = formatCstDateTimeShort(value)
-    return formatted || String(value)
+    const date = new Date(value)
+    return Number.isFinite(date.getTime()) ? date.toLocaleString() : String(value)
   }
   // ChatGPT 风格: 用户用中性灰色 pill 气泡, assistant 完全无气泡 (纯文本流).
   // 气泡四角对称, 不再有指向头像的"尾巴"那一边变小的 rounded-tr-md / rounded-tl-md.
@@ -1584,17 +1703,14 @@ export function MessageBubble({
 
   const renderContent = () => {
     const content = m.content || ''
-    // 🔒 密文占位符 (后端 secret-guard 加密的密码/密钥): 用户气泡内联渲染 🔒徽标,
-    // 点击可按需 reveal 原文 (仅本人消息, 后端校验); 助手侧一般只出现在引用中, 同样徽标化。
-    const secretNodes = renderWithSecretChips(content, m.id)
     const quoteMatch = content.match(/^((?:> .*\n?)+)\n(.+)/s)
     if (quoteMatch && !isUser) {
       const quoted = quoteMatch[1].replace(/^> /gm, '')
       const rest = quoteMatch[2]
       return (
         <>
-          <div className="border-l-2 border-[var(--text-dimmed)] pl-3 mb-2 text-[12px] italic line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{quoted}</div>
-          <div className="prose-chat"><ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}>{rest}</ReactMarkdown></div>
+          <div className="border-l-2 border-[var(--text-dimmed)] pl-3 mb-2 text-[length:var(--fs-md)] italic line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{quoted}</div>
+          <div className="prose-chat"><ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>{rest}</ReactMarkdown></div>
         </>
       )
     }
@@ -1604,18 +1720,15 @@ export function MessageBubble({
         const rest = quoteMatch[2]
         return (
           <>
-            <div className="border-l-2 pl-3 mb-2 text-[12px] italic line-clamp-2"
+            <div className="border-l-2 pl-3 mb-2 text-[length:var(--fs-md)] italic line-clamp-2"
               style={{ borderColor: isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)', color: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)' }}>{quoted}</div>
-            <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{secretNodes ?? rest}</p>
+            <p className="text-[length:var(--fs-2xl)] leading-[1.55] whitespace-pre-wrap">{rest}</p>
           </>
         )
       }
-      return <p className="text-[15px] leading-[1.55] whitespace-pre-wrap">{secretNodes ?? <MessageContentWithAttachments content={content} />}</p>
+      return <p className="text-[length:var(--fs-2xl)] leading-[1.55] whitespace-pre-wrap">{content}</p>
     }
-    if (secretNodes) {
-      return <div className="prose-chat"><p className="whitespace-pre-wrap">{secretNodes}</p></div>
-    }
-    return <div className="prose-chat"><ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}>{content}</ReactMarkdown></div>
+    return <div className="prose-chat"><ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>{content}</ReactMarkdown></div>
   }
 
   return (
@@ -1646,7 +1759,7 @@ export function MessageBubble({
           </div>
         )}
         {sessionMentions.length > 0 && (
-          <div className="mb-2 space-y-1 border-b pb-2 text-[10px] leading-relaxed"
+          <div className="mb-2 space-y-1 border-b pb-2 text-[length:var(--fs-xs)] leading-relaxed"
             style={{ borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)', color: isDark ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.58)' }}>
             {sessionMentions.map((mention: any) => (
               <div key={`${mention.session_id}:${mention.mode || 'read_only'}`} className="min-w-0">
@@ -1730,6 +1843,7 @@ export function SessionRow({ session, isSelected, onSelect, onEdit, onDelete, pi
   return (
     <div onClick={() => onSelect(session)}
       data-tour={dataTour}
+      data-flip-key={session.session_id}
       className={`group flex h-[54px] items-center gap-1.5 overflow-hidden px-2 py-1.5 rounded-lg cursor-pointer mb-0.5 transition-colors ${
         isSelected ? 'bg-blue-500/10 border border-blue-500/20' : 'hover:bg-[var(--bg-card-hover)] border border-transparent'
       } ${nameMuted ? 'opacity-75' : ''}`}>
@@ -1737,13 +1851,13 @@ export function SessionRow({ session, isSelected, onSelect, onEdit, onDelete, pi
         <AgentStatusDot agentStatus={session.agent_status} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <div className="text-[11px] font-medium leading-[13px] truncate" title={session.name} style={{ color: nameMuted ? textMuted : textPrimary }}>{session.name}</div>
-        <div className="text-[10px] leading-[12px] mt-0.5 truncate" style={{ color: textMuted }}>{[`${session.message_count} 消息`, timeAgo(session.last_active), modelLabel].filter(Boolean).join(' · ')}</div>
+        <div className="text-[length:var(--fs-sm)] font-medium leading-[13px] truncate" title={session.name} style={{ color: nameMuted ? textMuted : textPrimary }}>{session.name}</div>
+        <div className="text-[length:var(--fs-xs)] leading-[12px] mt-0.5 truncate" style={{ color: textMuted }}>{[`${session.message_count} 消息`, timeAgo(session.last_active), modelLabel].filter(Boolean).join(' · ')}</div>
       </div>
       <div className={`relative h-6 w-0 flex-shrink-0 overflow-hidden transition-[width] duration-150 ${actionWidthClass}`}>
         <div className="absolute inset-0 flex items-center justify-end gap-1 overflow-hidden opacity-100 transition-opacity group-hover:opacity-0">
           {session.research_role && (
-            <span className="flex-shrink-0 rounded px-1.5 py-[1px] text-[9px] leading-4 border"
+            <span className="flex-shrink-0 rounded px-1.5 py-[1px] text-[length:var(--fs-2xs)] leading-4 border"
               title={`研究角色: ${session.research_role}`}
               style={{
                 color: session.research_role === 'chief_researcher' ? '#34d399' : '#a78bfa',
@@ -1770,697 +1884,6 @@ export function SessionRow({ session, isSelected, onSelect, onEdit, onDelete, pi
   )
 }
 
-type RemoteFileSource = {
-  name: string
-  status: string
-  remote_path: string
-  hostname?: string
-  hardware?: string
-}
-
-type MentionFileSource = {
-  key: string
-  kind: 'hub' | 'local' | 'remote'
-  name: string
-  status?: string
-  remote_path?: string
-}
-
-export type AgentMentionMode = 'read_only' | 'bidirectional'
-
-export type MentionAgentSession = {
-  session_id: string
-  name: string
-  description?: string
-  model?: string
-  model_label?: string
-  backend?: string
-  agent_status?: string
-  research_role?: string | null
-  scope_type?: 'issue' | 'research'
-  last_active?: string
-  message_count?: number
-  project_id?: string | null
-  project_name?: string
-  issue_id?: string | null
-  issue_title?: string
-  research_id?: string | null
-  research_title?: string
-  group?: 'same_scope' | 'same_project' | 'other_project'
-  can_communicate?: boolean
-}
-
-type ChatDesktopFileBridge = {
-  isDesktop?: boolean
-  listProjectLocalFiles?: (projectId: string, path: string) => Promise<{
-    ok?: boolean
-    error?: string
-    bind_path?: string
-    entries?: Entry[]
-  }>
-}
-
-function getChatDesktopFileBridge(): ChatDesktopFileBridge | undefined {
-  if (typeof window === 'undefined') return undefined
-  return (window as { mobiusDesktop?: ChatDesktopFileBridge }).mobiusDesktop
-}
-
-export function RemoteFileMentionDrawer({
-  projectId,
-  issueId,
-  researchId,
-  currentSessionId,
-  open,
-  onClose,
-  onPickPath,
-  onPickAgent,
-}: {
-  projectId: string
-  issueId?: string
-  researchId?: string
-  currentSessionId?: string
-  open: boolean
-  onClose: () => void
-  onPickPath: (path: string) => void
-  onPickAgent?: (agent: MentionAgentSession, mode: AgentMentionMode) => void
-}) {
-  const [activeTab, setActiveTab] = useState<'files' | 'agents'>(issueId || researchId ? 'agents' : 'files')
-  const [sources, setSources] = useState<RemoteFileSource[]>([])
-  const [selectedSourceKey, setSelectedSourceKey] = useState('hub')
-  const [sourcesLoading, setSourcesLoading] = useState(false)
-  const [sourcesError, setSourcesError] = useState('')
-  const [agentSessions, setAgentSessions] = useState<MentionAgentSession[]>([])
-  const [agentLoading, setAgentLoading] = useState(false)
-  const [agentError, setAgentError] = useState('')
-  const [pendingAgent, setPendingAgent] = useState<MentionAgentSession | null>(null)
-  // 智能体 tab 内的列表范围: 'recent' = 近期活跃会话 (跨项目); 'scoped' = 原同 Scope/同项目相关性列表。
-  const [agentListMode, setAgentListMode] = useState<'recent' | 'scoped'>('recent')
-  const [recentSessions, setRecentSessions] = useState<RecentSession[]>([])
-  const [recentLoading, setRecentLoading] = useState(false)
-  const [recentError, setRecentError] = useState('')
-  const [dirs, setDirs] = useState<Record<string, DirState>>({})
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(['/']))
-
-  const sourceOptions = useMemo<MentionFileSource[]>(() => {
-    const options: MentionFileSource[] = [{ key: 'hub', kind: 'hub', name: '中枢（local）' }]
-    const desktop = getChatDesktopFileBridge()
-    if (desktop?.isDesktop && desktop.listProjectLocalFiles) {
-      options.push({ key: 'local', kind: 'local', name: '本机（local）' })
-    }
-    for (const source of sources) {
-      options.push({
-        key: `remote:${source.name}`,
-        kind: 'remote',
-        name: source.name,
-        status: source.status,
-        remote_path: source.remote_path,
-      })
-    }
-    return options
-  }, [sources])
-
-  const loadSources = useCallback(async () => {
-    if (!projectId) return
-    setSourcesLoading(true)
-    setSourcesError('')
-    try {
-      const data = await api(`/api/projects/${projectId}/remote-file-sources`)
-      const next = Array.isArray(data?.remotes) ? data.remotes as RemoteFileSource[] : []
-      setSources(next)
-      const desktop = getChatDesktopFileBridge()
-      setSelectedSourceKey(current => {
-        if (current === 'hub') return current
-        if (current === 'local' && desktop?.isDesktop && desktop.listProjectLocalFiles) return current
-        return next.some(source => `remote:${source.name}` === current) ? current : 'hub'
-      })
-    } catch (error: any) {
-      setSources([])
-      setSelectedSourceKey('hub')
-      setSourcesError(error?.message || '加载远程文件来源失败')
-    } finally {
-      setSourcesLoading(false)
-    }
-  }, [projectId])
-
-  const agentScopeUrl = useMemo(() => {
-    if (!currentSessionId) return ''
-    return `/api/sessions/mention-targets?session_id=${encodeURIComponent(currentSessionId)}`
-  }, [currentSessionId])
-
-  useEffect(() => {
-    if (!open) return
-    setActiveTab(currentSessionId ? 'agents' : 'files')
-    setPendingAgent(null)
-  }, [currentSessionId, open])
-
-  const loadAgentSessions = useCallback(async () => {
-    if (!agentScopeUrl) {
-      setAgentSessions([])
-      return
-    }
-    setAgentLoading(true)
-    setAgentError('')
-    try {
-      const data = await api(agentScopeUrl)
-      const list = Array.isArray(data?.targets) ? data.targets as MentionAgentSession[] : []
-      setAgentSessions(list.filter(item => item.session_id !== currentSessionId))
-    } catch (error: any) {
-      setAgentSessions([])
-      setAgentError(error?.message || '加载智能体列表失败')
-    } finally {
-      setAgentLoading(false)
-    }
-  }, [agentScopeUrl, currentSessionId])
-
-  useEffect(() => {
-    if (!open) return
-    void loadSources()
-  }, [open, loadSources])
-
-  useEffect(() => {
-    if (!open || activeTab !== 'agents') return
-    void loadAgentSessions()
-  }, [open, activeTab, loadAgentSessions])
-
-  useEffect(() => {
-    if (!open) return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      event.stopPropagation()
-      if (pendingAgent) setPendingAgent(null)
-      else onClose()
-    }
-    // Capture Escape before host pages (for example overview) process their own
-    // global Escape shortcut and navigate away while this drawer is open.
-    window.addEventListener('keydown', onKeyDown, true)
-    return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [open, onClose, pendingAgent])
-
-  // 近期活跃会话（跨项目，登录用户自己的），与 IssuePage 侧栏「近期会话」同数据源。
-  useEffect(() => {
-    if (!open || activeTab !== 'agents') return
-    const controller = new AbortController()
-    setRecentLoading(true)
-    setRecentError('')
-    api('/api/tasks/recent?limit=50', { signal: controller.signal })
-      .then((value: unknown) => setRecentSessions(normalizeRecentSessions(value)))
-      .catch((error: any) => {
-        if (error?.name === 'AbortError') return
-        setRecentError(error?.message || '近期会话加载失败')
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setRecentLoading(false)
-      })
-    return () => controller.abort()
-  }, [open, activeTab])
-
-  const loadDir = useCallback(async (relPath: string) => {
-    if (!projectId || !selectedSourceKey) return
-    const selectedSource = sourceOptions.find(source => source.key === selectedSourceKey)
-    if (!selectedSource) return
-    setDirs(previous => ({ ...previous, [relPath]: { ...previous[relPath], loading: true, error: undefined } }))
-    try {
-      const desktop = getChatDesktopFileBridge()
-      const data = selectedSource.kind === 'hub'
-        ? await api(`/api/projects/${projectId}/files?path=${encodeURIComponent(relPath)}`)
-        : selectedSource.kind === 'local'
-          ? await desktop?.listProjectLocalFiles?.(projectId, relPath)
-          : await api(`/api/projects/${projectId}/remote-files?remote=${encodeURIComponent(selectedSource.name)}&path=${encodeURIComponent(relPath)}`)
-      if (selectedSource.kind === 'local' && !data?.ok) throw new Error(data?.error || '加载本机文件失败')
-      setDirs(previous => ({ ...previous, [relPath]: { loading: false, entries: Array.isArray(data?.entries) ? data.entries : [] } }))
-    } catch (error: any) {
-      setDirs(previous => ({ ...previous, [relPath]: { loading: false, error: error?.message || '加载文件目录失败' } }))
-    }
-  }, [projectId, selectedSourceKey, sourceOptions])
-
-  useEffect(() => {
-    if (!open) return
-    if (activeTab !== 'files') return
-    setDirs({})
-    setExpanded(new Set(['/']))
-    if (selectedSourceKey) void loadDir('/')
-  }, [open, activeTab, selectedSourceKey, loadDir])
-
-  const toggleDir = useCallback((relPath: string) => {
-    setExpanded(previous => {
-      const next = new Set(previous)
-      if (next.has(relPath)) next.delete(relPath)
-      else {
-        next.add(relPath)
-        if (!dirs[relPath]) void loadDir(relPath)
-      }
-      return next
-    })
-  }, [dirs, loadDir])
-
-  const pickFile = useCallback((entry: Entry) => {
-    if (entry.abs_path) onPickPath(entry.abs_path)
-  }, [onPickPath])
-
-  const copyPath = useCallback((entry: Entry) => {
-    if (entry.abs_path) void copyTextToClipboard(entry.abs_path)
-  }, [])
-
-  const pickAgent = useCallback((agent: MentionAgentSession) => {
-    if (!onPickAgent) return
-    setPendingAgent(agent)
-  }, [onPickAgent])
-
-  const confirmAgentMode = useCallback((mode: AgentMentionMode) => {
-    if (!pendingAgent || !onPickAgent) return
-    const resolvedMode = mode === 'bidirectional' && pendingAgent.can_communicate === false
-      ? 'read_only'
-      : mode
-    onPickAgent(pendingAgent, resolvedMode)
-    setPendingAgent(null)
-  }, [onPickAgent, pendingAgent])
-
-  // 近期会话 → @ 目标: /api/tasks/recent 字段较轻，先映射成 MentionAgentSession，
-  // 复用同一套模式选择弹窗；这些会话属于当前用户自己的近期 Session，可开启交流。
-  const pickRecentSession = useCallback((session: RecentSession) => {
-    if (!onPickAgent) return
-    setPendingAgent({
-      session_id: session.session_id,
-      name: session.name || session.session_id,
-      description: '',
-      agent_status: session.agent_status,
-      scope_type: session.scope_type,
-      last_active: session.last_active,
-      project_id: session.project_id || null,
-      project_name: session.project_name || '',
-      issue_id: session.issue_id || null,
-      issue_title: session.issue_title || '',
-      research_id: session.research_id || null,
-      research_title: session.research_title || '',
-      can_communicate: true,
-    })
-  }, [onPickAgent])
-
-  const filteredAgents = useMemo(() => {
-    // 后端已按「精确搜索 → 同 Scope → 同项目 → 运行态 → 最近活跃」稳定排序；
-    // 前端不要再按运行态二次排序，否则会把精确 ID/名称命中挤到列表后面。
-    return agentSessions
-  }, [agentSessions])
-
-  // 树状分组（项目 → 任务/研究 → 会话），与简易模式工作导航共享分组服务与渲染组件。
-  // 组间先按后端相关性（同 Scope → 同项目 → 其他项目）排序，同级内保持活跃度排序。
-  const agentGroups = useMemo(() => {
-    const rankOf = (agent: MentionAgentSession) => (
-      agent.group === 'same_scope' ? 0 : agent.group === 'same_project' ? 1 : 2
-    )
-    return buildRecentSessionTreeGroups(filteredAgents)
-      .map(group => ({ group, rank: group.sessions.reduce((min, agent) => Math.min(min, rankOf(agent)), 9) }))
-      .sort((a, b) => a.rank - b.rank)
-      .map(entry => entry.group)
-  }, [filteredAgents])
-
-  const recentGroups = useMemo(() => buildRecentSessionTreeGroups(recentSessions), [recentSessions])
-
-  if (!open) return null
-  const selectedSource = sourceOptions.find(source => source.key === selectedSourceKey)
-  const rootState = dirs['/']
-  const activeLabel = activeTab === 'agents' ? (researchId ? 'Research 智能体' : 'Issue 智能体') : '项目文件'
-  const activeHint = activeTab === 'agents'
-    ? '选择一个 Session，并明确使用只读引用或开启交流'
-    : '选择文件，把绝对路径插入输入框'
-
-  return (
-    <div className="fixed inset-0 z-[90]" role="dialog" aria-modal="true" aria-label="选择 @ 目标">
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[1px]"
-        aria-label="关闭 @ 弹层"
-        onClick={onClose}
-      />
-      <aside
-        data-testid="remote-file-mention-drawer"
-        className="absolute inset-y-0 left-0 flex w-[460px] max-w-[calc(100vw-24px)] flex-col shadow-2xl transition-transform duration-200 ease-out"
-        style={{ background: 'var(--modal-bg)', borderRight: '1px solid var(--border-color)' }}
-      >
-        <div className="flex h-14 flex-shrink-0 items-center gap-3 border-b px-4" style={{ borderColor: 'var(--border-color)' }}>
-          <div className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-blue-500/10 text-blue-400">
-            <AtSign className="h-4 w-4" strokeWidth={1.8} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>{activeLabel}</div>
-            <div className="truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>{activeHint}</div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-            style={{ color: 'var(--text-muted)' }}
-            title="关闭"
-            aria-label="关闭 @ 弹层"
-          >
-            <X className="h-4 w-4" strokeWidth={1.9} />
-          </button>
-        </div>
-
-        <div
-          className={activeTab === 'files' ? 'flex-shrink-0 border-b p-3' : 'flex min-h-0 flex-1 flex-col border-b p-3'}
-          style={{ borderColor: 'var(--border-color)' }}
-        >
-          <div className="mb-2 flex flex-shrink-0 items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('files')}
-              className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] transition-colors"
-              style={{
-                borderColor: activeTab === 'files' ? 'rgba(59,130,246,0.55)' : 'var(--border-color)',
-                background: activeTab === 'files' ? 'rgba(59,130,246,0.12)' : 'var(--bg-primary)',
-                color: activeTab === 'files' ? 'var(--text-primary)' : 'var(--text-muted)',
-              }}
-            >
-              <FileText className="h-3.5 w-3.5" strokeWidth={1.8} />
-              文件
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('agents')}
-              className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] transition-colors"
-              style={{
-                borderColor: activeTab === 'agents' ? 'rgba(59,130,246,0.55)' : 'var(--border-color)',
-                background: activeTab === 'agents' ? 'rgba(59,130,246,0.12)' : 'var(--bg-primary)',
-                color: activeTab === 'agents' ? 'var(--text-primary)' : 'var(--text-muted)',
-              }}
-            >
-              <Bot className="h-3.5 w-3.5" strokeWidth={1.8} />
-              智能体
-            </button>
-          </div>
-          {activeTab === 'files' ? (
-            <>
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>文件来源</span>
-                <button
-                  type="button"
-                  onClick={() => void loadSources()}
-                  disabled={sourcesLoading}
-                  className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] disabled:opacity-50"
-                  style={{ color: 'var(--text-muted)' }}
-                >
-                  <RefreshCw className={`h-3 w-3 ${sourcesLoading ? 'animate-spin' : ''}`} strokeWidth={1.8} />
-                  刷新
-                </button>
-              </div>
-              {sourcesLoading && sources.length === 0 ? (
-                <div className="flex h-16 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
-                  <Loader2 className="h-4 w-4 animate-spin" />加载文件来源…
-                </div>
-              ) : (
-                <>
-                  {sourcesError && <div className="mb-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">远程来源加载失败：{sourcesError}</div>}
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {sourceOptions.map(source => {
-                      const active = source.key === selectedSourceKey
-                      return (
-                        <button
-                          key={source.key}
-                          type="button"
-                          onClick={() => setSelectedSourceKey(source.key)}
-                          className="min-w-[150px] rounded-lg border px-3 py-2 text-left transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                          style={{ borderColor: active ? 'rgba(59,130,246,0.55)' : 'var(--border-color)', background: active ? 'rgba(59,130,246,0.10)' : 'var(--bg-primary)' }}
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className={`h-2 w-2 flex-shrink-0 rounded-full ${source.kind !== 'remote' || source.status === 'reachable' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-                            <span className="min-w-0 flex-1 truncate text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>{source.name}</span>
-                            {active && <Check className="h-3.5 w-3.5 flex-shrink-0 text-blue-400" strokeWidth={2} />}
-                          </div>
-                          <div className="mt-1 truncate font-mono text-[10px]" title={source.remote_path || '默认登录目录'} style={{ color: 'var(--text-muted)' }}>
-                            {source.kind === 'hub' ? '项目绑定路径' : source.kind === 'local' ? 'Electron 本机路径' : (source.remote_path || '默认登录目录')}
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </>
-              )}
-            </>
-          ) : (
-            <div className="flex min-h-0 flex-1 flex-col">
-              {/* 智能体 tab 内的范围切换 — 与 IssuePage 侧栏「任务会话 / 近期会话」同一交互模式 (role=tablist)。 */}
-              <div className="mb-2 flex flex-shrink-0 items-center gap-1.5" data-testid="mention-agent-scope-switcher">
-                <div className="flex min-w-0 flex-1 rounded-md p-0.5" role="tablist" aria-label="Session 列表范围"
-                     style={{ background: 'var(--bg-secondary)' }}>
-                  {([
-                    ['recent', '近期会话'],
-                    ['scoped', '相关智能体'],
-                  ] as const).map(([mode, label]) => {
-                    const active = agentListMode === mode
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        aria-controls="mention-agent-session-list"
-                        onClick={() => setAgentListMode(mode)}
-                        className="min-w-0 flex-1 truncate rounded px-1 py-1.5 text-[11px] font-medium leading-none transition-colors hover:text-[var(--text-primary)]"
-                        style={{
-                          color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-                          background: active ? 'var(--bg-active)' : 'transparent',
-                          boxShadow: active ? '0 1px 2px rgba(0,0,0,0.14)' : undefined,
-                        }}
-                        title={label}
-                      >
-                        {label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-              <div id="mention-agent-session-list" role="tabpanel" className="flex min-h-0 flex-1 flex-col">
-              {agentListMode === 'recent' ? (
-                recentLoading && recentSessions.length === 0 ? (
-                  <div className="flex h-16 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
-                    <Loader2 className="h-4 w-4 animate-spin" />加载近期会话…
-                  </div>
-                ) : recentError ? (
-                  <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                    近期会话加载失败：{recentError}
-                  </div>
-                ) : recentGroups.length === 0 ? (
-                  <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                    暂无近期会话。
-                  </div>
-                ) : (
-                  <div className="min-h-0 flex-1 overflow-y-auto pr-1" aria-label="按项目与任务分组的近期会话" data-testid="mention-recent-session-tree">
-                    <SessionGroupTree
-                      groups={recentGroups}
-                      domIdPrefix="mention-recent-group"
-                      renderSession={session => (
-                        <RecentSessionRow
-                          session={session}
-                          active={session.session_id === currentSessionId}
-                          onClick={() => pickRecentSession(session)}
-                          variant="mention"
-                          title={`${session.name || session.session_id} · @ 选择引用或交流方式`}
-                        />
-                      )}
-                    />
-                  </div>
-                )
-              ) : agentLoading && agentSessions.length === 0 ? (
-                <div className="flex h-16 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
-                  <Loader2 className="h-4 w-4 animate-spin" />加载智能体…
-                </div>
-              ) : (
-                <>
-                  {agentError && <div className="mb-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-300">智能体加载失败：{agentError}</div>}
-                  {!agentScopeUrl ? (
-                    <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                      当前会话没有 issue / research 范围，无法 @ 其他智能体。
-                    </div>
-                  ) : filteredAgents.length === 0 ? (
-                    <div className="rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                      没有找到可 @ 的智能体。
-                    </div>
-                  ) : (
-                    <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-                      <SessionGroupTree
-                        groups={agentGroups}
-                        domIdPrefix="mention-agent-group"
-                        renderSession={agent => {
-                          const active = agent.agent_status === 'running'
-                          const modelLabel = sessionModelLabel(agent.model, agent.model_label)
-                          const relationLabel = agent.group === 'same_scope'
-                            ? (agent.scope_type === 'research' ? '同 Research' : '同 Issue')
-                            : agent.group === 'same_project' ? '同项目' : '其他项目'
-                          return (
-                            <button
-                              type="button"
-                              onClick={() => pickAgent(agent)}
-                              className="relative mt-0.5 flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                              style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}
-                              title={`${agent.name || agent.session_id} · ${agent.session_id}`}
-                            >
-                              <span className="absolute -left-2.5 top-1/2 w-2 border-t" style={{ borderColor: 'var(--border-color)' }} aria-hidden="true" />
-                              <span className={`h-2 w-2 flex-shrink-0 rounded-full ${active ? 'bg-emerald-400' : 'bg-slate-400'}`} />
-                              <span className="min-w-0 flex-1">
-                                <span className="flex min-w-0 items-center gap-1.5">
-                                  <span className="min-w-0 flex-1 truncate text-[11px] font-medium leading-4" style={{ color: 'var(--text-primary)' }}>
-                                    {agent.name || agent.session_id}
-                                  </span>
-                                  {agent.last_active && <span className="flex-shrink-0 text-[9px] tabular-nums leading-3" style={{ color: 'var(--text-muted)' }}>{timeAgo(agent.last_active)}</span>}
-                                </span>
-                                <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1 text-[9px] leading-3" style={{ color: 'var(--text-muted)' }}>
-                                  <span className="max-w-[160px] truncate font-mono">{agent.session_id}</span>
-                                  <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{relationLabel}</span>
-                                  {modelLabel && <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{modelLabel}</span>}
-                                  {agent.backend && <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{agent.backend}</span>}
-                                  {agent.research_role && <span className="rounded bg-[var(--bg-card-hover)] px-1.5 py-0.5">{agent.research_role}</span>}
-                                </span>
-                                {agent.description && (
-                                  <span className="mt-1 line-clamp-2 block text-[10px] leading-4" style={{ color: 'var(--text-secondary)' }}>
-                                    {agent.description}
-                                  </span>
-                                )}
-                              </span>
-                              <span className="flex flex-shrink-0 flex-col items-end gap-0.5">
-                                <span className="rounded border px-1.5 py-0.5 text-[9px] leading-3" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                                  选择模式
-                                </span>
-                              </span>
-                            </button>
-                          )
-                        }}
-                      />
-                    </div>
-                  )}
-                </>
-              )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {activeTab === 'files' ? (
-          <>
-            <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex h-10 flex-shrink-0 items-center gap-1.5 border-b px-4 text-[11px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-                <FolderOpen className="h-3.5 w-3.5 text-blue-400" strokeWidth={1.8} />
-                <span className="truncate">{selectedSource?.name || '未选择来源'}</span>
-                {selectedSource && <ChevronRight className="h-3 w-3 flex-shrink-0" />}
-                <span className="truncate font-mono">{selectedSource?.kind === 'hub' ? '项目绑定路径' : selectedSource?.kind === 'local' ? 'Electron 本机路径' : (selectedSource?.remote_path || (selectedSource ? '默认登录目录' : ''))}</span>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-                {!selectedSource ? null : !rootState ? (
-                  <div className="flex h-28 items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
-                    <Loader2 className="h-4 w-4 animate-spin" />加载文件…
-                  </div>
-                ) : (
-                  <FileTreeLevel
-                    relPath="/"
-                    depth={0}
-                    dirs={dirs}
-                    expanded={expanded}
-                    onToggleDir={toggleDir}
-                    onOpenFile={pickFile}
-                    onCopyPath={copyPath}
-                    vscodeReady
-                    fileActionLabel="插入绝对路径"
-                  />
-                )}
-              </div>
-            </div>
-            <div className="flex flex-shrink-0 items-center gap-2 border-t px-4 py-3 text-[11px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-              <FileText className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={1.8} />
-              点击文件后会替换当前的 <code className="rounded bg-[var(--bg-card-hover)] px-1 py-0.5">@</code> 并回到输入框
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-shrink-0 items-center gap-2 border-t px-4 py-3 text-[11px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-            <ArrowLeftRight className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={1.8} />
-            选择智能体后会插入当前输入框，并把其上下文或双向桥接语义一起发送给后端
-          </div>
-        )}
-      </aside>
-      {pendingAgent && (
-        <div className="absolute inset-0 z-[95] flex items-center justify-center px-4" role="dialog" aria-modal="true" aria-labelledby="mention-agent-mode-title">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/55 backdrop-blur-sm"
-            aria-label="取消选择智能体连接方式"
-            onClick={() => setPendingAgent(null)}
-          />
-          <div
-            className="relative w-full max-w-[430px] overflow-hidden rounded-2xl shadow-2xl"
-            style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}
-            onClick={event => event.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-3 border-b px-5 py-4" style={{ borderColor: 'var(--border-color)' }}>
-              <div className="min-w-0">
-                <div id="mention-agent-mode-title" className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-                  选择连接方式
-                </div>
-                <div className="mt-1 truncate text-[11px]" style={{ color: 'var(--text-muted)' }} title={pendingAgent.name || pendingAgent.session_id}>
-                  为「{pendingAgent.name || pendingAgent.session_id}」选择本次 @ 引用的权限
-                </div>
-              </div>
-              <button
-                type="button"
-                className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                style={{ color: 'var(--text-muted)' }}
-                aria-label="关闭连接方式选择"
-                onClick={() => setPendingAgent(null)}
-              >
-                <X className="h-4 w-4" strokeWidth={1.9} />
-              </button>
-            </div>
-            <div className="grid gap-3 p-4 sm:grid-cols-2">
-              <button
-                type="button"
-                className="group rounded-xl border p-3 text-left transition-colors hover:border-blue-400/60 hover:bg-blue-500/[0.06] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                style={{ borderColor: 'rgba(59,130,246,0.35)', background: 'rgba(59,130,246,0.06)' }}
-                onClick={() => confirmAgentMode('read_only')}
-              >
-                <div className="mb-3 flex h-16 items-center justify-center rounded-lg border border-blue-400/20 bg-blue-500/[0.05]" aria-hidden="true">
-                  <div className="flex items-center gap-2">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-400/15 text-blue-300"><Eye className="h-4 w-4" strokeWidth={1.8} /></div>
-                    <div className="h-px w-7 bg-blue-300/40" />
-                    <div className="h-7 w-7 rounded-md border border-blue-300/40" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-                  <Eye className="h-3.5 w-3.5 text-blue-300" strokeWidth={1.8} />
-                  只读引用
-                </div>
-                <div className="mt-1 text-[10px] leading-4" style={{ color: 'var(--text-muted)' }}>带入对方上下文，只查看不发送消息。</div>
-              </button>
-              <button
-                type="button"
-                disabled={pendingAgent.can_communicate === false}
-                className="group rounded-xl border p-3 text-left transition-colors hover:border-emerald-400/60 hover:bg-emerald-500/[0.06] focus-visible:ring-2 focus-visible:ring-emerald-500/50 disabled:cursor-not-allowed disabled:opacity-45"
-                style={{ borderColor: 'rgba(52,211,153,0.35)', background: 'rgba(52,211,153,0.05)' }}
-                onClick={() => confirmAgentMode('bidirectional')}
-              >
-                <div className="mb-3 flex h-16 items-center justify-center rounded-lg border border-emerald-400/20 bg-emerald-500/[0.05]" aria-hidden="true">
-                  <div className="flex items-center gap-2">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-400/15 text-emerald-300"><MessageCircle className="h-4 w-4" strokeWidth={1.8} /></div>
-                    <div className="flex w-7 flex-col gap-1"><div className="h-px w-full bg-emerald-300/60" /><div className="h-px w-full bg-emerald-300/35" /></div>
-                    <div className="h-7 w-7 rounded-md border border-emerald-300/40" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-                  <MessageCircle className="h-3.5 w-3.5 text-emerald-300" strokeWidth={1.8} />
-                  开启交流
-                </div>
-                <div className="mt-1 text-[10px] leading-4" style={{ color: 'var(--text-muted)' }}>
-                  允许当前会话向对方发送交流请求。{pendingAgent.can_communicate === false ? '该智能体不支持交流。' : ''}
-                </div>
-              </button>
-            </div>
-            <div className="border-t px-5 py-3 text-[10px]" style={{ borderColor: 'var(--border-color)', color: 'var(--text-muted)' }}>
-              你可以在输入框中的智能体标签上随时调整这次引用的方式。
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
 // =====================================================================
 // 主对话区（基于 currentSession）
@@ -2475,9 +1898,18 @@ type EasyProjectOption = {
   runningCount?: number
 }
 
-export function ChatArea({ layout = 'default', onNewSession, easyProjectControl }: {
+type SearchHitTarget = { uuid?: string | null; timestamp?: string | null }
+
+// 简易模式右侧文件编辑栏: 复用代码对话 v2 的 CodeConversationPane (variant='sidebar'),
+// 按需加载避免简易模式首屏背上 CodeMirror 的 bundle.
+const EasyFilesPane = lazy(() => import('./workspace/code-conversation-pane').then(module => ({ default: module.CodeConversationPane })))
+const EASY_FILES_OPEN_KEY = 'mobius:ui:easy-files-sidebar:open'
+
+export function ChatArea({ layout = 'default', onNewSession, onMessageSent, easyProjectControl }: {
   layout?: 'default' | 'stacked' | 'easy'
   onNewSession?: () => void
+  // 消息提交成功后的回调 (所有发送路径共用)。外层用它把「会话已开始执行」尽快同步到侧栏。
+  onMessageSent?: () => void
   easyProjectControl?: {
     selectedProjectId?: string
     selectedProjectName?: string
@@ -2495,6 +1927,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const hasMatchTarget = !!(matchUuid || matchTs)
   const matchTargetActiveRef = useRef(hasMatchTarget)
   matchTargetActiveRef.current = hasMatchTarget
+  // 命中参数被清理后，SessionJsonlPanel 仍会保留红色命中标记；追底必须尊重该状态。
+  const searchHighlightActiveRef = useRef(false)
+  const searchHighlightTargetRef = useRef<{ uuid: string | null; ts: string | null } | null>(null)
+  const [searchHighlightClearSignal, setSearchHighlightClearSignal] = useState(0)
+  const [searchHits, setSearchHits] = useState<SearchHitTarget[]>([])
+  const [searchHitIndex, setSearchHitIndex] = useState(0)
   // 跳转到位后清掉 URL 里的 match/ts (replace, 不留历史), 避免刷新/切会话重复触发.
   const onMatchScrollResolved = useCallback(() => {
     setSearchParams((prev) => {
@@ -2505,6 +1943,95 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       return next
     }, { replace: true })
   }, [setSearchParams])
+
+  const sessionIdForSearchHits = currentSession?.session_id || currentTask?.task_id || ''
+  useEffect(() => {
+    if (!sessionIdForSearchHits) {
+      setSearchHits([])
+      return
+    }
+    try {
+      const raw = localStorage.getItem(`mobius:search-hits:${sessionIdForSearchHits}`)
+      const parsed = raw ? JSON.parse(raw) : []
+      setSearchHits(Array.isArray(parsed) ? parsed.filter((hit) => hit && (hit.uuid || hit.timestamp)) : [])
+    } catch {
+      setSearchHits([])
+    }
+  }, [sessionIdForSearchHits])
+
+  const hitKey = (hit: SearchHitTarget | null | undefined) => hit ? `${hit.uuid || ''}:${hit.timestamp || ''}` : ''
+  useEffect(() => {
+    // Prefer the URL target while a navigation request is in flight. The panel
+    // updates its retained ref during its own render, which can lag one render
+    // behind a previous/next click; using the stale ref here would reset the
+    // index and make the following click jump to the wrong result.
+    const targetKey = hitKey(
+      (matchUuid || matchTs)
+        ? { uuid: matchUuid, timestamp: matchTs }
+        : searchHighlightTargetRef.current,
+    )
+    const index = searchHits.findIndex((hit) => hitKey(hit) === targetKey)
+    if (index >= 0) setSearchHitIndex(index)
+  }, [searchHits, matchUuid, matchTs])
+  const targetForHit = useCallback((hit: SearchHitTarget | undefined) => {
+    if (!hit) return
+    // Keep the active target synchronously. The URL is intentionally cleaned
+    // after scrolling, so relying on the next render to repopulate this ref
+    // lets a store refresh briefly drop the card highlight.
+    searchHighlightTargetRef.current = {
+      uuid: hit.uuid || null,
+      ts: hit.timestamp || null,
+    }
+    searchHighlightActiveRef.current = true
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (hit.uuid) next.set('match', hit.uuid); else next.delete('match')
+      if (hit.timestamp) next.set('ts', hit.timestamp); else next.delete('ts')
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+  const applySessionSearchHits = useCallback((hits: SessionSearchHit[], selectedIndex: number) => {
+    const targets = hits
+      .filter((hit) => hit && (hit.uuid || hit.timestamp))
+      .map((hit) => ({ uuid: hit.uuid || null, timestamp: hit.timestamp || null }))
+    if (targets.length === 0) return
+    const nextIndex = Math.max(0, Math.min(selectedIndex, targets.length - 1))
+    setSearchHits(targets)
+    setSearchHitIndex(nextIndex)
+    if (sessionIdForSearchHits) {
+      try { localStorage.setItem(`mobius:search-hits:${sessionIdForSearchHits}`, JSON.stringify(targets)) } catch {}
+    }
+    targetForHit(targets[nextIndex])
+  }, [sessionIdForSearchHits, targetForHit])
+  const jumpCurrentSearchHit = useCallback(() => {
+    targetForHit(searchHighlightTargetRef.current ? {
+      uuid: searchHighlightTargetRef.current.uuid,
+      timestamp: searchHighlightTargetRef.current.ts,
+    } : searchHits[searchHitIndex])
+  }, [searchHitIndex, searchHits, targetForHit])
+  const moveSearchHit = useCallback((delta: number) => {
+    if (searchHits.length === 0) return
+    setSearchHitIndex((currentIndex) => {
+      const nextIndex = (currentIndex + delta + searchHits.length) % searchHits.length
+      targetForHit(searchHits[nextIndex])
+      return nextIndex
+    })
+  }, [searchHits, targetForHit])
+  const clearSearchHits = useCallback(() => {
+    searchHighlightActiveRef.current = false
+    searchHighlightTargetRef.current = null
+    setSearchHighlightClearSignal((value) => value + 1)
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('match')
+      next.delete('ts')
+      return next
+    }, { replace: true })
+    if (sessionIdForSearchHits) {
+      try { localStorage.removeItem(`mobius:search-hits:${sessionIdForSearchHits}`) } catch {}
+    }
+    setSearchHits([])
+  }, [sessionIdForSearchHits, setSearchParams])
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [inputExpanded, setInputExpanded] = useState(false)
   const [inputMenuOpen, setInputMenuOpen] = useState(false)
@@ -2525,6 +2052,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const easyProjectButtonRef = useRef<HTMLButtonElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const chatBodyRef = useRef<HTMLDivElement>(null)
+  // 中栏是否已被挤窄 (视口宽 ≠ 中栏宽: 左侧会话栏 + 右侧文件编辑栏都要占位).
+  // 只有标准分栏需要这个判据 —— 简易模式 (--easy) 与代码对话 (--stacked) 本就纵向堆叠.
+  const chatBodyWidthNarrow = useNarrowContainer(chatBodyRef, CHAT_BODY_STACK_BREAKPOINT)
+  const chatBodyNarrow = layout === 'default' && chatBodyWidthNarrow
   const chatInputRef = useRef<HTMLDivElement>(null)
   const chatSplitHandleRef = useRef<HTMLDivElement>(null)
   const [chatInputRatio, setChatInputRatio] = useState(readChatInputRatio)
@@ -2701,38 +2232,24 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  // JSONL 视图: 直接展示当前 backend 的原始 entries (Claude 或 Codex).
-  // jsonl_history 覆盖, jsonl_entry 追加. 切 session 时 clear.
-  const [jsonlEntries, setJsonlEntries] = useState<any[]>([])
-  // count-then-tail: 后端先发 jsonl_meta {total}, 再回灌末尾窗口. 这里存服务端 total,
-  // 用作 "加载全部" 按钮的判断和标题显示, 不依赖 entries.length.
-  const [jsonlTotal, setJsonlTotal] = useState<number>(0)
-  // 后端在 jsonl_meta 里附带的真实 jsonl 文件绝对路径, 用于原始数据弹窗标题展示.
-  const [jsonlPath, setJsonlPath] = useState<string | null>(null)
-  const [jsonlInitialLoading, setJsonlInitialLoading] = useState(false)
-  const [jsonlLoadingMore, setJsonlLoadingMore] = useState<boolean>(false)
+  // ── 历史存储 (协议 ①②③): 组元数据 + 按需组条目, agent-history-store 是唯一数据源 ──
+  // Chat 只持有 store + 生命周期, 不订阅快照 — SSE 数据到达不再触发整个组件重渲染;
+  // 订阅下沉到 SessionJsonlPanel / JsonlCountSlot / EntriesAutoScroll 等子组件.
+  const sessionId = currentSession?.session_id || currentTask?.task_id || ''
+  const historyStore = useAgentHistoryStore(sessionId)
+  const historyStoreRef = useRef(historyStore)
+  historyStoreRef.current = historyStore
+  // 原始 JSONL 弹窗标题展示 jsonl 文件路径 (订阅下沉到 primitive selector, 只在路径变化时重渲染).
+  const jsonlPath = useSessionJsonlPath(historyStore)
   const [easyRoundCount, setEasyRoundCount] = useState(0)
   const [easyExpandAllSignal, setEasyExpandAllSignal] = useState(0)
-  const pendingJsonlEntriesRef = useRef<any[]>([])
-  const pendingJsonlTotalIncrementRef = useRef(0)
-  const pendingJsonlFlushTimerRef = useRef<number | null>(null)
-  // JSONL 浏览器缓存 (stale-while-revalidate): 切 session 时先秒开缓存里的尾部.
-  // 最新值镜像 ref: switch effect 的 cleanup 在离开 session 时写回缓存, 但 cleanup 闭包
-  // 捕获的是进入时的旧值, 必须从 ref 取最新. 每次渲染同步刷新.
-  const jsonlEntriesRef = useRef<any[]>([])
-  jsonlEntriesRef.current = jsonlEntries
-  const jsonlTotalRef = useRef(0)
-  jsonlTotalRef.current = jsonlTotal
-  const jsonlPathRef = useRef<string | null>(null)
-  jsonlPathRef.current = jsonlPath
-  // 当前 session 是否已收到 SSE 权威 jsonl_history (reset). true 后缓存兜底不再覆盖, 避免用旧值盖掉新值.
-  const freshHistoryReceivedRef = useRef(false)
+  const [easyLoadingAll, setEasyLoadingAll] = useState(false)
   const [showRaw, setShowRaw] = useState(false)
   const [rawJsonlCopied, setRawJsonlCopied] = useState(false)
+  const [rawJsonlDownloading, setRawJsonlDownloading] = useState(false)
   const [inputReplayOpen, setInputReplayOpen] = useState(false)
   const [fileChangesOpen, setFileChangesOpen] = useState(false)
   const [bashCommandsOpen, setBashCommandsOpen] = useState(false)
-  const [scheduledTasksOpen, setScheduledTasksOpen] = useState(false)
   const [compactConfirmOpen, setCompactConfirmOpen] = useState(false)
   const [continueModalOpen, setContinueModalOpen] = useState(false)
   const [cooperablePcOpen, setCooperablePcOpen] = useState(false)
@@ -2756,12 +2273,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const voiceRecordFailedRef = useRef(false)
   const voiceStopTimerRef = useRef<number | null>(null)
   const voiceTickTimerRef = useRef<number | null>(null)
-  // 默认隐藏次要条目 (last-prompt / title / agent-name / permission / 连续重复 entry / 连续等摘要 entry / task_started 生命周期事件)
-  const [hideMinorJsonl, setHideMinorJsonl] = useState(true)
   // 默认隐藏 jsonl 卡片标题里的"序号 + 时间"前缀; 开启后才显示 #序号 和 MM-DD HH:MM:SS.
   const [showJsonlMeta, setShowJsonlMeta] = useState(false)
-  // Cursor 式工具调用展示: 工具卡显示状态图标 (⏳/✅/❌) + 连续探索类自动聚合为 "已探索 N 个工具". 默认开启.
-  const [cursorStyleTools, setCursorStyleTools] = useState(true)
   // 回车自动加急: 开启后, 输入框按 Enter 发送时自动带 urgent=true (打断当前输出并立即发送). 持久化到 localStorage.
   const [autoUrgentOnEnter, setAutoUrgentOnEnter] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_URGENT_ENTER_STORAGE_KEY) === '1' } catch { return false }
@@ -2773,7 +2286,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       return next
     })
   }, [])
-  const sessionId = currentSession?.session_id || currentTask?.task_id || ''
   useEffect(() => {
     setEasyToolsOpen(false)
     setEasyRoundCount(0)
@@ -2783,6 +2295,56 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     setEasyRoundCount(previous => previous === count ? previous : count)
   }, [])
   const currentProjectId = (currentIssue as any)?.project_id || (currentSession as any)?.project_id || (currentTask as any)?.project_id || ''
+  // ===== 简易模式右侧文件编辑栏 (复用代码对话 v2 的文件树 + CodeMirror 编辑器) =====
+  // 开关状态存本浏览器; easyFilesMounted 首次打开后保活 (文件树展开/选中/未保存草稿不丢),
+  // 关闭仅 display:none — 与 IssuePage 的 editorMounted/v2Mounted 同一模式.
+  const [easyFilesOpen, setEasyFilesOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(EASY_FILES_OPEN_KEY) === '1' } catch { return false }
+  })
+  const [easyFilesMounted, setEasyFilesMounted] = useState<boolean>(() => {
+    try { return localStorage.getItem(EASY_FILES_OPEN_KEY) === '1' } catch { return false }
+  })
+  // 常规模式的文件编辑栏开合走 store: 顶栏「原生文件编辑器」入口与 display-files 卡片写同一份状态.
+  // The standard-mode file pane open-state lives in the store so the top-bar entry and cards share one source.
+  const displayFilesOpen = useStore(s => s.fileEditorOpen)
+  const setDisplayFilesOpen = useStore(s => s.setFileEditorOpen)
+  // web 终端仅 admin 可用 (见后端 webTerminalAllowedFor): 普通用户隐藏入口与显示设置项.
+  const isAdminUser = useStore(s => s.user?.role === 'admin')
+  // Keep the requested file while the lazy editor mounts; a one-shot DOM event can otherwise be lost.
+  // 懒加载编辑器挂载期间保留目标文件，避免一次性 DOM 事件丢失。
+  const [displayFileRequest, setDisplayFileRequest] = useState<{ projectId: string; sessionId?: string; path: string; remote?: string; root?: string } | null>(null)
+  useEffect(() => {
+    const openFile = (event: Event) => {
+      const detail = (event as CustomEvent).detail
+      if (!detail || detail.projectId !== currentProjectId || (detail.sessionId && detail.sessionId !== sessionId)) return
+      setDisplayFileRequest(detail)
+      setDisplayFilesOpen(true)
+      setEasyFilesMounted(true)
+      setEasyFilesOpen(true)
+      try { localStorage.setItem(EASY_FILES_OPEN_KEY, '1') } catch { /* ignore */ }
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent('mobius:open-file-in-sidebar', { detail })), 250)
+    }
+    window.addEventListener('mobius:request-open-file-in-sidebar', openFile)
+    return () => window.removeEventListener('mobius:request-open-file-in-sidebar', openFile)
+  }, [currentProjectId, sessionId])
+  useEffect(() => { if (easyFilesOpen) setEasyFilesMounted(true) }, [easyFilesOpen])
+  const toggleEasyFiles = useCallback(() => {
+    setEasyFilesOpen(previous => {
+      const next = !previous
+      try { localStorage.setItem(EASY_FILES_OPEN_KEY, next ? '1' : '0') } catch { /* 静默 */ }
+      return next
+    })
+  }, [])
+  // bind_path 与代码对话模式同源 (useEditorAvailability 模块级缓存, 同项目只发一次请求).
+  const filesPaneEnabled = (layout === 'easy' ? easyFilesMounted : displayFilesOpen) && !!currentProjectId && !!currentSession
+  const easyFilesEnabled = filesPaneEnabled
+  const { bindPath: easyFilesBindPath, vscodeWebUrl: easyFilesVscodeUrl } = useEditorAvailability(currentProjectId, easyFilesEnabled)
+  // 侧栏宽度: 默认 ≈ 视口 44%. 上限给对话区留足空间 (简易模式左侧还有近期会话栏,
+  // chat-area 实际只有视口 80% 左右, 58% 视口上限已接近其全部宽度).
+  const easyViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280
+  const easyFilesSidebarMinWidth = 420
+  const easyFilesSidebarMaxWidth = Math.max(560, Math.floor(easyViewportWidth * 0.58))
+  const easyFilesSidebarDefaultWidth = Math.max(easyFilesSidebarMinWidth, Math.min(easyFilesSidebarMaxWidth, Math.floor(easyViewportWidth * 0.44)))
   const currentIssueId = (currentSession as any)?.issue_id || (currentIssue as any)?.id || ''
   const currentResearchId = (currentSession as any)?.research_id || (currentTask as any)?.research_id || ''
   // 规划模式: 当前 Issue 是 is_planning 时, 隐藏执行控件 + 嵌入规划编辑器.
@@ -2803,8 +2365,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       ? '正在转写并发送语音'
       : '语音输入'
 
-  // 次要条目过滤: 普通 SSE append 走增量快路径; 切 session / 加载全部 / 切过滤开关时完整重算.
-  const { visibleJsonl, minorCount } = useVisibleJsonl(jsonlEntries, hideMinorJsonl)
 
   // 状态唯一真相源: 后端 GET /api/sessions/:id/status.
   //   alive   = hub.isAlive       — 进程存活 (TUI 可接收输入)
@@ -2825,33 +2385,40 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // agent TUI 实时状态行 (如 "✻ Propagating… (7m 44s · ↓ 24.1k tokens)"), 给 LIVE 卡片.
   // 非 claude-code / 非 working 时为 "". 由 /status 轮询返回.
   const [backendRealTimeInfo, setBackendRealTimeInfo] = useState('')
-  const liveDebugSnapshotRef = useRef<LiveDebugSnapshot | null>(null)
-  const liveDebugSnapshot = useMemo<LiveDebugSnapshot>(() => {
+  // LIVE 卡诊断快照: 惰性构建 (Chat 不再订阅快照, 诊断命令触发时现取摊平条目).
+  const buildLiveDebugRef = useRef<(() => LiveDebugSnapshot | null) | null>(null)
+  buildLiveDebugRef.current = () => {
+    const jsonlEntriesNow = historyStoreRef.current?.flattenEntries() ?? []
     const variant: 'standard' | 'easy' = layout === 'easy' ? 'easy' : 'standard'
     const standardVariant = variant === 'standard'
     const alive = backendAlive === true
     const working = backendWorking === true
-    const shouldMount = standardVariant && alive && working
-    const tail = jsonlEntries.slice(-5).map(debugTailEntry)
+    // 与渲染用的门槛同源: 乐观窗口 (提交后 5s 强开 / 终止后 10s 强关) 覆盖轮询结果.
+    const backendGate = alive && working
+    const shouldMount = standardVariant && (liveMode === 'on' ? true : liveMode === 'off' ? false : backendGate)
+    const tail = jsonlEntriesNow.slice(-5).map(debugTailEntry)
     const lastEntry = tail[tail.length - 1] || null
     // 与 ChatArea 传给 SessionJsonlPanel/JsonlLiveTailCard 的值保持一致：
     // 从尾部向前找最近一个带可解析时间的 entry，跳过无时间戳的元数据 entry。
-    const latestTimestamp = findLatestEntryTimestamp(jsonlEntries)
+    const latestTimestamp = findLatestEntryTimestamp(jsonlEntriesNow)
     const lastTimestampProp = latestTimestamp.value
     const parsedLastTimestampMs = parseDebugTimestamp(lastTimestampProp)
     const hasUsableTimestamp = !!parsedLastTimestampMs
     const lastEntryAnyTimestamp = lastEntry
       ? lastEntry.timestamp || lastEntry.createdAt || lastEntry.payloadTimestamp || lastEntry.messageCreatedAt
       : null
-    const cardWouldReturnNull = shouldMount && !hasUsableTimestamp
+    // 强开窗 ('on', 含发送阶段) 内不吃时间戳门槛: 会话刚启动 / 首条 entry 还没落盘时也要出卡.
+    const cardWouldReturnNull = shouldMount && !hasUsableTimestamp && liveMode !== 'on'
     const reasons: string[] = []
 
     if (!standardVariant) reasons.push(`variant=${variant}（当前不是 standard 渲染分支）`)
-    if (!alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
-    if (!working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
-    if (jsonlEntries.length === 0) reasons.push('jsonlEntries 为空')
-    if (jsonlEntries.length > 0 && !lastTimestampProp) reasons.push('所有 JSONL entry 都没有可解析时间戳')
-    if (jsonlEntries.length > 0 && latestTimestamp.index !== null && latestTimestamp.index !== jsonlEntries.length - 1 && lastEntryAnyTimestamp === null) {
+    if (liveMode === 'off') reasons.push('终止乐观窗内（强制不挂载 LIVE）')
+    if (liveMode === 'on') reasons.push(liveOverride === 'on' ? '提交乐观窗内（强制挂载 LIVE）' : '发送阶段内（强制挂载 LIVE）')
+    if (liveMode === null && !alive) reasons.push(`backendAlive=${String(backendAlive)}（父级不会挂载 LIVE）`)
+    if (liveMode === null && !working) reasons.push(`backendWorking=${String(backendWorking)}（父级不会挂载 LIVE）`)
+    if (jsonlEntriesNow.length === 0) reasons.push('jsonlEntries 为空')
+    if (jsonlEntriesNow.length > 0 && !lastTimestampProp) reasons.push('所有 JSONL entry 都没有可解析时间戳')
+    if (jsonlEntriesNow.length > 0 && latestTimestamp.index !== null && latestTimestamp.index !== jsonlEntriesNow.length - 1 && lastEntryAnyTimestamp === null) {
       reasons.push(`最后一条 entry 无时间戳，已回退到第 ${latestTimestamp.index! + 1} 条 entry 的 ${latestTimestamp.source} 时间`)
     }
     if (cardWouldReturnNull) reasons.push('父级门槛满足，但 JsonlLiveTailCard 因 silenceSec=null 返回 null')
@@ -2864,13 +2431,16 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       variant,
       backendAlive,
       backendWorking,
+      liveOverride,
+      sendingPhase,
+      liveMode,
       parentGate: { standardVariant, alive, working, shouldMount },
-      jsonlCount: jsonlEntries.length,
+      jsonlCount: jsonlEntriesNow.length,
       tail,
       lastEntry,
       lastTimestampProp,
       lastTimestampEntryIndex: latestTimestamp.index,
-      lastTimestampSource: latestTimestamp.source,
+      lastTimestampSource: latestTimestamp.source as LiveDebugSnapshot['lastTimestampSource'],
       parsedLastTimestampMs,
       hasUsableTimestamp,
       lastEntryAnyTimestamp,
@@ -2878,13 +2448,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       reasons,
       generatedAt: new Date().toISOString(),
     }
-  }, [backendAlive, backendWorking, jsonlEntries, layout, sessionId])
-  liveDebugSnapshotRef.current = liveDebugSnapshot
+  }
 
   useEffect(() => {
     const previous = window.mobiusLiveDebug
     const debug = () => {
-      const snapshot = liveDebugSnapshotRef.current
+      const snapshot = buildLiveDebugRef.current?.()
       if (!snapshot) throw new Error('LIVE debug snapshot is not ready')
       const cards = Array.from(document.querySelectorAll<HTMLElement>('.jsonl-live-sweep'))
       const firstCard = cards[0]
@@ -2936,14 +2505,53 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // 终止乐观更新抑制窗: 点"终止"后 ~3s 内忽略轮询回写, 让 isAlive/isWorking/agent_status
   // 立即落定为"空闲". 否则软停 (C-c × 3) 期间下一个 2s 轮询仍读到 alive=true, 会把状态弹回"执行中".
   const stopSuppressedUntilRef = useRef<number>(0)
+  // LIVE 卡乐观窗口 (纯显示层, 不回写后端状态). 两个方向:
+  //   'on'  提交问题后 5s 内强制挂 LIVE 卡 — 进程创建 / 首轮唤醒期间轮询还没报 working,
+  //         卡片缺席会被误读成"消息没发出去".
+  //   'off' 点击终止后 10s 内强制不挂 LIVE 卡 — 软停期间后端仍报 working, 3s 状态抑制窗
+  //         一过卡片就弹回, 与"已终止"的直觉冲突.
+  const [liveOverride, setLiveOverride] = useState<'on' | 'off' | null>(null)
+  const liveOverrideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const holdLiveOverride = useCallback((mode: 'on' | 'off' | null, ms = 0) => {
+    if (liveOverrideTimerRef.current) {
+      clearTimeout(liveOverrideTimerRef.current)
+      liveOverrideTimerRef.current = null
+    }
+    setLiveOverride(mode)
+    if (mode && ms > 0) {
+      liveOverrideTimerRef.current = setTimeout(() => {
+        liveOverrideTimerRef.current = null
+        setLiveOverride(null)
+      }, ms)
+    }
+  }, [])
+  // 卸载时清掉未到期的乐观窗计时器, 避免在已卸载组件上 setState.
+  useEffect(() => () => {
+    if (liveOverrideTimerRef.current) {
+      clearTimeout(liveOverrideTimerRef.current)
+      liveOverrideTimerRef.current = null
+    }
+  }, [])
   // 发送阶段提示: 自发送瞬间起计时, 按耗时显示黄字阶段 (正在发送 / 正在唤醒中 / 唤醒超时).
   // pendingSendAt 与 messageSubmitting 全部解除 (发送按钮恢复) 时置回 null, 还原原提示.
   const [sendingHint, setSendingHint] = useState<string | null>(null)
+  // 发送阶段 (发送按钮灰着, 即左下角出现 正在发送/正在唤醒中/唤醒时间长于预期 黄字的那段时间).
+  // 这是"会话正在启动"的唯一前端判据, 与黄字提示同源, 保证两者永远同步.
+  const sendingPhase = pendingSendAt !== null || messageSubmitting
+  // LIVE 卡实际生效模式 (优先级从高到低):
+  //   终止乐观窗 'off' — 用户刚点过终止, 即便发送阶段还没解除也不该弹回 LIVE 卡;
+  //   提交乐观窗 'on' / 发送阶段 — 强制显示;
+  //   null — 交给后端 alive && working 判定.
+  // 发送阶段并入 'on' 的原因: 乐观窗只有 5s, 而唤醒慢的会话 (进程创建 / 首轮上下文加载) 能持续
+  // 十几秒, 卡片先消失、左下角黄字还在, 看起来像消息丢了. 黄字在, LIVE 卡就在.
+  const liveMode: 'on' | 'off' | null =
+    liveOverride === 'off' ? 'off'
+    : liveOverride === 'on' || sendingPhase ? 'on'
+    : null
   const [backendWorktreeIgnored, setBackendWorktreeIgnored] = useState(false)
   const [lastSendError, setLastSendError] = useState('')
   const [dismissedBackendFailureKeys, setDismissedBackendFailureKeys] = useState<Record<string, string>>({})
   const [hiddenBackendFailureBefore, setHiddenBackendFailureBefore] = useState<Record<string, number>>({})
-  const guidedCompletionNotifiedRef = useRef<Set<string>>(new Set())
   const backendFailureMessage = useMemo(() => formatBackendFailureMessage(backendFailedReason), [backendFailedReason])
   const backendFailureKey = backendJobFailed === true
     ? (backendFailedAt || backendFailedReason || backendFailureMessage || 'failed')
@@ -3043,11 +2651,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             )))
           }
         }
-        if (r?.job_accomplished === true && isGuidedDemoSession(sessionId) && !guidedCompletionNotifiedRef.current.has(sessionId)) {
-          guidedCompletionNotifiedRef.current.add(sessionId)
-          patchGuidedDemoSessionCompleted(sessionId)
-          window.dispatchEvent(new CustomEvent(GUIDED_DEMO_TOUR_EVENT, { detail: { force: false } }))
-        }
         // pending 清除条件 (任意一个满足):
         //   ① 后端确认 working=true   (agent 已开始干) — 但加急发送时 session 本来就在 working,
         //      此信号无效会过早清掉 pending (发送阶段提示来不及显示), 故加急时跳过本条.
@@ -3096,6 +2699,20 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     return () => window.clearInterval(id)
   }, [pendingSendAt, messageSubmitting])
 
+  // 切会话时清空"发送阶段"状态. 以下状态全属于"发起它的那个会话", 而 ChatArea 在切会话时
+  // 不重挂 (同一实例, 只换 sessionId), 残留下来就会在新会话的输入框里显示上一个会话的
+  // 正在发送 / 正在唤醒中 提示, 也会让新会话的发送按钮被上一个会话的提交挡住.
+  useEffect(() => {
+    setPendingSendAt(null)
+    pendingUrgentRef.current = false
+    setSendingHint(null)
+    setMessageSubmitting(false)
+    setLastSendError('')
+    setProjectKnowledgeSending(false)
+    // 乐观 LIVE 窗同理: 旧会话的窗口不该带到新会话.
+    holdLiveOverride(null)
+  }, [sessionId, holdLiveOverride])
+
   useEffect(() => {
     setStopFeedbackActive(false)
     if (stopFeedbackTimerRef.current) {
@@ -3118,14 +2735,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   const currentVscodeSubPath = (currentIssue as any)?.use_worktree && !backendWorktreeIgnored
     ? ((currentIssue as any)?.worktree_branch || (currentIssue as any)?.id)
     : null
-  // 空会话占位文案: pending(刚发消息等创建进程) / running(agent 在跑等首条输出) 时给 loading 文案,
-  // 由 JsonlView 配 spinner 显示; idle/waiting(终态空, 不会有数据自动到来) 时留空,
-  // 让 JsonlView 走静态"暂无对话内容"而非永久 spinner 误导用户"稍等就有".
-  const jsonlEmptyLoadingText = jsonlEntries.length === 0
-    ? (derivedStatus === 'pending'
-        ? (backendAlive ? '智能体进程已创建，联络中' : '正在创建智能体进程，请稍等')
-        : derivedStatus === 'running' ? '智能体工作中，等待输出…' : '')
-    : ''
+  // 空会话占位文案的规则搬进了 SessionJsonlPanel (它订阅快照, 能看到条目数); 这里只出状态输入.
   const hiddenBackendFailureAt = sessionId ? hiddenBackendFailureBefore[sessionId] : 0
   const backendFailureHiddenByKey = !!(sessionId && backendFailureKey && dismissedBackendFailureKeys[sessionId] === backendFailureKey)
   const backendFailureHiddenByTime = !!(
@@ -3488,8 +3098,17 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
   // 侥幸挡掉(Windows 不中招). 自维护 composingRef 独立于浏览器对 isComposing 的时序处理,
   // 与事件自带 isComposing / keyCode 229 三重守卫, 合成中按回车交给 IME 处理(字上屏, 不发送).
   const composingRef = useRef(false)
-  const [userScrolledUp, setUserScrolledUp] = useState(false)
+  // userScrolledUp 的唯一状态源是同步 ref (不是 React state): 追底 RAF 与消息滚底回调在
+  // 触发瞬间直接读它, 避免 setState 的重渲染延迟让"第一次上滚"仍被拽回一帧; 无 UI 依赖它.
+  const userScrolledUpRef = useRef(false)
+  // 追底接管态的变更史 (浮窗用): 谁在什么时候把它置真的 —— 因 C 就是靠这个定位的.
+  // Change history of the takeover flag: who set it and when, which is how cause C shows up.
+  const flagDiagRef = useRef<{ at: number; next: boolean; reason: string; count: number }>({ at: 0, next: false, reason: '初始', count: 0 })
   const [hasNewMessages, setHasNewMessages] = useState(false)
+  // 探针闭包只读 ref, 避免把 state 捕获成旧值 (探针不随渲染重建)
+  // The probe closure reads a ref so it never captures a stale state value
+  const hasNewMessagesRef = useRef(false)
+  hasNewMessagesRef.current = hasNewMessages
   const [replyTo, setReplyTo] = useState<any>(null)
   const [editingMsg, setEditingMsg] = useState<any>(null)
   const [runProjectPrompt, setRunProjectPrompt] = useState('')
@@ -3597,6 +3216,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     mentions?: any[]
   }) => {
     if (!sessionId) throw new Error('当前没有可发送消息的会话')
+    // 所有发送路径 (发送/加急/语音/权限按钮/快捷指令) 都经这里, 乐观 LIVE 卡也在此统一起窗.
+    holdLiveOverride('on', LIVE_OPTIMISTIC_SHOW_MS)
     const payload: Record<string, any> = { content, request_id: requestId }
     if (typeof inputText === 'string') payload.input_text = inputText
     if (urgent) payload.urgent = true
@@ -3608,18 +3229,21 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       })
       setLastSendError('')
       hideBackendFailure(sessionId)
+      onMessageSent?.()
       return resp
     } catch (e: any) {
       const text = e?.message || '发送失败'
       setTyping(false)
       setStreamContent('')
       setPendingSendAt(null)
+      // 没发出去就别再乐观显示 LIVE 卡.
+      holdLiveOverride(null)
       setLastSendError(text)
       addMessage({ role: 'system', content: `❌ ${text}` })
       setTimeout(() => loadHistoryRef.current(), 500)
       throw e
     }
-  }, [sessionId, setTyping, setStreamContent, addMessage, hideBackendFailure])
+  }, [sessionId, setTyping, setStreamContent, addMessage, hideBackendFailure, holdLiveOverride, onMessageSent])
 
   const clearVoiceTimers = useCallback(() => {
     if (voiceStopTimerRef.current !== null) {
@@ -3867,7 +3491,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     const el = inputRef.current
     if (!el) return
     const syncHeight = () => {
-      const minHeight = 60
+      const minHeight = layout === 'easy' ? 42 : 60
       const maxHeight = Math.floor(window.innerHeight * 0.7)
       // A multiline placeholder contributes to scrollHeight in Chromium even
       // when the textarea is empty. Measure only the user's value so the
@@ -3884,7 +3508,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     syncHeight()
     window.addEventListener('resize', syncHeight)
     return () => window.removeEventListener('resize', syncHeight)
-  }, [input, sessionId])
+  }, [input, sessionId, layout])
 
   const resolveProjectBindPath = useCallback(async () => {
     if (!currentProjectId) throw new Error('当前会话没有所属项目, 无法写入项目知识沉淀')
@@ -3925,36 +3549,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     }
   })
 
-  const flushPendingJsonlEntries = useCallback(() => {
-    if (pendingJsonlFlushTimerRef.current !== null) {
-      window.clearTimeout(pendingJsonlFlushTimerRef.current)
-      pendingJsonlFlushTimerRef.current = null
-    }
-    if (pendingJsonlEntriesRef.current.length === 0) return
-    const batch = pendingJsonlEntriesRef.current
-    const totalIncrement = pendingJsonlTotalIncrementRef.current
-    pendingJsonlEntriesRef.current = []
-    pendingJsonlTotalIncrementRef.current = 0
-    setJsonlEntries(prev => prev.concat(batch))
-    if (totalIncrement > 0) setJsonlTotal(prev => prev + totalIncrement)
-  }, [])
-
-  const clearPendingJsonlEntries = useCallback(() => {
-    if (pendingJsonlFlushTimerRef.current !== null) {
-      window.clearTimeout(pendingJsonlFlushTimerRef.current)
-      pendingJsonlFlushTimerRef.current = null
-    }
-    pendingJsonlEntriesRef.current = []
-    pendingJsonlTotalIncrementRef.current = 0
-  }, [])
-
-  const enqueueJsonlEntry = useCallback((entry: any) => {
-    pendingJsonlEntriesRef.current.push(entry)
-    pendingJsonlTotalIncrementRef.current += 1
-    if (pendingJsonlFlushTimerRef.current !== null) return
-    pendingJsonlFlushTimerRef.current = window.setTimeout(flushPendingJsonlEntries, 50)
-  }, [flushPendingJsonlEntries])
-
   const connectEventStream = useCallback((sid: string) => {
     // sid 必须有效: 防止 subscribe {task_id: undefined} 触发后端 "session undefined 不存在或不属于你".
     if (!sid) return
@@ -3969,6 +3563,9 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       // 期间已被切到别的 session → 这条 socket 作废, 不再 subscribe.
       if (source !== eventSourceRef.current) { try { source.close() } catch {} ; return }
       setConnectionStatus('connected')
+      // 重连 = stateless 对账: ① 重新协商 (If-None-Match 常态 304), 断线期间的差额由
+      // 变了 version 的已加载组整组重拉补齐, 不猜缺口.
+      historyStoreRef.current?.negotiate()
     }
 
     const handleStreamMessage = (e: MessageEvent) => {
@@ -3995,61 +3592,13 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           loadHistoryRef.current()
         }
         else if (msg.event === 'stopped') { setTyping(false); setStreamContent(''); loadHistoryRef.current() }
-        else if (msg.event === 'jsonl_meta') {
-          // count-then-tail: 后端 cheap count, 优先显示这个 total.
+        else if (msg.event === 'group_created' || msg.event === 'entries' || msg.event === 'pending_opener') {
+          // 历史存储事件 (落库结果的投影): group_created / {entries, group_id, group_id_version} /
+          // pending_opener {entry}. store 内部按水位线 + uuid 对账 (① 协商前到达的事件先缓冲).
           if (msg.session_id && msg.session_id !== sid) return
-          const total = Number(msg.total)
-          // 骨架模式下不用服务端计数覆盖 total: 否则每次 SSE 重连重发 jsonl_meta,
-          // "加载全部" 按钮就会复活 (骨架模式下全部内容按需可取, 不需要该按钮).
-          if (Number.isFinite(total) && !spineModeRef.current) setJsonlTotal(total)
-          if (typeof msg.jsonl_path === 'string') setJsonlPath(msg.jsonl_path)
-        }
-        else if (msg.event === 'jsonl_history') {
-          // SSE 建连时分块回灌 jsonl 历史: reset=true 的第一块覆盖, 后续块追加.
-          // 兼容旧后端: 没有 reset/chunk_index 时仍按一次性回灌覆盖处理.
-          if (msg.session_id && msg.session_id !== sid) return
-          const entries = Array.isArray(msg.entries) ? msg.entries : []
-          const isChunked = typeof msg.chunk_index === 'number' || typeof msg.done === 'boolean'
-          if (!isChunked) {
-            clearPendingJsonlEntries()
-            setJsonlEntries(entries)
-            setJsonlInitialLoading(false)
-            freshHistoryReceivedRef.current = true
-          } else if (msg.reset) {
-            clearPendingJsonlEntries()
-            setJsonlEntries(entries)
-            setJsonlInitialLoading(false)
-            freshHistoryReceivedRef.current = true
-            // SSE 重连 reset 把 entries 重置回尾部窗口: 之前并入的骨架和已加载轮明细都丢了。
-            // 重置骨架相关状态, 让"自动拉骨架"effect 重新执行 (服务端有 LRU 缓存, 代价极小);
-            // 已加载轮明细集合也清空 (那些主轨条目已不在本地, 展开时需重取)。
-            if (spineModeRef.current) {
-              spineModeRef.current = false
-              setSpineMode(false)
-              spineAutoLoadedForRef.current = null
-              roundDetailLoadedRef.current = new Set()
-              setRoundDetailTick(t => t + 1)
-            }
-          } else if (entries.length > 0) {
-            setJsonlEntries(prev => prev.concat(entries))
-            setJsonlInitialLoading(false)
-          }
-          // 兼容老后端: 没有先发 jsonl_meta 时, 用 msg.total / entries.length 回退.
-          const fallbackTotal = Number(msg.total)
-          if (Number.isFinite(fallbackTotal) && fallbackTotal > 0 && !spineModeRef.current) {
-            setJsonlTotal(prev => (fallbackTotal > prev ? fallbackTotal : prev))
-          }
-        }
-        else if (msg.event === 'jsonl_entry') {
-          // backend 写入新 entry, 追加. 后端带 session_id, 与本 stream 订阅的 sid 不符则丢弃 (双保险).
-          if (msg.session_id && msg.session_id !== sid) return
-          if (typeof msg.entry === 'undefined') return
-          setJsonlInitialLoading(false)
-          // live 增量合批写入 state: 高频工具输出时避免一条 entry 触发一次 React render.
-          enqueueJsonlEntry(msg.entry)
+          historyStoreRef.current?.applySseEvent(msg)
         }
         else if (msg.event === 'error') {
-          setJsonlInitialLoading(false)
           const text = formatSendError(msg)
           setLastSendError(text)
           addMessage({ role: 'system', content: `❌ ${text}` })
@@ -4057,16 +3606,15 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       } catch {}
     }
 
-    ;['subscribed', 'history', 'stream', 'buttons', 'stopped', 'jsonl_meta', 'jsonl_history', 'jsonl_entry', 'typing', 'server_error']
+    ;['subscribed', 'history', 'stream', 'buttons', 'stopped', 'group_created', 'entries', 'pending_opener', 'typing', 'server_error']
       .forEach(eventName => source.addEventListener(eventName, handleStreamMessage as EventListener))
 
     source.onerror = () => {
       if (source !== eventSourceRef.current) return
       setTyping(false)
-      setJsonlInitialLoading(false)
       setConnectionStatus('disconnected')
     }
-  }, [addMessage, clearPendingJsonlEntries, enqueueJsonlEntry])
+  }, [addMessage])
 
   // 标记当前 session 的历史消息是否已成功从后端取回过 (至少一次).
   // 用来防止 SessionStartModal 在切换 session / 首次进入的清空-加载窗口期
@@ -4098,200 +3646,127 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
 
   useEffect(() => { loadHistoryRef.current = loadHistory }, [loadHistory])
 
-  // count-then-tail: "加载全部" = 只拉伴生轨全量骨架 (超长会话按需加载).
-  // 骨架 = 每轮一张用户输入卡, 主轨明细等用户展开该轮时再按时间戳切片取 (loadRoundJsonlDetail).
-  // 伴生轨为空的旧会话回退旧路径 (拉双轨 merge 头部窗口).
-  const [spineMode, setSpineMode] = useState(false)
-  const spineModeRef = useRef(false)
-  const handleLoadAllJsonl = useCallback(async () => {
-    const sid = currentSession?.session_id || currentTask?.task_id
-    if (!sid) return
-    flushPendingJsonlEntries()
-    if (jsonlLoadingMore) return
-    if (jsonlTotal <= jsonlEntries.length) return
-    setJsonlLoadingMore(true)
+  // 简易模式 "加载全部": 把所有未加载组的条目按 ② 逐组补齐 (用户显式动作, 不设上限).
+  const handleEasyLoadAll = useCallback(async () => {
+    const store = historyStoreRef.current
+    if (!store || easyLoadingAll) return
+    setEasyLoadingAll(true)
     try {
-      const data = await api(`/api/sessions/${sid}/jsonl-history?track=mobius`)
-      const spine = Array.isArray(data?.entries) ? data.entries : []
-      const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
-      if (sid !== activeSid) return
-      if (spine.length > 0) {
-        // 必须函数式更新: 此刻可能有刚 flush 的 SSE 批次还在 setState 队列里,
-        // 用过期闭包整体覆盖会把它们抹掉 (表现为卡片消失). updater 内记录增量供 effect 判定.
-        spineAddedRef.current = null
-        setJsonlEntries(prev => {
-          const merged = mergeJsonlEntriesByIdentity(prev, spine)
-          spineAddedRef.current = merged.length - prev.length
-          return merged
-        })
-        spineEvalPendingRef.current = true
-      } else {
-        // 回退: 无伴生轨的旧会话走旧 merge 窗口
-        const missing = jsonlTotal - jsonlEntries.length
-        const legacy = await api(`/api/sessions/${sid}/jsonl-history?from=0&limit=${Math.max(missing, 1)}`)
-        const head = Array.isArray(legacy?.entries) ? legacy.entries : []
-        if (!head.length) return
-        setJsonlEntries(prev => head.concat(prev))
-        if (Number.isFinite(Number(legacy?.total))) setJsonlTotal(Number(legacy.total))
+      for (const group of store.groups) {
+        await store.ensureGroupEntries(group.id)
       }
-    } catch (e) {
-      console.warn('[jsonl] load all failed:', e)
+      setEasyExpandAllSignal(value => value + 1)
     } finally {
-      setJsonlLoadingMore(false)
+      setEasyLoadingAll(false)
     }
-  }, [currentSession?.session_id, currentTask?.task_id, flushPendingJsonlEntries, jsonlLoadingMore, jsonlTotal, jsonlEntries.length])
-
-  // 按轮加载主轨明细: [openerTs, nextOpenerTs) 时间戳切片, 游标自动续页; 已加载轮去重.
-  const roundDetailLoadedRef = useRef<Set<string>>(new Set())
-  const [roundDetailTick, setRoundDetailTick] = useState(0)
-  const [loadingRoundUuid, setLoadingRoundUuid] = useState<string | null>(null)
-  const loadRoundJsonlDetail = useCallback(async (openerUuid: string, fromTs: string, toTs: string | null) => {
-    const sid = currentSession?.session_id || currentTask?.task_id
-    if (!sid || !fromTs) return
-    if (roundDetailLoadedRef.current.has(openerUuid)) return
-    setLoadingRoundUuid(openerUuid)
-    try {
-      const collected: any[] = []
-      let fromByte: number | null = null
-      for (let page = 0; page < 10; page++) {
-        const q = new URLSearchParams({ track: 'primary', from_ts: fromTs, limit: '4000' })
-        if (toTs) q.set('to_ts', toTs)
-        if (fromByte != null) q.set('from_byte', String(fromByte))
-        const data = await api(`/api/sessions/${sid}/jsonl-history?${q.toString()}`)
-        const part = Array.isArray(data?.entries) ? data.entries : []
-        collected.push(...part)
-        if (!data?.has_more || !data?.next_from_byte) break
-        fromByte = Number(data.next_from_byte)
-      }
-      const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
-      if (sid !== activeSid) return
-      if (collected.length > 0) {
-        setJsonlEntries(prev => mergeJsonlEntriesByIdentity(prev, collected))
-      }
-      roundDetailLoadedRef.current.add(openerUuid)
-      setRoundDetailTick(t => t + 1)
-    } catch (e) {
-      console.warn('[jsonl] load round detail failed:', e)
-    } finally {
-      setLoadingRoundUuid(null)
-    }
-  }, [currentSession?.session_id, currentTask?.task_id])
-
-  // 骨架合并结果判定: updater 在 commit 时执行, 模式/total 决策放到 jsonlEntries 变化后的 effect 里做.
-  const spineAddedRef = useRef<number | null>(null)
-  const spineEvalPendingRef = useRef(false)
-  useEffect(() => {
-    if (!spineEvalPendingRef.current) return
-    spineEvalPendingRef.current = false
-    // total 对齐本地条数, "加载全部" 按钮消失; 主轨明细改按轮加载.
-    setJsonlTotal(jsonlEntries.length)
-    // 只有骨架真的带来了本地没有的条目才进入骨架模式;
-    // 新会话/骨架与本地重合时保持普通模式, 避免"加载明细"误报.
-    if ((spineAddedRef.current ?? 0) > 0) {
-      spineModeRef.current = true
-      setSpineMode(true)
-    }
-    spineAddedRef.current = null
-  }, [jsonlEntries])
-
-  // 骨架自动加载: 首包历史到位后, 若远端还有头部未加载 (total > entries), 后台自动拉伴生轨骨架.
-  // 骨架极小; 拉完后旧轮次立即以"仅问题卡"形态出现, 展开时按需取明细, 无需先点"加载全部".
-  const spineAutoLoadedForRef = useRef<string | null>(null)
-  useEffect(() => {
-    const sid = currentSession?.session_id || currentTask?.task_id
-    if (!sid || jsonlInitialLoading) return
-    if (spineAutoLoadedForRef.current === sid) return
-    if (spineModeRef.current) { spineAutoLoadedForRef.current = sid; return }
-    if (jsonlLoadingMore) return   // 正在加载 (如用户手点): 等结束后本 effect 重跑再试, 不标记
-    if (!(jsonlTotal > jsonlEntries.length)) return
-    spineAutoLoadedForRef.current = sid
-    handleLoadAllJsonl()
-  }, [currentSession?.session_id, currentTask?.task_id, jsonlInitialLoading, jsonlLoadingMore, jsonlTotal, jsonlEntries.length, handleLoadAllJsonl])
+  }, [easyLoadingAll])
 
   useEffect(() => {
     const sid = currentSession?.session_id || currentTask?.task_id
     if (!sid) return
-    clearPendingJsonlEntries()
-    spineModeRef.current = false
-    setSpineMode(false)
-    roundDetailLoadedRef.current = new Set()
-    setLoadingRoundUuid(null)
-    freshHistoryReceivedRef.current = false
     setStreamContent('')
     setTyping(false)
     setMessages([])
-    setJsonlInitialLoading(true)
-    // stale-while-revalidate: 先同步读内存缓存, 命中则立刻展示上次尾部 (零延迟秒开);
-    // 未命中再异步兜底 IndexedDB (跨刷新), 仍命中则在 SSE 权威数据到达前补上.
-    // SSE jsonl_history (reset) 到达后会覆盖, 是唯一真相源.
-    const cachedSync = readJsonlCacheSync(sid)
-    if (cachedSync && cachedSync.entries.length > 0) {
-      setJsonlEntries(cachedSync.entries)
-      setJsonlTotal(cachedSync.total || cachedSync.entries.length)
-      setJsonlPath(cachedSync.path)
-    } else {
-      setJsonlEntries([])
-      setJsonlTotal(0)
-      setJsonlPath(null)
-      readJsonlCacheFromIdb(sid).then((snap) => {
-        // 仍停留在同一个 session, 且 SSE 权威历史还没到, 才用缓存兜底, 避免旧值盖新值.
-        const stillActive = useStore.getState().currentSession?.session_id === sid
-          || useStore.getState().currentTask?.task_id === sid
-        if (!snap || !stillActive || freshHistoryReceivedRef.current) return
-        if (snap.entries.length === 0) return
-        setJsonlEntries(snap.entries)
-        setJsonlTotal(snap.total || snap.entries.length)
-        setJsonlPath(snap.path)
-      }).catch(() => {})
-    }
-    setJsonlLoadingMore(false)
     setHistoryLoaded(false)
+    // 滚动接管态属于"上一个会话": ChatArea 切会话不重挂, 残留的 userScrolledUp 会让新会话
+    // 永不自动追底, 并在对话还没撑满屏时亮出"新消息"按钮.
+    userScrolledUpRef.current = false
+    flagDiagRef.current = { at: Date.now(), next: false, reason: '切换会话时复位', count: flagDiagRef.current.count }
+    setHasNewMessages(false)
     loadHistory()
     connectEventStream(sid)
     return () => {
-      clearPendingJsonlEntries()
-      // 离开当前 session: 把最新尾部写回浏览器缓存, 下次切回秒开 (只缓存尾部窗口).
-      const leavingSid = sid
-      const latest = jsonlEntriesRef.current
-      if (leavingSid && latest.length > 0) {
-        writeJsonlCache(leavingSid, latest, jsonlTotalRef.current, jsonlPathRef.current)
-      }
       eventSourceRef.current?.close(); eventSourceRef.current = null; setConnectionStatus('disconnected')
     }
-  }, [currentSession?.session_id, currentTask?.task_id, clearPendingJsonlEntries, loadHistory, connectEventStream])
+  }, [currentSession?.session_id, currentTask?.task_id, loadHistory, connectEventStream])
 
-  // 卡片数量变化 (jsonlEntries.length) 时自动滚到末尾, 同时也覆盖原有 messages/stream/typing 触发.
-  // userScrolledUp=true 时不抢滚条, 改在顶部显示"新消息"按钮.
+  // 消息/流式/typing 触发的自动滚底 (条目数变化触发的滚底由 <EntriesAutoScroll> 承担,
+  // Chat 不订阅快照). userScrolledUpRef=true 时不抢滚条, 改在顶部显示"新消息"按钮.
   // 用 instant scroll (而非 smooth) + RAF: smooth 期间会持续触发 onScroll, 中间帧 distFromBottom>200
-  // 会误把 userScrolledUp 翻成 true, 导致下一次 entry 抵达时不再自动滚.
+  // 会误把 userScrolledUpRef 翻成 true, 导致下一次 entry 抵达时不再自动滚.
+  // (读的是同步 ref, 只在消息/typing 事件发生时取当时的值; 排队 RAF 执行前再查一次.)
   useEffect(() => {
     // 搜索结果跳转进行中时不抢滚条, 让 JsonlView 的 scrollToKey 把视图钉到命中卡片.
-    if (matchTargetActiveRef.current) return
-    if (userScrolledUp) {
+    if (matchTargetActiveRef.current || searchHighlightActiveRef.current) return
+    if (userScrolledUpRef.current) {
+      scrollDebug('message-effect: userScrolledUp=true → setHasNewMessages (不滚底)')
       setHasNewMessages(true)
     } else {
+      scrollDebug('message-effect: userScrolledUp=false → 排队 RAF 滚底')
       requestAnimationFrame(() => {
+        // 滚底回调执行前再查一次: 排队期间用户上滚了就别再抢滚条.
+        if (userScrolledUpRef.current) { scrollDebug('message-effect RAF: 执行前 userScrolledUp=true → 放弃滚底'); return }
+        if (matchTargetActiveRef.current || searchHighlightActiveRef.current) {
+          scrollDebug('message-effect RAF: search navigation/highlight active → 放弃滚底')
+          return
+        }
         const el = chatContainerRef.current
         if (el) el.scrollTop = el.scrollHeight
       })
     }
-  }, [messages, streamContent, isTyping, jsonlEntries.length])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, streamContent, isTyping])
 
-  const handleJsonlScrollPositionChange = useCallback((nextUserScrolledUp: boolean) => {
-    if (nextUserScrolledUp) {
-      setUserScrolledUp(true)
-    } else {
-      setUserScrolledUp(false)
-      setHasNewMessages(false)
+  // reason 由调用点给出 (wheel / touchmove / keydown / onScroll / 切会话), 浮窗据此指认触发源.
+  // The call site supplies the reason, so the panel can name what actually flipped the flag.
+  const handleJsonlScrollPositionChange = useCallback((nextUserScrolledUp: boolean, reason = '未知来源') => {
+    // 同步改 ref, 让正在跑的追底 RAF 下一帧立刻停下.
+    const prev = userScrolledUpRef.current
+    if (prev !== nextUserScrolledUp) {
+      scrollDebug(`flag: ${prev} → ${nextUserScrolledUp} (${reason})`)
+      const diag = flagDiagRef.current
+      flagDiagRef.current = { at: Date.now(), next: nextUserScrolledUp, reason, count: diag.count + 1 }
     }
+    userScrolledUpRef.current = nextUserScrolledUp
+    if (!nextUserScrolledUp) setHasNewMessages(false)
   }, [])
 
   const jumpToJsonlBottom = useCallback(() => {
+    scrollDebug('jumpToBottom: flag → false, 滚到 scrollHeight')
+    userScrolledUpRef.current = false
+    flagDiagRef.current = { at: Date.now(), next: false, reason: '点击「新消息」按钮', count: flagDiagRef.current.count }
     const el = chatContainerRef.current
     if (el) el.scrollTop = el.scrollHeight
-    setUserScrolledUp(false)
     setHasNewMessages(false)
   }, [])
+
+  // 浮窗探针: 会话级追底开关 + 接管态变更史 (因 B / 因 C 的现场).
+  // Panel probe: the session-level gates plus the takeover flag's change history.
+  useEffect(() => registerDiagProbe(() => {
+    const diag = flagDiagRef.current
+    const now = Date.now()
+    const blockedBySearch = matchTargetActiveRef.current || searchHighlightActiveRef.current
+    const highlight = searchHighlightTargetRef.current
+    return {
+      key: 'session-flags',
+      title: '会话追底开关',
+      subtitle: sessionIdForSearchHits || '未选中会话',
+      tone: blockedBySearch || userScrolledUpRef.current ? 'bad' : 'ok',
+      rows: [
+        { label: '布局模式', value: layout === 'easy' ? '简易模式' : layout === 'stacked' ? '纵向堆叠' : '常规分栏' },
+        { label: 'URL 命中参数', value: matchUuid || matchTs ? `match=${matchUuid || '—'} ts=${matchTs || '—'}` : '无' },
+        { label: '搜索高亮生效', value: bool(searchHighlightActiveRef.current, '是 (追底被静音)', '否'), tone: searchHighlightActiveRef.current ? 'bad' : 'ok' },
+        { label: '保留的命中目标', value: highlight ? `${highlight.uuid || '—'} / ${highlight.ts || '—'}` : '无' },
+        { label: '用户接管 (userScrolledUp)', value: bool(userScrolledUpRef.current, '真 (追底被静音)', '假'), tone: userScrolledUpRef.current ? 'bad' : 'ok' },
+        { label: '接管态变更次数', value: String(diag.count) },
+        { label: '上次变更', value: diag.at ? `${ms(now - diag.at)} 前 → ${diag.next ? '真' : '假'}，来源: ${diag.reason}` : '—', tone: diag.next ? 'warn' : 'ok' },
+        { label: '「新消息」按钮', value: bool(hasNewMessagesRef.current, '已亮 (前提: 有可滚动余量)', '未亮') },
+      ],
+      flags: [
+        { key: 'flags.match-url', label: 'URL 命中参数未清', active: matchTargetActiveRef.current, blocking: true, detail: '搜索跳转进行中, 追底让位给 scrollToKey' },
+        { key: 'flags.highlight-sticky', label: '命中红框未清除', active: searchHighlightActiveRef.current, blocking: true, detail: '因 B: 只要没点「清除搜索结果」, 追底与「新消息」按钮会一直静音' },
+        { key: 'flags.user-scrolled-up', label: '用户接管中', active: userScrolledUpRef.current, blocking: true, detail: `来源: ${diag.reason}` },
+      ],
+    }
+  }), [layout, matchUuid, matchTs, sessionIdForSearchHits])
+
+  // 排队卡片闪电按钮: 打断当前 turn, 让 agent 出队消费下一条排队指令.
+  const handlePauseToDequeue = useCallback(() => {
+    if (!sessionId) return
+    api(`/api/sessions/${sessionId}/pause-to-dequeue`, { method: 'POST' })
+      .then(() => { loadHistoryRef.current() })
+      .catch((e: any) => setLastSendError(e?.message || '打断出队失败'))
+  }, [sessionId, loadHistoryRef])
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -4455,6 +3930,44 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       .finally(() => setMessageSubmitting(false))
   }, [sessionId, messageSubmitting, addMessage, setTyping, postSessionMessage])
 
+  // 切换会话绑定的 aimux 协作设备 (RemoteAimuxMcpIndicator 点击设备/撤回初始后触发).
+  // 顺序: ① 更新 DB 绑定 → ② 同步本地 currentSession 元数据 → ③ 终止当前 agent(等待确认)
+  // → ④ 走"唤醒文字"路径发一条消息, 让新设备上重新 spawn 的 agent 先去 hostname 确认新环境.
+  const handleSwitchAimuxDevice = useCallback(async (newId: string, oldId: string) => {
+    if (!sessionId) throw new Error('当前没有可切换的会话')
+    // ① 更新绑定 (后端首次切换会把 oldId 记为 initial_aimux_id 锚点)
+    const updated = await api(`/api/sessions/${sessionId}/aimux-device`, {
+      method: 'PATCH',
+      body: JSON.stringify({ aimux_id: newId }),
+    })
+    // ② 同步本地会话元数据, 让图标立即指向新设备
+    const meta = updated?.pc_client_metadata
+    const store = useStore.getState()
+    const sel = store.currentSession
+    if (sel?.session_id === sessionId && meta) {
+      store.setCurrentSession({ ...sel, pc_client_metadata: meta })
+    }
+    const tsk = store.currentTask as any
+    if (tsk?.task_id === sessionId && meta) {
+      store.setCurrentTask({ ...tsk, pc_client_metadata: meta })
+    }
+    // ③ 终止当前 agent (await 确认终止完成)
+    await api(`/api/sessions/${sessionId}/terminate`, { method: 'POST' })
+    // ④ 发送唤醒消息 (与 handleAnnouncePc 同款路径: setPendingSendAt → "正在发送/唤醒中"提示)
+    const content = `【用户更新了mcp连接的设备（从${oldId}变成${newId}），这意味着用户命令你在新设备上完成一些操作，建议先用 remote_ping 检查和确认新设备的情况（它会返回对面机器的操作系统、shell、工作路径）。提示，你依然需要使用 remote_exec_command, remote_write_stdin, remote_apply_patch, remote_view_image, remote_ping 这些工具。】`
+    const requestId = makeSendRequestId()
+    setLastSendError('')
+    addMessage({ role: 'user', content })
+    pendingUrgentRef.current = false
+    setPendingSendAt(Date.now())
+    setMessageSubmitting(true)
+    setTyping(true)
+    postSessionMessage({ content, inputText: content, requestId })
+      .then(() => setTimeout(() => loadHistoryRef.current(), 500))
+      .catch(() => {})
+      .finally(() => setMessageSubmitting(false))
+  }, [sessionId, addMessage, setTyping, postSessionMessage])
+
   const sendRunProjectPortPrompt = useCallback((mainProjectPortPath: string) => {
     if (!sessionId) {
       setLastSendError('当前没有可发送指令的会话')
@@ -4570,6 +4083,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
     stopSuppressedUntilRef.current = Date.now() + 3000
     setBackendAlive(false)
     setBackendWorking(false)
+    // LIVE 卡单独按 10s 抑制: 3s 状态抑制窗短于软停耗时, 单靠它卡片会在后端仍报 working 时弹回.
+    holdLiveOverride('off', LIVE_OPTIMISTIC_HIDE_MS)
     const store = useStore.getState()
     const sel = store.currentSession
     if (sel?.session_id === sessionId && sel.agent_status !== 'idle') {
@@ -4598,57 +4113,113 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         setLastSendError(e?.message || '终止失败')
         setStopFeedbackActive(false)
       })
-  }, [sessionId, setTyping, setStreamContent, currentIssueId])
+  }, [sessionId, setTyping, setStreamContent, currentIssueId, holdLiveOverride])
 
-  if (!currentSession && !currentTask) return (
-    <div className="flex-1 flex items-center justify-center" style={{ background: 'var(--bg-secondary)' }}>
-      <div className="text-center max-w-md">
-        <MobiusLogo size={72} className="mx-auto mb-6" />
-        <h2 className="text-2xl font-bold mb-2" style={{ color: theme !== 'light' ? '#f1f5f9' : '#1e293b' }}>Mobius 莫比乌斯</h2>
-        <p className="text-[14px] leading-relaxed" style={{ color: theme !== 'light' ? '#6b7280' : '#64748b' }}>从左侧选择会话或新建会话开始对话</p>
-      </div>
-    </div>
+  const showSessionStartModal = !!(
+    currentSession
+    && historyLoaded
+    && ((currentSession as any).message_count || 0) === 0
+    && messages.length === 0
+    && !streamContent
+    && !isTyping
+    && !isFireAndForgetSession(sessionId)
+    && sessionId
+    && !startDismissed.has(sessionId)
   )
+  const startModalSessionId = showSessionStartModal ? sessionId : null
+  const sessionStartContent = startModalSessionId ? (
+    <SessionStartModal
+      key={startModalSessionId}
+      sessionName={currentSession?.name}
+      sessionDescription={(currentSession as any)?.description || ''}
+      autoConfirm
+      onConfirm={async () => {
+        // Errors remain visible in the confirmation card; dismiss only after a successful send.
+        await startSession()
+        dismissStartModal(startModalSessionId)
+      }}
+      onDismiss={() => dismissStartModal(startModalSessionId)}
+    />
+  ) : null
 
   const renderAdvancedSessionActions = (variant: 'default' | 'compact' | 'menu') => (
-    <AdvancedSessionActions
-      variant={variant}
-      sessionId={currentSession?.session_id || sessionId}
-      projectId={currentProjectId}
-      issueId={currentIssueId}
-      researchId={(currentSession as any)?.research_id}
-      vscodeSubPath={currentVscodeSubPath}
-      jsonlEntryCount={jsonlEntries.length}
-      showJsonlMeta={showJsonlMeta}
-      connectionReady={connectionStatus === 'connected'}
-      projectKnowledgeSending={projectKnowledgeSending}
-      onOpenFileChanges={() => setFileChangesOpen(true)}
-      onOpenBashCommands={() => setBashCommandsOpen(true)}
-      onOpenInputReplay={() => setInputReplayOpen(true)}
-      onToggleJsonlMeta={() => setShowJsonlMeta(value => !value)}
-      onRequestRunProject={sendRunProjectPortPrompt}
-      onOpenTerminal={() => setTerminalChoiceOpen(true)}
-      onOpenCooperablePc={() => setCooperablePcOpen(true)}
-      onOpenKnowledge={() => setKnowledgeEditorOpen(true)}
-      onOpenResearchGraph={currentResearchId ? () => {
-        setSearchParams((prev) => {
-          const next = new URLSearchParams(prev)
-          next.set('view', 'graph')
-          next.delete('match')
-          next.delete('ts')
-          return next
-        }, { replace: false })
-      } : undefined}
-      onSendProjectKnowledge={sendProjectKnowledgePrompt}
-      onContinueWithModel={() => setContinueModalOpen(true)}
-      onOpenSkill={() => setSkillMemoryModal('skill')}
-      onOpenMemory={() => setSkillMemoryModal('memory')}
-      onOpenGit={() => setSkillMemoryModal('git')}
-    />
+    // 计数槽: Chat 不订阅快照, 条目计数由小组件自取 (只在计数变化时重渲染这一小块).
+    <JsonlCountSlot store={historyStore}>
+      {(jsonlEntryCount) => (
+        <AdvancedSessionActions
+          variant={variant}
+          showTerminal={isAdminUser}
+          // 简易布局没有 chat 头部, 也就没有承载它的 … 菜单, 开关保留在工具浮层里.
+          omitJsonlMetaButton={layout !== 'easy'}
+          sessionId={currentSession?.session_id || sessionId}
+          projectId={currentProjectId}
+          issueId={currentIssueId}
+          researchId={(currentSession as any)?.research_id}
+          jsonlEntryCount={jsonlEntryCount}
+          showJsonlMeta={showJsonlMeta}
+          connectionReady={connectionStatus === 'connected'}
+          projectKnowledgeSending={projectKnowledgeSending}
+          onOpenFileChanges={() => setFileChangesOpen(true)}
+          onOpenBashCommands={() => setBashCommandsOpen(true)}
+          onOpenInputReplay={() => setInputReplayOpen(true)}
+          onToggleJsonlMeta={() => setShowJsonlMeta(value => !value)}
+          onOpenTerminal={() => setTerminalChoiceOpen(true)}
+          onOpenCooperablePc={() => setCooperablePcOpen(true)}
+          onOpenKnowledge={() => setKnowledgeEditorOpen(true)}
+          onOpenResearchGraph={currentResearchId ? () => {
+            setSearchParams((prev) => {
+              const next = new URLSearchParams(prev)
+              next.set('view', 'graph')
+              next.delete('match')
+              next.delete('ts')
+              return next
+            }, { replace: false })
+          } : undefined}
+          onSendProjectKnowledge={sendProjectKnowledgePrompt}
+          onContinueWithModel={() => setContinueModalOpen(true)}
+          onOpenSkill={() => setSkillMemoryModal('skill')}
+          onOpenMemory={() => setSkillMemoryModal('memory')}
+          onOpenGit={() => setSkillMemoryModal('git')}
+        />
+      )}
+    </JsonlCountSlot>
+  )
+
+  // 会话工具按钮组只有这一份定义: 标准布局挂在输入侧栏, 简易模式收进 EasySessionToolBar 浮层,
+  // 避免入口/禁用条件/显示开关两处漂移 (按钮本体由 AdvancedSessionActions 定义).
+  const sessionToolVisibilityOptions = useMemo(
+    () => SESSION_TOOL_VISIBILITY_OPTIONS.filter((option) => {
+      if (option.id === 'terminal' && !isAdminUser) return false
+      // 非简易布局的「显示时间与序号」已并进 chat 头部的 … 菜单, 按钮组里不再有这个按钮,
+      // 显示设置里也就不该留一个拨不动任何东西的开关.
+      if (option.id === 'jsonl-meta' && layout !== 'easy') return false
+      return true
+    }),
+    [isAdminUser, layout],
+  )
+  const renderSessionToolGroup = (opts: { variant: 'default' | 'compact' | 'menu'; className: string; initialPanel: null | 'memory'; persistActivePanel?: boolean }) => (
+    <UnifiedButtonGroup
+      className={opts.className}
+      aria-label="会话统一按钮组"
+      visibilityStorageKey="mobius:session-sidebar-buttons:hidden"
+    >
+      <SessionSkillMemoryEditor
+        sessionId={currentSession?.session_id || sessionId}
+        projectId={currentProjectId || undefined}
+        initialPanel={opts.initialPanel}
+        persistActivePanel={opts.persistActivePanel}
+        onSessionSearchHits={applySessionSearchHits}
+        leadingControls={renderAdvancedSessionActions(opts.variant)}
+        vscodeSubPath={currentVscodeSubPath}
+        onRequestRunProject={sendRunProjectPortPrompt}
+        onOpenKnowledge={currentProjectId && currentIssueId ? () => setKnowledgeEditorOpen(true) : undefined}
+        visibilityOptions={sessionToolVisibilityOptions}
+      />
+    </UnifiedButtonGroup>
   )
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0" style={{ background: 'var(--bg-secondary)' }}>
+    <div className={`flex-1 flex flex-col h-full min-w-0${layout === 'easy' ? ' mobius-chat-area--easy' : ''} chat-major-panel`} style={{ background: 'var(--bg-secondary)' }}>
       <RemoteFileMentionDrawer
         projectId={currentProjectId}
         issueId={currentIssueId || undefined}
@@ -4677,10 +4248,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           >
             <div className="flex items-center justify-between gap-3 border-b px-5 py-3" style={{ borderColor: 'var(--border-color)' }}>
               <div className="min-w-0">
-                <div id="run-project-port-title" className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+                <div id="run-project-port-title" className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
                   确认发送运行前端命令
                 </div>
-                <div className="mt-0.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                <div className="mt-0.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                   下面的消息将发送给当前会话
                 </div>
               </div>
@@ -4696,7 +4267,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             </div>
             <div className="p-4">
               <div
-                className="max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words rounded-xl border p-3 text-[12px] leading-relaxed"
+                className="max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words rounded-xl border p-3 text-[length:var(--fs-md)] leading-relaxed"
                 style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)' }}
               >
                 {runProjectPrompt}
@@ -4705,7 +4276,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 <button
                   type="button"
                   onClick={() => setRunProjectPrompt('')}
-                  className="h-9 rounded-xl border px-4 text-[13px] transition-colors hover:bg-[var(--bg-card-hover)]"
+                  className="h-9 rounded-xl border px-4 text-[length:var(--fs-lg)] transition-colors hover:bg-[var(--bg-card-hover)]"
                   style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
                 >
                   取消
@@ -4713,7 +4284,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 <button
                   type="button"
                   onClick={confirmSendRunProjectPortPrompt}
-                  className="h-9 rounded-xl bg-emerald-500 px-4 text-[13px] font-medium text-white transition-colors hover:bg-emerald-600"
+                  className="h-9 rounded-xl bg-emerald-500 px-4 text-[length:var(--fs-lg)] font-medium text-white transition-colors hover:bg-emerald-600"
                 >
                   确认发送
                 </button>
@@ -4747,7 +4318,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         />
       )}
       {layout === 'easy' && (
-        <div className="easy-session-context flex h-11 flex-shrink-0 items-center gap-3 border-b px-4" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }} data-testid="easy-session-context">
+        <div className="easy-session-context flex h-7 flex-shrink-0 items-center gap-3 border-b px-4" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }} data-testid="easy-session-context">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <SessionStatusChip
               connected={connectionStatus === 'connected'}
@@ -4758,12 +4329,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               done={backendJobDone === true && !backendAlive}
               alwaysShowLabel
             />
-            <div className="flex min-w-0 items-center gap-1.5 text-[12px]" aria-label="当前会话上下文">
-              <span className="max-w-[180px] truncate font-medium" style={{ color: 'var(--text-secondary)' }} title={projectForSession?.name || currentProjectId}>
+            <div className="flex min-w-0 items-center gap-1.5 text-[length:var(--fs-md)]" aria-label="当前会话上下文">
+              <span className="max-w-[180px] truncate font-medium uppercase" style={{ color: 'var(--text-secondary)' }} title={projectForSession?.name || currentProjectId}>
                 {projectForSession?.name || currentProjectId || '项目'}
               </span>
               <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
-              <span className="max-w-[220px] truncate" style={{ color: 'var(--text-secondary)' }} title={(currentResearch as any)?.title || (currentIssue as any)?.title || ''}>
+              <span className="max-w-[220px] truncate uppercase" style={{ color: 'var(--text-secondary)' }} title={(currentResearch as any)?.title || (currentIssue as any)?.title || ''}>
                 {(currentResearch as any)?.title || (currentIssue as any)?.title || '任务'}
               </span>
               <ChevronRight className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
@@ -4773,71 +4344,29 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             </div>
             <div className="easy-session-summary" aria-label="简易对话摘要">
               <Sparkles className="easy-session-summary__icon" aria-hidden="true" />
-              <span className="easy-session-summary__label">简易对话</span>
               <small>{easyRoundCount} 轮</small>
-              {(jsonlTotal > jsonlEntries.length || (jsonlEntries.length > 200 && easyExpandAllSignal === 0)) && (
-                <button
-                  type="button"
-                  className="easy-session-summary__action"
-                  disabled={jsonlLoadingMore}
-                  onClick={() => {
-                    setEasyExpandAllSignal(value => value + 1)
-                    if (jsonlTotal > jsonlEntries.length) handleLoadAllJsonl()
-                  }}
-                  title={jsonlLoadingMore ? '正在加载全部对话' : jsonlTotal > jsonlEntries.length ? `加载全部对话（${jsonlTotal} 条）` : `展开全部对话（${jsonlEntries.length} 条）`}
-                >
-                  {jsonlLoadingMore ? '加载中…' : jsonlTotal > jsonlEntries.length ? `加载全部 · ${jsonlTotal}` : `展开全部 · ${jsonlEntries.length}`}
-                </button>
-              )}
-              {jsonlEntries.length > 200 && easyExpandAllSignal > 0 && (
-                <span className="easy-session-summary__complete">已加载全部</span>
-              )}
             </div>
           </div>
-          <div className="flex flex-shrink-0 items-center gap-2">
-            <div className="easy-session-tools relative" ref={easyToolsRef}>
-              <button
-                type="button"
-                onClick={() => setEasyToolsOpen(value => !value)}
-                aria-controls="easy-session-tools-panel"
-                aria-expanded={easyToolsOpen}
-                className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors hover:bg-[var(--bg-card-hover)] focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                style={{ borderColor: 'var(--border-color)', color: easyToolsOpen ? 'var(--text-primary)' : 'var(--text-secondary)', background: easyToolsOpen ? 'var(--bg-active)' : undefined }}
-              >
-                <Wrench className="h-3.5 w-3.5" />
-                <span>工具</span>
-              </button>
-              {easyToolsOpen && (
-                <div ref={easyToolsPanelRef} id="easy-session-tools-panel" role="group" aria-label="当前会话工具" className="absolute right-0 top-9 z-50 rounded-xl p-1 shadow-2xl" style={{ background: 'var(--menu-bg)', border: '1px solid var(--border-color)' }} onKeyDown={(event) => {
-                  if (event.key !== 'Escape') return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  setEasyToolsOpen(false)
-                }} onClick={() => {
-                  setEasyToolsOpen(false)
-                }}>
-                  <div className="px-2 pb-2 pt-1 text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>当前会话工具</div>
-                  {renderAdvancedSessionActions('menu')}
-                </div>
-              )}
-            </div>
-            <HeaderActionButton
-              tone="red"
-              title="终止当前智能体正在执行的操作"
-              disabled={!sessionId}
-              aria-live="polite"
-              onClick={handleStopSession}
-              className={`session-stop-button ${stopFeedbackActive ? 'session-stop-button--active' : ''}`}
+          {/* 右侧: 文件编辑栏开关 (简易模式的代码对话入口, 打开后右侧出现 文件树+编辑器) */}
+          {currentProjectId && (
+            <button
+              type="button"
+              onClick={toggleEasyFiles}
+              aria-pressed={easyFilesOpen}
+              aria-label={easyFilesOpen ? '收起文件编辑栏' : '展开文件编辑栏'}
+              title={easyFilesOpen ? '收起文件编辑栏' : '展开文件编辑栏'}
+              data-testid="easy-files-toggle"
+              className="easy-files-toggle inline-flex h-5 flex-shrink-0 items-center gap-1 rounded px-1.5 transition-colors hover:bg-[var(--bg-hover)]"
+              style={{ color: easyFilesOpen ? 'var(--accent-primary)' : 'var(--text-muted)' }}
             >
-              <span className="session-stop-button__square inline-block h-1.5 w-1.5 rounded-sm bg-current opacity-90" />
-              <span>{stopFeedbackActive ? '已触发' : '停止'}</span>
-            </HeaderActionButton>
-          </div>
+              <FolderTree className="h-3.5 w-3.5" strokeWidth={1.8} />
+            </button>
+          )}
         </div>
       )}
 
       {/* 标准模式保留完整会话标题栏；简易模式使用上方轻量上下文与监督栏。 */}
-      {layout !== 'easy' && <div data-tour="session-chat-header" className="h-9 border-b flex items-center justify-between px-5 flex-shrink-0" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
+      {layout !== 'easy' && <div data-tour="session-chat-header" className="mobius-session-chat-header h-9 border-b flex items-center justify-between px-5 flex-shrink-0" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="min-w-0 flex items-center gap-2">
             <SessionStatusChip
@@ -4849,9 +4378,13 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               done={backendJobDone === true && !backendAlive}
             />
             <SessionTitle name={currentSession?.name || currentTask?.name} theme={theme} />
-            <RemoteAimuxMcpIndicator session={currentSession ?? currentTask} />
+            <RemoteAimuxMcpIndicator
+              session={currentSession ?? currentTask}
+              sessionId={sessionId}
+              onSwitchDevice={handleSwitchAimuxDevice}
+            />
             {/* {currentModelLabel && (
-              <span className="text-[10px] px-2 py-0.5 rounded-md flex-shrink-0 hidden md:inline-flex"
+              <span className="text-[length:var(--fs-xs)] px-2 py-0.5 rounded-md flex-shrink-0 hidden md:inline-flex"
                 title={`模型: ${currentModelLabel}`}
                 style={{ color: 'var(--text-muted)', background: 'var(--bg-card-hover)' }}>
                 {currentModelLabel}
@@ -4874,13 +4407,16 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {/* Stop: 终止当前 turn — 独立于发送按钮, 保持常驻可见. */}
+          {/* Stop: 终止当前 turn — 独立于发送按钮, 保持常驻可见.
+              去描边只留红底, 上下 padding 补回 1px 边框的占位以保持与相邻按钮等高.
+              Borderless red fill only; the extra vertical padding replaces the 1px border so the pill keeps its height. */}
           <HeaderActionButton
             tone="red"
             title="终止当前智能体正在执行的操作"
             disabled={!sessionId}
             aria-live="polite"
             onClick={handleStopSession}
+            style={{ borderWidth: 0, paddingTop: 3, paddingBottom: 3 }}
             className={`session-stop-button hidden md:inline-flex ${stopFeedbackActive ? 'session-stop-button--active' : ''}`}>
             {stopFeedbackActive && (
               <>
@@ -4921,30 +4457,30 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               projectId={currentProjectId}
               subPath={currentVscodeSubPath}
               showWorktreeOption={!!currentVscodeSubPath}
-              className="text-[11px] rounded-full px-2.5 py-0.5 border border-blue-500/20 text-blue-400 hover:bg-blue-500/10 transition-colors hidden md:inline-flex items-center gap-1.5 whitespace-nowrap"
+              className="text-[length:var(--fs-sm)] rounded-full px-2.5 py-[3px] bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-colors hidden md:inline-flex items-center gap-1.5 whitespace-nowrap"
             />
           )}
-          {/* … 溢出菜单: 把 "原始数据 / 隐藏次要条目" 收纳进来 */}
-          <ChatHeaderOverflowMenu
-            jsonlCount={jsonlEntries.length}
-            minorCount={minorCount}
-            hideMinor={hideMinorJsonl}
-            onToggleHideMinor={() => setHideMinorJsonl(v => !v)}
-            onOpenRaw={() => setShowRaw(true)}
-            showJsonlMeta={showJsonlMeta}
-            onToggleShowJsonlMeta={() => setShowJsonlMeta(v => !v)}
-            autoUrgentOnEnter={autoUrgentOnEnter}
-            onToggleAutoUrgentOnEnter={toggleAutoUrgentOnEnter}
-            onStop={handleStopSession}
-            canStop={!!sessionId}
-            onViewScheduledTasks={() => setScheduledTasksOpen(true)}
-          />
+          {/* … 溢出菜单: 把 "原始数据 / 隐藏次要条目" 收纳进来 (计数槽自取条数) */}
+          <JsonlCountSlot store={historyStore}>
+            {(jsonlCount) => (
+              <ChatHeaderOverflowMenu
+                jsonlCount={jsonlCount}
+                onOpenRaw={() => setShowRaw(true)}
+                showJsonlMeta={showJsonlMeta}
+                onToggleShowJsonlMeta={() => setShowJsonlMeta(v => !v)}
+                autoUrgentOnEnter={autoUrgentOnEnter}
+                onToggleAutoUrgentOnEnter={toggleAutoUrgentOnEnter}
+                onStop={handleStopSession}
+                canStop={!!sessionId}
+              />
+            )}
+          </JsonlCountSlot>
         </div>
       </div>}
 
       {stopFeedbackActive && (
         <div className="pointer-events-none fixed left-1/2 top-16 z-[80] -translate-x-1/2">
-          <div className="session-stop-toast flex items-center gap-2 rounded-xl border border-red-300/45 bg-red-600 px-4 py-2 text-[13px] font-semibold text-white shadow-2xl shadow-red-950/40">
+          <div className="session-stop-toast flex items-center gap-2 rounded-xl border border-red-300/45 bg-red-600 px-4 py-2 text-[length:var(--fs-lg)] font-semibold text-white shadow-2xl shadow-red-950/40">
             <span className="session-stop-toast__icon inline-flex h-5 w-5 items-center justify-center rounded-md bg-white/18">
               <span className="h-2.5 w-2.5 rounded-sm bg-white" />
             </span>
@@ -4954,7 +4490,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
       )}
 
       {lastSendError && (
-        <div className="mx-5 mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[12px] text-red-300 bg-red-500/10 border-red-500/25 flex-shrink-0">
+        <div className="mx-5 mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[length:var(--fs-md)] text-red-300 bg-red-500/10 border-red-500/25 flex-shrink-0">
           <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
           </svg>
@@ -4976,7 +4512,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
 
       {/* 持久失败横幅: 取自 failed.flag 的 reason, 可手动关闭; 成功继续对话后也会隐藏. */}
       {showBackendFailureBanner && (
-        <div className="mx-5 mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[12px] text-red-300 bg-red-500/10 border-red-500/25 flex-shrink-0">
+        <div className="mx-5 mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[length:var(--fs-md)] text-red-300 bg-red-500/10 border-red-500/25 flex-shrink-0">
           <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
           </svg>
@@ -4993,44 +4529,63 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         </div>
       )}
 
+      {/* body 外层水平壳: chat-body (flex-1) + 简易模式右侧文件编辑栏. 壳常驻渲染
+          (default/stacked 下只是多一层等宽包裹, 零视觉变化), 保证 easy↔default 切换布局时
+          chat-body 不因父结构变化而重挂. */}
+      <div className="flex min-h-0 flex-1">
       {/* body: 默认横向分栏，JsonlView 与输入/skill-memory 之间可拖拽调宽；初始 68/32。
           窄屏改纵向堆叠 (见 index.css .mobius-chat-body).
-          layout='stacked' 时附加 mobius-chat-body--stacked, 与视口无关地强制纵向堆叠 (代码对话模式). */}
-      <div ref={chatBodyRef} className={`mobius-chat-body flex-1 flex min-h-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}`}>
-        {/* 左侧: JSONL 视图，自动占满右栏之外的剩余宽度。 */}
+          layout='stacked' 时附加 mobius-chat-body--stacked, 与视口无关地强制纵向堆叠 (代码对话模式).
+          chatBodyNarrow (中栏自身 < 900px, 视口媒体查询管不到) 时附加 mobius-chat-body--narrow.
+          easy + 文件栏打开时右 padding 收回 (空间让给文件栏, padding 平滑过渡避免内容跳动). */}
+      <div
+        ref={chatBodyRef}
+        className={`mobius-chat-body flex-1 flex min-h-0 min-w-0${layout === 'stacked' ? ' mobius-chat-body--stacked' : ''}${layout === 'easy' ? ' mobius-chat-body--easy' : ''}${chatBodyNarrow ? ' mobius-chat-body--narrow' : ''}`}
+        style={layout === 'easy' ? { paddingLeft: '10%', paddingRight: easyFilesOpen ? '0' : '10%', transition: 'padding .2s ease' } : undefined}
+      >
+        {/* 左侧: JSONL 视图，自动占满右栏之外的剩余宽度。
+            快照订阅在面板内部 (Chat 不随每条数据重渲染); 条目驱动的自动滚底由旁边的 EntriesAutoScroll 承担. */}
         <SessionJsonlPanel
           currentProjectId={currentProjectId}
+          projectBindPath={projectForSession?.bind_path || ''}
+          sessionIdentity={sessionIdForSearchHits}
           chatContainerRef={chatContainerRef}
           endRef={endRef}
-          visibleJsonl={visibleJsonl}
-          loadedJsonlCount={jsonlEntries.length}
-          jsonlTotal={jsonlTotal}
-          jsonlEmptyLoadingText={jsonlEmptyLoadingText}
-          jsonlInitialLoading={jsonlInitialLoading}
-          jsonlLoadingMore={jsonlLoadingMore}
+          historyStore={historyStore}
+          derivedStatus={derivedStatus}
           showJsonlMeta={showJsonlMeta}
-          cursorStyleTools={cursorStyleTools}
           backendAlive={backendAlive}
           backendWorking={backendWorking}
+          liveCardMode={liveMode ?? 'auto'}
           backendPid={backendPid}
           realTimeInfo={backendRealTimeInfo}
-          lastTimestamp={liveDebugSnapshot.lastTimestampProp}
           hasNewMessages={hasNewMessages}
-          onLoadAllJsonl={handleLoadAllJsonl}
-          onLoadRoundDetail={loadRoundJsonlDetail}
-          roundDetailLoaded={roundDetailLoadedRef.current}
-          spineMode={spineMode}
-          roundDetailVersion={roundDetailTick}
-          loadingRoundUuid={loadingRoundUuid}
           onScrollPositionChange={handleJsonlScrollPositionChange}
           onJumpToBottom={jumpToJsonlBottom}
+          onPauseToDequeue={handlePauseToDequeue}
           scrollToEntryUuid={matchUuid}
           scrollToMatchTs={matchTs}
           onMatchScrollResolved={onMatchScrollResolved}
-          onMatchScrollUnresolved={handleLoadAllJsonl}
+          searchHighlightActiveRef={searchHighlightActiveRef}
+          searchHighlightTargetRef={searchHighlightTargetRef}
+          searchHighlightClearSignal={searchHighlightClearSignal}
+          searchHits={searchHits}
+          onSearchHitJump={jumpCurrentSearchHit}
+          onSearchHitPrevious={() => moveSearchHit(-1)}
+          onSearchHitNext={() => moveSearchHit(1)}
+          onSearchHitClear={clearSearchHits}
           onEasyRoundCountChange={handleEasyRoundCountChange}
           easyExpandAllSignal={easyExpandAllSignal}
           variant={layout === 'easy' ? 'easy' : 'standard'}
+          exclusiveContent={sessionStartContent}
+        />
+        <EntriesAutoScroll
+          store={historyStore}
+          containerRef={chatContainerRef}
+          matchActiveRef={matchTargetActiveRef}
+          searchHighlightActiveRef={searchHighlightActiveRef}
+          userScrolledUpRef={userScrolledUpRef}
+          onBlocked={() => setHasNewMessages(true)}
         />
 
         {/* 右侧: 输入区 (顶) + skill/memory editor (底). 整列竖向滚动. 窄屏整宽。 */}
@@ -5046,13 +4601,96 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               title="拖拽调整宽度 · 双击恢复默认"
             />
           )}
-          {/* 输入区 */}
-          <div className="mobius-chat-input-editor min-w-0 flex-shrink-0 p-3">
+          {layout === 'easy' && (
+            <div className="easy-session-chat-input-shell min-w-0 flex-shrink-0 p-3">
+              {/* 附件芯片: 标准输入框整块在简易模式下隐藏, 芯片若留在那里面, 上传/粘贴后就没有任何可见反馈. */}
+              {attachments.length > 0 && (
+                <div className="mb-2 flex max-h-20 flex-wrap items-start gap-1.5 overflow-y-auto pr-1">
+                  {attachments.map(att => (
+                    <AttachmentChip
+                      key={att.id}
+                      att={att}
+                      theme={theme as 'dark' | 'light' | 'purple'}
+                      onRemove={() => removeAttachment(att.id)}
+                      onPreview={openAttachmentImagePreview}
+                    />
+                  ))}
+                </div>
+              )}
+              <EasySessionChatInput
+                mode="follow_session_mode"
+                input={input}
+                inputRef={inputRef}
+                inputPlaceholder={inputPlaceholder}
+                inputFocused={inputFocused}
+                theme={theme}
+                voiceState={voiceState}
+                voiceTip={voiceTip}
+                voiceBusy={voiceBusy}
+                messageSubmitting={messageSubmitting}
+                anyUploading={anyUploading}
+                hasReadyAttachments={attachments.some(attachment => attachment.status === 'done')}
+                hasPendingSend={!!pendingSendAt}
+                modelAvailable={modelAvailable}
+                onStop={handleStopSession}
+                stopFeedbackActive={stopFeedbackActive}
+                onChange={handleChatInputChange}
+                onPaste={handlePaste}
+                onFocus={() => setInputFocused(true)}
+                onBlur={(event) => {
+                  const nextTarget = event.relatedTarget as Node | null
+                  if (nextTarget && event.currentTarget.contains(nextTarget)) return
+                  setInputFocused(false)
+                }}
+                onToggleVoice={toggleVoiceRecording}
+                onUpload={openFilePicker}
+                onSend={send}
+                toolbar={
+                  // 简易布局下标准侧栏按钮组不渲染, 这里把它收进贴住输入框的工具浮层 (同一份定义).
+                  <EasySessionToolBar label="会话工具" disabled={!currentSession?.session_id && !sessionId}>
+                    {renderSessionToolGroup({
+                      // 与标准布局侧栏完全同一个 variant 与按钮清单: 简易模式只是把这一组搬进浮层,
+                      // 图标态也避免了 'menu'/'compact' 形态与资源编辑器重复出 Skill/Memory/Git.
+                      variant: 'default',
+                      className: 'flex min-h-0 flex-col',
+                      initialPanel: null,
+                      persistActivePanel: true,
+                    })}
+                  </EasySessionToolBar>
+                }
+                onKeyDown={e => {
+                  if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                    handleInputArrowUp(e)
+                    return
+                  }
+                  if (e.key !== 'Enter') return
+                  const nativeEvent = e.nativeEvent as KeyboardEvent
+                  if (composingRef.current || (e as any).isComposing || nativeEvent.isComposing || nativeEvent.keyCode === 229) return
+                  if (e.shiftKey) return
+                  if (e.altKey) {
+                    e.preventDefault()
+                    const el = inputRef.current
+                    if (el) {
+                      const start = el.selectionStart
+                      const end = el.selectionEnd
+                      setInput(input.slice(0, start) + '\n' + input.slice(end))
+                      requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = start + 1 })
+                    }
+                    return
+                  }
+                  e.preventDefault()
+                  send(autoUrgentOnEnter)
+                }}
+              />
+            </div>
+          )}
+          {/* 标准模式输入区；简易模式使用上方独立组件 */}
+          <div className={`mobius-chat-input-editor min-w-0 flex-shrink-0 p-3${layout === 'easy' ? ' hidden' : ''}`}>
             <div>
           {replyTo && (
             <div className="flex items-center gap-2 mb-2 px-4 py-2 bg-blue-500/5 border border-blue-500/15 rounded-xl">
               <svg className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
-              <div className="flex-1 min-w-0 text-[12px] text-[var(--text-secondary)] truncate">
+              <div className="flex-1 min-w-0 text-[length:var(--fs-md)] text-[var(--text-secondary)] truncate">
                 引用 {replyTo.role === 'assistant' ? '智能体' : '你'}: {(replyTo.content || '').slice(0, 100)}
               </div>
               <button onClick={() => setReplyTo(null)} className="text-[var(--text-dimmed)] hover:text-[var(--text-secondary)] transition-colors flex-shrink-0">
@@ -5063,7 +4701,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           {editingMsg && (
             <div className="flex items-center gap-2 mb-2 px-4 py-2 bg-yellow-500/5 border border-yellow-500/15 rounded-xl">
               <svg className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-              <div className="flex-1 min-w-0 text-[12px] text-yellow-400/80">编辑消息 (将作为新消息重新发送)</div>
+              <div className="flex-1 min-w-0 text-[length:var(--fs-md)] text-yellow-400/80">编辑消息 (将作为新消息重新发送)</div>
               <button onClick={() => { setEditingMsg(null); setInput('') }} className="text-[var(--text-dimmed)] hover:text-[var(--text-secondary)] transition-colors flex-shrink-0">
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
@@ -5097,18 +4735,18 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               <div className="absolute inset-0 z-20 p-1 pointer-events-none" style={{ background: 'var(--input-bg)', borderRadius: 14 }}>
                 <div className="flex h-full items-center justify-center rounded-[14px] border border-dashed border-blue-500/55"
                   style={{ background: 'linear-gradient(135deg, rgba(59,130,246,0.08), rgba(59,130,246,0.18))' }}>
-                  <div className="text-[12px] font-medium text-blue-400">松开以添加文件</div>
+                  <div className="text-[length:var(--fs-md)] font-medium text-blue-400">松开以添加文件</div>
                 </div>
               </div>
             )}
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileInputChange} />
             <div className="px-3 pt-3 pb-2.5">
               {!modelAvailable && (
-                <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-500/45 bg-amber-500/10 px-3 py-2 text-[12px] leading-snug" style={{ color: 'var(--text-primary)' }}>
+                <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-500/45 bg-amber-500/10 px-3 py-2 text-[length:var(--fs-md)] leading-snug" style={{ color: 'var(--text-primary)' }}>
                   <span className="flex-1">因之前使用的模型被管理员移除，本次会话不能继续，如需继续，请点击“修改模型并继续”。</span>
                   <button type="button" onClick={() => setContinueModalOpen(true)}
                     disabled={!currentSession?.session_id || (!currentIssueId && !(currentSession as any)?.research_id)}
-                    className="btn-label shrink-0 rounded-md bg-amber-500 px-2.5 py-1 text-[12px] font-medium text-black hover:bg-amber-400">
+                    className="btn-label shrink-0 rounded-md bg-amber-500 px-2.5 py-1 text-[length:var(--fs-md)] font-medium text-black hover:bg-amber-400">
                     修改模型并继续
                   </button>
                 </div>
@@ -5129,10 +4767,10 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               {selectedAgentMentions.length > 0 && (
                 <div className="mb-2 flex flex-wrap items-center gap-1.5">
                   {selectedAgentMentions.map((mention) => (
-                    <div key={mention.sessionId} className="flex min-w-0 max-w-full items-center gap-2 rounded-md border px-2 py-1.5 text-[12px]" style={{ borderColor: 'rgba(59,130,246,0.25)', background: 'rgba(59,130,246,0.08)', color: 'var(--text-primary)' }}>
+                    <div key={mention.sessionId} className="flex min-w-0 max-w-full items-center gap-2 rounded-md border px-2 py-1.5 text-[length:var(--fs-md)]" style={{ borderColor: 'rgba(59,130,246,0.25)', background: 'rgba(59,130,246,0.08)', color: 'var(--text-primary)' }}>
                       <Bot className="h-3.5 w-3.5 flex-shrink-0 text-blue-400" strokeWidth={1.8} />
                       <span className="max-w-48 truncate">@{mention.name}</span>
-                      <span className="whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px]" style={{ borderColor: 'rgba(59,130,246,0.22)', color: 'var(--text-muted)' }}>
+                      <span className="whitespace-nowrap rounded border px-1.5 py-0.5 text-[length:var(--fs-xs)]" style={{ borderColor: 'rgba(59,130,246,0.22)', color: 'var(--text-muted)' }}>
                         {mention.mode === 'bidirectional' ? '双向' : '只读'}
                       </span>
                       <button
@@ -5150,7 +4788,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               )}
               <div className="relative">
               {!input && !editingMsg && !isNewConversation && (
-                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid min-w-0 grid-cols-2 gap-x-3 gap-y-0.5 pb-1 text-[11px] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 grid min-w-0 grid-cols-2 gap-x-3 gap-y-0.5 pb-1 text-[length:var(--fs-sm)] leading-[1.35]" style={{ color: 'var(--placeholder-color)' }}>
                   <span className="col-span-2 min-w-0 truncate">发送指令：</span>
                   <span className="min-w-0 truncate">· Shift+Enter 换行</span>
                   <span className="min-w-0 truncate">· Ctrl/⌘+V 粘贴文件/截图</span>
@@ -5189,115 +4827,13 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                   send(autoUrgentOnEnter)
                 }}
                 placeholder={input && inputPlaceholder}
-                className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[14px] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[11px] focus:outline-none overflow-y-auto"
-                style={{ height: inputHeight, minHeight: 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
+                className="w-full bg-transparent resize-none border-0 px-0 pt-0 pb-1 text-[length:var(--fs-xl)] leading-[1.55] placeholder:!text-[var(--placeholder-color)] placeholder:!text-[length:var(--fs-sm)] focus:outline-none overflow-y-auto"
+                style={{ height: inputHeight, minHeight: layout === 'easy' ? 42 : 60, maxHeight: '70vh', color: 'var(--text-primary)' }}
               />
               </div>
             </div>
             <div className="relative flex items-end gap-2 px-3 pb-3 pt-0">
-              {layout === 'easy' && easyProjectControl && (
-                <div className="easy-input-project-row relative mr-auto flex min-w-0 items-center" ref={easyProjectMenuRef}>
-                  <button
-                    ref={easyProjectButtonRef}
-                    type="button"
-                    onClick={() => setEasyProjectMenuOpen(value => !value)}
-                    aria-haspopup="menu"
-                    aria-expanded={easyProjectMenuOpen}
-                    className="easy-input-project-trigger inline-flex h-8 max-w-[320px] min-w-0 cursor-pointer items-center gap-2 rounded-full px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                    style={{ background: 'var(--bg-active)', color: 'var(--text-primary)' }}
-                    title={easyProjectControl.selectedProjectName || '所有项目'}
-                  >
-                    <FolderOpen className="h-4 w-4 flex-shrink-0" strokeWidth={1.8} />
-                    <span className="min-w-0 truncate">{easyProjectControl.selectedProjectName || '所有项目'}</span>
-                    <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${easyProjectMenuOpen ? 'rotate-180' : ''}`} />
-                  </button>
-
-                  {easyProjectMenuOpen && (
-                    <div
-                      role="menu"
-                      aria-label="选择项目"
-                      className="easy-input-project-menu absolute bottom-11 left-0 z-40 w-[360px] max-w-[calc(100vw-48px)] overflow-hidden rounded-2xl p-2 shadow-2xl"
-                      style={{ background: 'var(--menu-bg)', border: '1px solid var(--border-color)' }}
-                    >
-                      <label className="flex h-10 items-center gap-2 rounded-xl px-3" style={{ background: 'var(--input-bg)', color: 'var(--text-secondary)' }}>
-                        <Search className="h-4 w-4 flex-shrink-0" strokeWidth={1.8} />
-                        <input
-                          value={easyProjectQuery}
-                          onChange={event => setEasyProjectQuery(event.target.value)}
-                          placeholder="搜索项目"
-                          aria-label="搜索项目"
-                          autoFocus
-                          className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] outline-none placeholder:text-[var(--text-muted)]"
-                          style={{ color: 'var(--text-primary)' }}
-                        />
-                        {easyProjectQuery && (
-                          <button type="button" onClick={() => setEasyProjectQuery('')} className="inline-flex h-7 w-7 items-center justify-center rounded-lg hover:bg-[var(--bg-hover)]" aria-label="清空项目搜索">
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </label>
-
-                      <div className="mt-2 max-h-[260px] overflow-y-auto">
-                        {easyFilteredProjects.length === 0 ? (
-                          <div className="px-3 py-7 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>没有匹配的项目</div>
-                        ) : easyFilteredProjects.map(project => {
-                          const active = project.id === easyProjectControl.selectedProjectId
-                          return (
-                            <button
-                              key={project.id}
-                              type="button"
-                              role="menuitemradio"
-                              aria-checked={active}
-                              onClick={() => {
-                                easyProjectControl.onSelectProject(project.id)
-                                setEasyProjectMenuOpen(false)
-                                setEasyProjectQuery('')
-                              }}
-                              className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                              style={{ background: active ? 'var(--bg-active)' : undefined, color: 'var(--text-primary)' }}
-                            >
-                              <FolderOpen className="h-4 w-4 flex-shrink-0" strokeWidth={1.8} />
-                              <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{project.name}</span>
-                              {project.runningCount ? <span className="text-[10px] text-amber-400">运行 {project.runningCount}</span> : null}
-                              {active && <Check className="h-4 w-4 flex-shrink-0" strokeWidth={2} />}
-                            </button>
-                          )
-                        })}
-                      </div>
-
-                      <div className="mt-2 border-t pt-2" style={{ borderColor: 'var(--border-color)' }}>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            setEasyProjectMenuOpen(false)
-                            easyProjectControl.onCreateProject()
-                          }}
-                          className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] font-semibold transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                          style={{ color: 'var(--text-primary)' }}
-                        >
-                          <FolderPlus className="h-4 w-4" strokeWidth={1.8} />
-                          新建项目
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            easyProjectControl.onSelectProject(null)
-                            setEasyProjectMenuOpen(false)
-                            setEasyProjectQuery('')
-                          }}
-                          className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
-                          style={{ color: 'var(--text-secondary)' }}
-                        >
-                          <X className="h-4 w-4" strokeWidth={1.8} />
-                          不限项目
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* 更多输入功能: 上传文件 / 压缩上文 / 展开大输入。简易模式有独立输入框组件, 这一行只服务常规模式。 */}
               <div className="relative">
                 <AdvancedInteractionBtn
                   ref={inputMenuButtonRef}
@@ -5328,20 +4864,20 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                     }}
                   >
                     <button type="button" role="menuitem" onClick={() => { setInputMenuOpen(false); openFilePicker() }}
-                      className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                      className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                       style={{ color: 'var(--text-primary)' }}>
                       <Paperclip className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />
                       <span>上传文件</span>
                     </button>
                     <button type="button" role="menuitem" onClick={() => { setInputMenuOpen(false); setCompactConfirmOpen(true) }}
                       disabled={!sessionId}
-                      className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                      className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                       style={{ color: 'var(--text-primary)' }}>
                       <Archive className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />
                       <span>压缩上文</span>
                     </button>
                     <button type="button" role="menuitem" onClick={() => { setInputMenuOpen(false); toggleInputExpanded() }}
-                      className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                      className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                       style={{ color: 'var(--text-primary)' }}>
                       {inputExpanded ? <Minimize2 className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} /> : <Maximize2 className="w-3.5 h-3.5 flex-shrink-0" strokeWidth={2} />}
                       <span>{inputExpanded ? '收起大输入' : '展开大输入'}</span>
@@ -5419,7 +4955,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
                 )
               })()}
             </div>
-            <div className={`pointer-events-none absolute bottom-3 right-3 z-10 max-w-[55%] truncate text-right text-[10px] ${sendingHint ? 'mobius-status-marquee' : ''}`} style={{ color: sendingHint ? '#facc15' : 'var(--text-muted)' }}>
+            <div className={`pointer-events-none absolute bottom-3 right-3 z-10 max-w-[55%] truncate text-right text-[length:var(--fs-xs)] ${sendingHint ? 'mobius-status-marquee' : ''}`} style={{ color: sendingHint ? '#facc15' : 'var(--text-muted)' }}>
               {sendingHint ?? ''}
             </div>
           </div>
@@ -5431,40 +4967,54 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             <div className="mobius-chat-input-side flex-1 overflow-y-auto p-3">
               <PlanningEditor projectId={currentProjectId} sessionId={sessionId} />
             </div>
-          ) : (
-            <UnifiedButtonGroup
-              className="mobius-chat-input-side flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-0"
-              aria-label="会话统一按钮组"
-              visibilityStorageKey="mobius:session-sidebar-buttons:hidden"
-            >
-              <SessionSkillMemoryEditor
-                sessionId={currentSession?.session_id || sessionId}
-                projectId={currentProjectId || undefined}
-                initialPanel="memory"
-                persistActivePanel
-                leadingControls={renderAdvancedSessionActions('default')}
-                onOpenKnowledge={currentProjectId && currentIssueId ? () => setKnowledgeEditorOpen(true) : undefined}
-                visibilityOptions={[
-                    { id: 'file-changes', label: '查看文件修改' },
-                    { id: 'bash-commands', label: '查看运行命令' },
-                    { id: 'input-replay', label: '回放输入' },
-                    { id: 'jsonl-meta', label: '显示时间与序号' },
-                    { id: 'project-port', label: '进入项目端口' },
-                    { id: 'terminal', label: '打开终端' },
-                    { id: 'cooperable-pc', label: '可合作计算机' },
-                    { id: 'knowledge', label: '查看当前项目知识/任务知识' },
-                    { id: 'send-knowledge', label: '项目知识沉淀到记忆' },
-                    { id: 'continue-model', label: '修改模型并继续' },
-                    { id: 'skill', label: 'Skill' },
-                    { id: 'memory', label: 'Memory' },
-                    { id: 'git', label: 'Git' },
-                    { id: 'ports', label: '端口' },
-                    { id: 'time', label: '耗时' },
-                  ]}
-              />
-            </UnifiedButtonGroup>
-          ))}
+          ) : renderSessionToolGroup({
+            variant: 'default',
+            className: 'mobius-chat-input-side flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-0',
+            initialPanel: 'memory',
+            persistActivePanel: true,
+          }))}
         </div>
+      </div>
+
+      {/* ===== 简易模式右侧文件编辑栏: 文件树 + CodeMirror 编辑器 (复用代码对话 v2).
+            easyFilesMounted 首开保活; 关闭仅隐藏 (树展开/选中/草稿不丢).
+            side='right' 手柄贴左缘, 拖动调整文件栏与对话区的宽度分配. ===== */}
+      {(layout === 'easy' && easyFilesMounted || layout !== 'easy' && displayFilesOpen) && (
+        <ResizablePanel
+          storageKey="mobius:ui:easy-files-sidebar:width"
+          defaultWidth={easyFilesSidebarDefaultWidth}
+          minWidth={easyFilesSidebarMinWidth}
+          maxWidth={easyFilesSidebarMaxWidth}
+          side="right"
+          className={`border-l flex overflow-hidden${layout === 'easy' && !easyFilesOpen ? ' hidden' : ''}`}
+          style={{ borderColor: 'var(--border-color)' }}
+          data-testid="easy-files-sidebar"
+        >
+          {(easyFilesBindPath || projectForSession?.bind_path) ? (
+            <Suspense
+              fallback={(
+                <div className="flex flex-1 items-center justify-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
+                  正在加载文件编辑器...
+                </div>
+              )}
+            >
+              <EasyFilesPane
+                variant="sidebar"
+                projectId={currentProjectId}
+                bindPath={easyFilesBindPath || projectForSession?.bind_path || ''}
+                vscodeWebUrl={easyFilesVscodeUrl}
+                sessionId={currentSession?.session_id || sessionId}
+                openFileRequest={displayFileRequest || undefined}
+              />
+            </Suspense>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center" style={{ color: 'var(--text-muted)' }}>
+              <Loader2 className="h-5 w-5 animate-spin" />
+              <div className="text-[length:var(--fs-md)]">正在获取项目路径...</div>
+            </div>
+          )}
+        </ResizablePanel>
+      )}
       </div>
 
       {inputExpanded && (
@@ -5481,12 +5031,12 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             onClick={event => event.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>长文本编辑</h3>
+              <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>长文本编辑</h3>
               <button
                 type="button"
                 onClick={() => setInputExpanded(false)}
                 title="收起编辑区"
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] transition-colors hover:bg-[var(--bg-card-hover)]"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[length:var(--fs-md)] transition-colors hover:bg-[var(--bg-card-hover)]"
                 style={{ color: 'var(--text-secondary)', borderColor: 'var(--input-border)' }}
               >
                 <Minimize2 className="h-3.5 w-3.5" strokeWidth={1.9} />
@@ -5499,7 +5049,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               onChange={e => setInput(e.target.value)}
               onPaste={handlePaste}
               placeholder={inputPlaceholder}
-              className="min-h-0 flex-1 w-full resize-none rounded-xl px-3 py-2 text-[13px] leading-relaxed placeholder:!text-[var(--placeholder-color)] focus:outline-none focus:border-blue-500/30"
+              className="min-h-0 flex-1 w-full resize-none rounded-xl px-3 py-2 text-[length:var(--fs-lg)] leading-relaxed placeholder:!text-[var(--placeholder-color)] focus:outline-none focus:border-blue-500/30"
               style={{
                 background: 'var(--input-bg)',
                 border: '1px solid var(--input-border)',
@@ -5507,7 +5057,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               }}
             />
 	            <div className="mt-2 flex items-center justify-between gap-2">
-	              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+	              <span className="text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
 	                Enter 发送 · Shift+Enter 换行 · Esc 收起
 	              </span>
 	              <div className="flex items-center gap-1.5">
@@ -5569,13 +5119,6 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         />
       )}
 
-      {scheduledTasksOpen && sessionId && (
-        <SessionScheduledTasksModal
-          sessionId={sessionId}
-          onClose={() => setScheduledTasksOpen(false)}
-        />
-      )}
-
       {compactConfirmOpen && (
         <CompactContextConfirmModal
           onConfirm={sendCompactCommand}
@@ -5583,10 +5126,28 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
         />
       )}
 
-      {continueModalOpen && currentSession?.session_id && (currentIssueId || !!(currentSession as any)?.research_id) && (
+      {continueModalOpen && currentSession?.session_id && currentIssueId && (
+        <CreateSessionForm
+          defaultProjectId={currentProjectId || (currentSession as any).project_id}
+          defaultIssueId={currentIssueId}
+          projectKind={projectForSession?.kind}
+          onClose={() => setContinueModalOpen(false)}
+          onDone={handleContinueSessionCreated}
+          continueFromSessionId={currentSession.session_id}
+          initialName={continueSessionName(currentSession)}
+          initialDescription={(currentSession as any).description || ''}
+          initialIssueTitle={(currentIssue as any)?.title || (currentTask as any)?.title}
+          initialDevice={{
+            aimuxId: (currentSession as any).pc_client_metadata?.aimux_id || null,
+            guiAuthorized: (currentSession as any).pc_client_metadata?.gui_authorized === true,
+            requiresAimux: ['pc', 'dual'].includes((currentSession as any).pc_client_metadata?.work_mode),
+          }}
+        />
+      )}
+      {continueModalOpen && currentSession?.session_id && !currentIssueId && (currentSession as any)?.research_id && (
         <NewSessionModal
-          issueId={currentIssueId || undefined}
-          researchId={(currentSession as any)?.research_id || undefined}
+          issueId={undefined}
+          researchId={(currentSession as any).research_id}
           onClose={() => setContinueModalOpen(false)}
           onCreated={handleContinueSessionCreated}
           defaultName={continueSessionName(currentSession)}
@@ -5614,7 +5175,7 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
           >
             <div className="flex items-center gap-2">
               <Terminal className="h-4 w-4 flex-shrink-0 text-emerald-400" strokeWidth={1.9} />
-              <h3 className="min-w-0 flex-1 text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>打开终端</h3>
+              <h3 className="min-w-0 flex-1 text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>打开终端</h3>
               <button
                 type="button"
                 onClick={() => setTerminalChoiceOpen(false)}
@@ -5638,8 +5199,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               >
                 <Terminal className="h-4 w-4 flex-shrink-0 text-emerald-400" strokeWidth={1.9} />
                 <span className="min-w-0">
-                  <span className="block text-[13px] font-medium">在当前目录打开终端</span>
-                  <span className="block truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>进入当前会话所属项目目录</span>
+                  <span className="block text-[length:var(--fs-lg)] font-medium">在当前目录打开终端</span>
+                  <span className="block truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>进入当前会话所属项目目录</span>
                 </span>
               </button>
               <button
@@ -5654,8 +5215,8 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
               >
                 <Bot className="h-4 w-4 flex-shrink-0 text-blue-400" strokeWidth={1.9} />
                 <span className="min-w-0">
-                  <span className="block text-[13px] font-medium">打开终端并显示 Agent 后台</span>
-                  <span className="block truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>自动 attach 到当前会话的 tmux 窗口</span>
+                  <span className="block text-[length:var(--fs-lg)] font-medium">打开终端并显示 Agent 后台</span>
+                  <span className="block truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>自动 attach 到当前会话的 tmux 窗口</span>
                 </span>
               </button>
             </div>
@@ -5679,94 +5240,71 @@ export function ChatArea({ layout = 'default', onNewSession, easyProjectControl 
             onClick={e => e.stopPropagation()}
             style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
             <div className="px-5 py-3 border-b flex items-center gap-3 flex-shrink-0" style={{ borderColor: 'var(--border-color)' }}>
-              <span className="text-[14px] font-semibold flex-1 min-w-0 flex items-baseline gap-2" style={{ color: 'var(--text-primary)' }}>
-                <span className="flex-shrink-0">原始 JSONL <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· {jsonlEntries.length} 条</span></span>
+              <span className="text-[length:var(--fs-xl)] font-semibold flex-1 min-w-0 flex items-baseline gap-2" style={{ color: 'var(--text-primary)' }}>
+                <span className="flex-shrink-0">原始 JSONL <JsonlCountSlot store={historyStore}>{(loaded, total) => (
+                  <span className="text-[length:var(--fs-sm)] font-normal ml-1" style={{ color: 'var(--text-muted)' }}>· 已载 {loaded}{total > loaded ? ` / ${total}` : ''} 条</span>
+                )}</JsonlCountSlot></span>
                 {jsonlPath && (
-                  <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-muted)' }} title={jsonlPath}>{jsonlPath}</span>
+                  <span className="text-[length:var(--fs-sm)] font-mono truncate min-w-0" style={{ color: 'var(--text-muted)' }} title={jsonlPath}>{jsonlPath}</span>
                 )}
               </span>
+              {/* 复制的是 jsonl 在服务器上的绝对路径 (而非全文): 正文有渲染预算, 全文既长又没必要
+                  进剪贴板; 需要内容用旁边的下载按钮落盘. 路径缺失 (会话无主轨) 时禁用. */}
               <JsonlCopyButton
                 copied={rawJsonlCopied}
-                title="复制全部 JSONL 到剪贴板"
-                copiedTitle="JSONL 已复制"
+                title="复制 JSONL 绝对路径"
+                copiedTitle="路径已复制"
+                disabled={!jsonlPath}
                 onClick={async () => {
-                  // 复制全部前必须确保拿到完整 entries: 后端 SSE 默认只回灌末尾窗口,
-                  // 且 REST 单次最多 5000 条. 这里分页拉满全量, 不省略不截断.
+                  if (!jsonlPath) return
                   try {
-                    const sid = currentSession?.session_id || currentTask?.task_id
-                    let entriesToCopy = jsonlEntries
-                    if (sid && jsonlTotal > jsonlEntries.length) {
-                      const collected: any[] = []
-                      let from = 0
-                      const pageSize = 5000
-                      let total = jsonlTotal
-                      while (from < total) {
-                        const data = await api(`/api/sessions/${sid}/jsonl-history?from=${from}&limit=${pageSize}`)
-                        const slice = Array.isArray(data?.entries) ? data.entries : []
-                        if (slice.length === 0) break
-                        collected.push(...slice)
-                        from += slice.length
-                        if (Number.isFinite(Number(data?.total))) total = Number(data.total)
-                        if (slice.length < pageSize) break
-                      }
-                      if (collected.length > 0) {
-                        const activeSid = useStore.getState().currentSession?.session_id || useStore.getState().currentTask?.task_id
-                        if (sid === activeSid) {
-                          entriesToCopy = collected
-                          setJsonlEntries(collected)
-                          if (collected.length === total) setJsonlTotal(total)
-                        }
-                      }
-                    }
-                    await navigator.clipboard.writeText(entriesToCopy.map(e => JSON.stringify(e)).join('\n'))
+                    await navigator.clipboard.writeText(jsonlPath)
                     setRawJsonlCopied(true)
                     setTimeout(() => setRawJsonlCopied(false), 1000)
                   } catch {}
                 }}
               />
+              {/* 弹窗正文只渲染前若干条 (见 RAW_JSONL_RENDER_MAX_*), 完整内容从这里落盘下载. */}
+              <button
+                type="button"
+                className="jsonl-icon-button"
+                title="下载 JSONL 文件"
+                aria-label="下载 JSONL 文件"
+                disabled={rawJsonlDownloading}
+                onClick={async () => {
+                  if (rawJsonlDownloading) return
+                  setRawJsonlDownloading(true)
+                  let url = ''
+                  try {
+                    const text = await collectRawJsonlText(historyStoreRef.current)
+                    if (!text) return
+                    url = URL.createObjectURL(new Blob([text], { type: 'application/x-ndjson' }))
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = rawJsonlFileName(jsonlPath, sessionId)
+                    document.body.appendChild(a)
+                    a.click()
+                    a.remove()
+                  } catch {} finally {
+                    setRawJsonlDownloading(false)
+                    if (url) setTimeout(() => URL.revokeObjectURL(url), 1000)
+                  }
+                }}>
+                {rawJsonlDownloading
+                  ? <Loader2 className="h-2.5 w-2.5 animate-spin" strokeWidth={1.9} aria-hidden="true" />
+                  : <Download className="h-2.5 w-2.5" strokeWidth={1.9} aria-hidden="true" />}
+              </button>
               <button onClick={() => setShowRaw(false)}
-                className="h-7 px-2.5 text-[11px] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
+                className="h-7 px-2.5 text-[length:var(--fs-sm)] rounded-md border border-[var(--border-color-strong)] hover:bg-[var(--bg-card-hover)] transition-colors"
                 style={{ color: 'var(--text-secondary)' }}>关闭</button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              {jsonlEntries.length === 0 ? (
-                <div className="text-center text-[13px] py-8" style={{ color: 'var(--text-muted)' }}>暂无 JSONL 数据 (会话尚未产生输出)</div>
-              ) : (
-                <pre className="text-[11px] leading-relaxed p-5 m-0 whitespace-pre font-mono select-text"
-                  style={{ color: 'var(--text-secondary)' }}>
-                  {jsonlEntries.map((e, i) => `// #${i + 1}\n${JSON.stringify(e, null, 2)}`).join('\n\n')}
-                </pre>
-              )}
+              <RawJsonlList store={historyStore} />
             </div>
           </div>
         </div>
       )}
 
-      {/* Session 尚未开始时弹出的"是否开始执行?"确认窗.
-          多重门禁防止打开瞬间闪烁:
-            1. historyLoaded=true: 必须等 bootstrap history 或 SSE history 至少成功返回一次, 否则连"是否为空"都还不知道.
-            2. message_count===0: 元数据上确认这个 session 从未产生过消息.
-            3. messages.length===0 && !typing && !stream: 本地视图当下也确实是空白态.
-            4. 用户尚未在本次浏览中 dismiss 过. */}
-      {currentSession
-        && historyLoaded
-        && ((currentSession as any).message_count || 0) === 0
-        && messages.length === 0
-        && !streamContent && !isTyping
-        && !isFireAndForgetSession(sessionId)
-        && sessionId && !startDismissed.has(sessionId) && (
-        <SessionStartModal
-          sessionName={currentSession.name}
-          sessionDescription={(currentSession as any).description || ''}
-          autoConfirm={!isGuidedDemoSession(sessionId)}
-          onConfirm={async () => {
-            // 抛错由 modal 内部 catch 后显示, 这里只在成功时 dismiss
-            await startSession()
-            dismissStartModal(sessionId)
-          }}
-          onDismiss={() => dismissStartModal(sessionId)}
-        />
-      )}
     </div>
   )
 }

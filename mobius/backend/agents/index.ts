@@ -1,14 +1,15 @@
 /**
- * agents/index.js — backend 工厂 + module-level singleton registry.
+ * agents/index.ts — backend factory + module-level singleton registry.
  *
- * 用法:
+ * Usage:
  *   const agents = require('../agents')
  *   const backend = agents.get('tmux-claude-code')
  *   await backend.createNewSession({...})
  *
- * 注册的 backend:
- *   - 'tmux-claude-code'   TUI + tmux paste-buffer + jsonl 文件 tail
+ * Registered backends:
+ *   - 'tmux-claude-code'   TUI + tmux paste-buffer + jsonl file tail
  *   - 'tmux-codex'         Codex TUI + tmux paste-buffer + $CODEX_HOME rollout jsonl tail
+ *   - 'deepseek-harness'   harness process, fed by its own event stream
  */
 const { TmuxClaudeCodeBackend } = require('./tmux-claude-code')
 const { TmuxCodexBackend } = require('./tmux-codex')
@@ -16,6 +17,7 @@ const { DeepSeekHarnessBackend } = require('./deepseek-harness')
 
 const singletons: Record<string, any> = {}
 
+// One instance per backend name, created lazily on first use.
 function get(name: string): any {
   if (!singletons[name]) {
     switch (name) {
@@ -28,7 +30,7 @@ function get(name: string): any {
   return singletons[name]
 }
 
-// CJS require 消费方 (services/routes 里的 import agents from '../agents') 与
-// named import 消费方都兼容: default 指向同一 registry 对象.
+// Serves both CJS consumers (`import agents from '../agents'` in services/routes) and
+// named imports: default points at the same registry object.
 export { get }
 export default { get }

@@ -12,7 +12,9 @@ import {
   functionOutputBody,
   isFunctionCallPayload,
   isFunctionCallOutputPayload,
+  reasoningText,
 } from './entry-extract'
+import { extractInitialContext } from './initial-context'
 
 // 该 entry 是否为 "assistant 发起的 Edit tool_use" (即 message.content 里有 type==='tool_use' 且 name==='Edit').
 export function isEditToolUse(entry: AnyEntry): boolean {
@@ -29,8 +31,8 @@ export function isTokenCountEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'token_count'
 }
 
-// Codex 在会话/线程配置生效后写入的生命周期事件。它不是 token 统计或系统注入噪声，
-// 应在 JSONL 查看器中保留为可浏览的事件卡片。
+// Codex 在会话/线程配置生效后写入的生命周期事件 (每轮开头一条), 与 task_started 同级
+// 的轮次生命周期标记, 对浏览对话内容无价值 → 整卡隐藏. (简易模式的活动行不受本谓词影响.)
 export function isThreadSettingsAppliedEvent(entry: AnyEntry): boolean {
   return entry?.type === 'event_msg' && entry?.payload?.type === 'thread_settings_applied'
 }
@@ -67,6 +69,15 @@ export function isEnvironmentContextEntry(entry: AnyEntry): boolean {
   return stripped.trim().length === 0 && stripped !== text
 }
 
+// codex 的 response_item.message[role=user] 是"人类输入被 agent 消费"时写进 rollout 的
+// user 消息镜像 (与 event_msg.user_message / type:user 属同一次输入的多形态落盘).
+// 用户提问本身已在输入区/会话 UI 可见, 这条镜像在 jsonl 卡片视图里属浏览噪声,
+// 与 event_msg 同级整卡过滤隐藏 —— 但"初始模式"卡片 (extractInitialContext 命中,
+// 即首轮被后端包装成 引导语+上下文段+问题的用户消息) 例外, 必须保留展示.
+export function isCodexUserResponseItemEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'response_item' && entry?.payload?.type === 'message' && entry?.payload?.role === 'user'
+}
+
 // codex 会话首条的 session_meta: payload 含 session_id/cwd/git/model_provider, 以及巨大的
 // base_instructions (GPT-5/Codex 系统提示词, 数千~上万字符纯噪声). 卡片标题虽只显 "id · cwd",
 // 但展开会把整段 base_instructions 铺成 JSON 字段, 属浏览噪声, 与 token_count/environment_context
@@ -101,6 +112,29 @@ export function isAgentListingDeltaAttachment(entry: AnyEntry): boolean {
   return entry?.type === 'attachment' && entry?.attachment?.type === 'agent_listing_delta'
 }
 
+// CLI/TUI 排队指令附件 (attachment.type:"queued_command"): 忙时用户输入的待执行指令
+// (prompt 原文 + commandMode), 与 skill_listing/task_reminder 同类注入附件, 属浏览噪声,
+// 整卡过滤隐藏.
+export function isQueuedCommandAttachment(entry: AnyEntry): boolean {
+  return entry?.type === 'attachment' && entry?.attachment?.type === 'queued_command'
+}
+
+// Claude Code emits compact_file_reference when a file is attached to a prompt. The file is
+// already represented by the user's message, so the standalone metadata card is redundant.
+export function isCompactFileReferenceAttachment(entry: AnyEntry): boolean {
+  return entry?.type === 'attachment' && entry?.attachment?.type === 'compact_file_reference'
+}
+
+// File attachment metadata is already represented by the user's prompt; hide its standalone card.
+export function isFileAttachment(entry: AnyEntry): boolean {
+  return entry?.type === 'attachment' && entry?.attachment?.type === 'file'
+}
+
+// Attachment entries are metadata carriers, not conversation content; hide all standalone cards.
+export function isAttachmentEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'attachment'
+}
+
 // mobius sidecar 的 task_state 快照载体条目: 数据已按 anchor_uuid 并入对应任务卡的
 // 计划视图, 单独再显示一张空壳卡是冗余, 整卡过滤隐藏.
 export function isTaskStateCarrierEntry(entry: AnyEntry): boolean {
@@ -128,31 +162,78 @@ export function isNoResponseRequestedEntry(entry: AnyEntry): boolean {
   return assistantResponseText(entry?.message?.content).trim() === 'No response requested.'
 }
 
+// 对话内容类型白名单: 只有这些 type 的条目可能进入卡片视图.
+// 白名单之外的任何 type (file-history-snapshot / last-prompt / mode / permission-mode /
+// ai-title / queue-operation / 未来新增的任何元数据类型) 一律整卡隐藏 —
+// 旧"次要条目(可切换)"层已并入本谓词, 不再有开关.
+const MAJOR_JSONL_TYPES = new Set([
+  'user', 'assistant', 'attachment', 'system',
+  'session_meta', 'turn_context', 'event_msg', 'response_item', 'error',
+])
+
+// codex 的任务启动生命周期标记, 对浏览对话内容无价值.
+export function isTaskStartedEvent(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg' && entry?.payload?.type === 'task_started'
+}
+
+// MCP 工具调用完成生命周期事件只记录调用参数、耗时和结果元数据, 结果本身已由
+// 对应的工具回执/工具卡展示, 单独渲染会造成重复噪声.
+export function isMcpToolCallEndEvent(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg' && entry?.payload?.type === 'mcp_tool_call_end'
+}
+
+// event_msg 条目是 Codex 的生命周期/镜像元数据, 不作为对话卡片展示.
+// 无论 payload.type 是 agent_message、user_message 还是未来新增的事件类型,
+// 统一在这里整卡隐藏, 避免只维护一份不断扩张的子类型黑名单.
+export function isEventMessageEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'event_msg'
+}
+
 // jsonl 卡片视图里"整卡过滤隐藏"的噪声 entry 集合: 对浏览对话内容无价值的系统注入/元数据噪声.
 // 集中在此一处, viewer/JsonlView 的 visibleItems 过滤只调本谓词, 以后新增噪声类型往这里加即可.
-//   - token_count         : codex 每轮 token 用量统计 (event_msg)
+//   - 非白名单类型        : file-history-snapshot / last-prompt / mode / permission-mode / ai-title / queue-operation ...
+//   - event_msg           : Codex 生命周期/镜像元数据 (包含 agent_message 等所有 payload.type)
 //   - environment_context : codex 每轮注入的 <environment_context> 系统 user 消息
+//   - response_item user  : codex 的 response_item.message[role=user] 用户消息镜像 (初始模式卡片除外)
 //   - session_meta        : codex 会话首条元数据 (含巨大 base_instructions 系统提示词)
 //   - turn_duration       : Claude Code 每轮结束注入的 system 耗时/消息数统计
 //   - skill_listing       : Claude Code 注入的可用 Skill 清单 (巨量 skill 描述文本)
 //   - agent_listing_delta : Claude Code 注入的可用 subagent 清单
+//   - queued_command      : CLI/TUI 排队指令附件 (忙时用户输入的待执行指令)
+//   - compact_file_reference: Claude Code 文件附件引用元数据
+//   - file                 : 文件附件元数据
+//   - attachment           : 其它附件元数据
 //   - turn_context        : codex 每轮注入的本轮上下文元数据 (含 developer_instructions 系统提示词)
 //   - task_state          : mobius sidecar 任务快照载体 (数据并入 anchor 任务卡的计划视图)
 //   - empty task_reminder : 空 content 的 task_reminder 附件 (无任务时的空壳)
+//   - empty thinking-only : assistant 仅含空 thinking 块 (摘要显示“思考内容被隐藏”)
 //   - no_response_requested: Claude Code 合成占位 assistant 消息 ("No response requested.",
 //                            model "<synthetic>", 本地生成非模型输出; 同源的 API Error 卡保留)
+//   - blank response_item  : response_item.message[role=assistant] 正文全空白 (output_text:" ")
 export function isHiddenJsonlNoiseEntry(entry: AnyEntry): boolean {
   return (
+    !MAJOR_JSONL_TYPES.has(entry?.type as string) ||
+    isAttachmentEntry(entry) ||
+    isEventMessageEntry(entry) ||
+    isTaskStartedEvent(entry) ||
+    isMcpToolCallEndEvent(entry) ||
+    isThreadSettingsAppliedEvent(entry) ||
     isTokenCountEvent(entry) ||
     isEnvironmentContextEntry(entry) ||
+    (isCodexUserResponseItemEntry(entry) && !extractInitialContext(entry)) ||
     isSessionMetaEntry(entry) ||
     isTurnContextEntry(entry) ||
     isTurnDurationSystemEntry(entry) ||
     isSkillListingAttachment(entry) ||
     isAgentListingDeltaAttachment(entry) ||
+    isQueuedCommandAttachment(entry) ||
+    isCompactFileReferenceAttachment(entry) ||
+    isFileAttachment(entry) ||
     isTaskStateCarrierEntry(entry) ||
     isEmptyTaskReminderAttachment(entry) ||
-    isNoResponseRequestedEntry(entry)
+    isEmptyThinkingOnlyAssistantEntry(entry) ||
+    isNoResponseRequestedEntry(entry) ||
+    isBlankTextResponseItemEntry(entry)
   )
 }
 
@@ -169,6 +250,39 @@ export function isThinkingOnlyAssistantEntry(entry: AnyEntry): boolean {
   const c = entry?.message?.content
   if (!Array.isArray(c) || c.length === 0) return false
   return c.every((b: any) => b?.type === 'thinking')
+}
+
+// 某些闭源模型只写入空 thinking 块 (正文被加密或未提供), header-summary 会将其
+// 显示为“思考内容被隐藏”。这张卡片没有可读内容, 对浏览对话没有价值, 整卡过滤隐藏；
+// 含有实际思考文本的 thinking 卡片仍保留.
+export function isEmptyThinkingOnlyAssistantEntry(entry: AnyEntry): boolean {
+  if (!isThinkingOnlyAssistantEntry(entry)) return false
+  const content = entry?.message?.content as any[]
+  return content.every((block) => String(block?.thinking || '').trim() === '')
+}
+
+// Codex 闭源模型的 reasoning 只保留 encrypted_content、没有可读正文时，标题栏会显示
+// “Reasoning (闭源模型的推理过程被加密，无法解码）”。该谓词供序列级展示规则识别；
+// 同时带有可读 content/summary 的 reasoning 不命中，仍完整展示实际思考内容。
+export function isUnreadableEncryptedReasoningEntry(entry: AnyEntry): boolean {
+  if (entry?.type !== 'response_item' || entry?.payload?.type !== 'reasoning') return false
+  const encryptedContent = entry?.payload?.encrypted_content
+  return typeof encryptedContent === 'string' && encryptedContent.length > 0 && reasoningText(entry.payload).length === 0
+}
+
+// response_item.message 只有空白正文的卡片 (如闭源模型落盘 output_text:" " 的空响应,
+// metadata 的 content_item_kinds 也是 "unknown"): 所有 content 块均为 output_text/text 且
+// trim 后无字符 (或 content 为空数组/空白字符串). 卡片无可读内容, 整卡过滤隐藏;
+// 含图片等非文本块的卡片不命中, 仍保留展示.
+export function isBlankTextResponseItemEntry(entry: AnyEntry): boolean {
+  if (entry?.type !== 'response_item') return false
+  const payload = entry?.payload
+  if (payload?.type !== 'message' || payload?.role !== 'assistant') return false
+  const c = payload?.content
+  if (typeof c === 'string') return c.trim().length === 0
+  if (!Array.isArray(c)) return false
+  if (c.length === 0) return true
+  return c.every((b: any) => (b?.type === 'output_text' || b?.type === 'text') && String(b?.text ?? '').trim() === '')
 }
 
 export function assistantResponseText(content: any): string {
@@ -305,12 +419,8 @@ export function isLocalCommandEntry(entry: AnyEntry): boolean {
   return extractLocalCommandParts(entry).length > 0
 }
 
-// 该 entry 是否为 \"不可读的加密 reasoning\" 卡片：response_item 且 payload.type === 'reasoning'，
-// 且携带非空的 encrypted_content (无法直接展示明文推理，只能显示占位标签)。
-export function isUnreadableEncryptedReasoningEntry(entry: AnyEntry): boolean {
-  if (entry?.type !== 'response_item') return false
-  const payload = entry?.payload
-  if (payload?.type !== 'reasoning') return false
-  const encrypted = payload?.encrypted_content
-  return typeof encrypted === 'string' && encrypted.length > 0
+// codex response_item.payload.type === 'reasoning' 的思考卡片 (与 Claude assistant 只含
+// thinking 块的卡片同义). 用于把它从顶层 response_item 的"应答"蓝里摘出来, 标"思考"紫色.
+export function isReasoningEntry(entry: AnyEntry): boolean {
+  return entry?.type === 'response_item' && entry?.payload?.type === 'reasoning'
 }

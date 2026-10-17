@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import { AlertTriangle, Check, Copy, Download, FolderOpen, MoreHorizontal, Plus, Trash2, Upload, X } from 'lucide-react'
-import { formatCstDateTimeShort } from '../../utils/time-format'
 import { ProjectUserContextWhitelist } from '../context-whitelist'
 import { HelpHint } from './help-hint'
 import { ToggleSwitch } from '../toggle-switch'
@@ -9,8 +8,9 @@ import { OpenInVSCodeButton } from '../project-files'
 import { SkillsManager } from '../skills'
 import { timeAgo } from '../shell'
 import { api, useStore } from '../../store'
-import { ProjectArchitecturePanel } from './ProjectArchitecturePanel'
+import { ProjectBlueprintPanel } from './ProjectBlueprintPanel'
 import { ProjectAssistantPresetPanel } from './ProjectAssistantPresetPanel'
+import { assistantAllowedFor } from '../../services/assistant-availability'
 import { ProjectPackagePanel } from './ProjectPackagePanel'
 import { ProjectTodosPanel } from './ProjectTodosPanel'
 import { ProjectTeamPanel } from './ProjectTeamPanel'
@@ -76,7 +76,6 @@ type ProjectSettingsPanelProps = {
   metaDirty: boolean
   onDeleteProject: () => void
   onOpenPathPicker: () => void
-  onArchitectureSessionCreated: (issue: any, session: any) => void
   // 设计师之眼布局: 把顶部 settings tab 条外移到 ProjectPage 左侧边栏时,
   // 由父层接管 activePane (受控) 并把 settingsTabs 上抛给父层渲染;
   // hideHeaderTabs=true 时不再在面板内部渲染那条横向 tab 条 (移动端仍保留).
@@ -86,10 +85,10 @@ type ProjectSettingsPanelProps = {
   hideHeaderTabs?: boolean
 }
 
-export type SettingsPane = 'settings' | 'context' | 'versions' | 'architecture' | 'todos' | 'members' | 'package' | 'assistant'
+export type SettingsPane = 'settings' | 'context' | 'versions' | 'blueprints' | 'todos' | 'members' | 'package' | 'assistant'
 
 const PROJECT_VISIBILITY_OPTIONS: Array<{ value: 'private' | 'public'; label: string; description: string }> = [
-  { value: 'private', label: '私有', description: '只有项目成员（含创建者与项目管理员）能看到本项目。' },
+  { value: 'private', label: '私有', description: '只有项目成员（含创建者）能看到本项目。' },
   { value: 'public', label: '公开', description: '所有登录用户都能看到本项目；仅项目成员可写。' },
 ]
 
@@ -132,8 +131,16 @@ const GIT_TRACKING_ACTIONS: Array<{ key: GitTrackingAction; label: string; descr
 ]
 
 function formatCommitDate(date: string) {
-  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
-  return formatCstDateTimeShort(date)
+  const d = new Date(date)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 function normalizeSingleLineText(value: string) {
@@ -508,7 +515,6 @@ export function ProjectSettingsPanel({
   metaDirty,
   onDeleteProject,
   onOpenPathPicker,
-  onArchitectureSessionCreated,
   controlledActivePane,
   onSelectPane,
   onExposeTabs,
@@ -557,8 +563,10 @@ export function ProjectSettingsPanel({
 
   const PaneKey = `mobius:project:pane:${project?.id || ''}`
   const paneInit = (): SettingsPane => {
-    const v = typeof localStorage !== 'undefined' ? localStorage.getItem(PaneKey) : null
-    return v && (['settings','context','versions','architecture','todos','members','package','assistant'] as const).includes(v as SettingsPane) ? v as SettingsPane : 'settings'
+    let v = typeof localStorage !== 'undefined' ? localStorage.getItem(PaneKey) : null
+    // 旧「系统剖析」(architecture) 记忆迁移为「项目蓝图」(blueprints).
+    if (v === 'architecture') v = 'blueprints'
+    return v && (['settings','context','versions','blueprints','todos','members','package','assistant'] as const).includes(v as SettingsPane) ? v as SettingsPane : 'settings'
   }
   // 受控模式 (设计师之眼侧边栏): 父层接管 activePane; 否则维持原有内部状态.
   const [internalPane, setInternalPane] = useState<SettingsPane>(paneInit)
@@ -767,13 +775,14 @@ export function ProjectSettingsPanel({
     arr.push({ key: 'members', label: '项目成员', active: activePane === 'members' })
     arr.push(
       { key: 'versions', label: '版本追踪', active: activePane === 'versions', disabled: !gitTrackingAvailable, title: gitTrackingTitle },
-      { key: 'architecture', label: '系统剖析', active: activePane === 'architecture' },
+      { key: 'blueprints', label: '项目蓝图', active: activePane === 'blueprints' },
       { key: 'todos', label: '项目待办', active: activePane === 'todos' },
       { key: 'package', label: '打包下载', active: activePane === 'package' },
     )
-    if (assistantProject) arr.push({ key: 'assistant', label: '小莫预设', active: activePane === 'assistant' })
+    // 小莫助手临时关闭期间, 项目里的「小莫预设」页也不对普通用户展示 (见 services/assistant-availability).
+    if (assistantProject && assistantAllowedFor(user)) arr.push({ key: 'assistant', label: '小莫预设', active: activePane === 'assistant' })
     return arr
-  }, [activePane, gitTrackingAvailable, gitTrackingTitle, assistantProject, project.kind])
+  }, [activePane, gitTrackingAvailable, gitTrackingTitle, assistantProject, project.kind, user])
 
   // 把当前 settingsTabs 上抛给父层 (设计师之眼侧边栏渲染用). settingsTabs 是 useMemo 产物,
   // 仅在其依赖变化时换身份, 故不会造成父子间渲染抖动.
@@ -795,7 +804,13 @@ export function ProjectSettingsPanel({
   return (
     <section
       data-tour="project-settings-panel"
-      className={`w-full min-w-0 ${desktopWorkspace ? 'h-full min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pb-6' : 'overflow-hidden'}`}
+      // 项目蓝图面板自己就是「填满父容器」的阅读器: 这一层不给内边距/滚动, 否则四周会露出缝隙
+      // Blueprint pane fills its parent: no padding/scroll here, otherwise gaps show around the card
+      className={`w-full min-w-0 ${desktopWorkspace
+        ? (activePane === 'blueprints'
+          ? 'h-full min-h-0 flex-1 overflow-hidden flex flex-col'
+          : 'h-full min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pb-6')
+        : 'overflow-hidden'}`}
       style={{ borderColor: 'var(--border-color)' }}>
       {!hideHeaderTabs && (
         <div className="flex items-center gap-2" style={{ borderColor: 'var(--border-color)' }}>
@@ -817,18 +832,17 @@ export function ProjectSettingsPanel({
         </div>
       )}
 
-      <div className="flex items-center gap-2 border rounded-lg mt-3" style={{background: 'var(--bg-primary)', borderColor: 'var(--border-color)' }}>
+      {/* 外层不再套边框: 内部 SettingsCard / 各面板自带单层边框, 套壳会形成双重边框 + 空壳撑高 */}
+      <div className={activePane === 'blueprints' && desktopWorkspace ? 'min-h-0 flex-1' : 'mt-3'}>
 
-        {activePane === 'assistant' && assistantProject ? (
+        {activePane === 'assistant' && assistantProject && assistantAllowedFor(user) ? (
           <div className="p-3 w-full">
             <ProjectAssistantPresetPanel projectId={project.id} />
           </div>
-        ) : activePane === 'architecture' ? (
-          <div className="p-3 w-full">
-            <ProjectArchitecturePanel
-              projectId={project.id}
-              onSessionCreated={onArchitectureSessionCreated}
-            />
+        ) : activePane === 'blueprints' ? (
+          // 桌面工位: 撑满父容器; 移动端抽屉里没有确定高度, 给个固定高度兜底
+          <div className={desktopWorkspace ? 'flex h-full min-h-0 w-full flex-col' : 'p-3 w-full h-[70vh]'}>
+            <ProjectBlueprintPanel projectId={project.id} />
           </div>
         ) : activePane === 'todos' ? (
           <div className="p-3 w-full">
@@ -836,9 +850,16 @@ export function ProjectSettingsPanel({
           </div>
         ) : activePane === 'members' ? (
           <div className="w-full min-w-0 p-3 space-y-4">
-            <SettingsCard title="权限设置" hint="管理项目成员及角色（owner/manager/member/viewer），决定谁能查看或修改本项目。">
-              {/* 项目可见性(私有/公开)与两个读者开关已退役 —— 改纯成员制:
-                  非成员不可见, 项目成员按角色(owner/manager/member/viewer)分权. */}
+            <SettingsCard title="项目权限" hint="管理项目成员及角色（所有者/开发者/访客/不显示），决定谁能访问本项目。">
+              {!canManageProject && (
+                <div className="mb-3 rounded-lg border px-3 py-2 text-[length:var(--fs-md)] leading-5" role="status"
+                  style={{ borderColor: 'rgba(248,113,113,0.28)', background: 'rgba(248,113,113,0.08)', color: 'var(--text-secondary)' }}>
+                  {project.project_role === 'developer'
+                    ? '你当前是项目开发者，可以修改项目内容，但只有项目所有者可以管理成员和角色。'
+                    : '你当前是项目访客，只能查看项目内容，不能管理成员和角色。'}
+                </div>
+              )}
+              {/* 项目权限由成员角色决定，隐藏列表只影响展示偏好，不参与权限判断。 */}
               {/* 项目成员管理 (照 Aone 权限页样式: 角色筛选 Tab + 表格 + 搜索) ——
                   与主页「编辑项目」弹窗 modals.tsx 共用同一个 ProjectTeamPanel. */}
               <div className="mt-4">
@@ -888,7 +909,9 @@ export function ProjectSettingsPanel({
           {!canManageProject && (
             <div className="rounded-lg border px-3 py-2 text-[length:var(--fs-md)] leading-5"
               style={{ borderColor: 'rgba(59,130,246,0.28)', background: 'rgba(59,130,246,0.08)', color: 'var(--text-secondary)' }}>
-              当前账号可以查看和使用此项目；项目设置只有 owner/admin 可以修改。
+              {project.project_role === 'developer'
+                ? '你当前是项目开发者，可以编辑项目内容；项目设置和成员管理只有项目所有者可以修改。'
+                : '你当前是项目访客，只能查看和使用项目；项目设置只有项目所有者可以修改。'}
             </div>
           )}
           {/* 拓展项目: name / description / bindPath / worktree / research 都由 manifest 锁定 */}

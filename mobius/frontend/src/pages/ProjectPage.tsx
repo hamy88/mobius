@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate, Navigate } from 'react-router-dom'
 import { createPortal } from 'react-dom'
-import { useStore, api } from '../store'
+import { useStore, api, friendlyApiError } from '../store'
 import { TopNav } from '../components/shell'
 import {
   NewIssueModal, ConfirmModal,
@@ -10,9 +10,9 @@ import {
 } from '../components/modals'
 import { NewProjectModal } from '../components/new-project-modal'
 import {
-  Boxes,
   Brain,
   ClipboardList,
+  DraftingCompass,
   FlaskConical,
   GitBranch,
   ListTodo,
@@ -34,6 +34,7 @@ import {
 import { projectItemOrder } from '../services/project-session-order'
 import { pollRecursive } from '../services/polling'
 import { readListCache, writeListCache } from '../services/list-swr-cache'
+import { projectHref } from '../services/project-url'
 import {
   DEFAULT_FORGOTTEN_FLAG_ISSUE_BACKOFF,
   DEFAULT_FORGOTTEN_FLAG_ISSUE_INTERVAL_MINUTES,
@@ -151,8 +152,10 @@ export default function ProjectPage() {
   // 这里接管 settingsPane (受控). 键名与 ProjectSettingsPanel 内部 localStorage 完全一致, 保持兼容.
   const SettingsPaneKey = `mobius:project:pane:${projectId || ''}`
   const settingsPaneInit = (): SettingsPane => {
-    const v = typeof localStorage !== 'undefined' ? localStorage.getItem(SettingsPaneKey) : null
-    return v && (['settings', 'context', 'versions', 'architecture', 'todos', 'members', 'package', 'assistant'] as const).includes(v as SettingsPane)
+    let v = typeof localStorage !== 'undefined' ? localStorage.getItem(SettingsPaneKey) : null
+    // 旧「系统剖析」(architecture) 记忆迁移为「项目蓝图」(blueprints).
+    if (v === 'architecture') v = 'blueprints'
+    return v && (['settings', 'context', 'versions', 'blueprints', 'todos', 'members', 'package', 'assistant'] as const).includes(v as SettingsPane)
       ? v as SettingsPane
       : 'settings'
   }
@@ -163,6 +166,8 @@ export default function ProjectPage() {
   const [exposedSettingsTabs, setExposedSettingsTabs] = useState<OverflowTab[]>([])
   // 右侧不再并排展示「项目设置」与「任务列表」, 改由左侧边栏选中项决定右侧显示哪一个面板.
   const [rightView, setRightView] = useState<'items' | 'settings'>('items')
+  // 项目蓝图面板走全幅 (见下方容器): 文档阅读器被 max-w + 内边距框住会在宽屏两侧留空带.
+  const blueprintPane = !isMobile && rightView === 'settings' && settingsPane === 'blueprints'
 
   // 左侧导航按钮样式与用户主页统一 (图标 + 文案). settings tab 在此追加图标并改用更短的文案.
   const navCls = (active: boolean) =>
@@ -172,7 +177,7 @@ export default function ProjectPage() {
     context: { label: '记忆技能', icon: <Brain className="w-4 h-4" strokeWidth={1.8} /> },
     members: { label: '项目成员', icon: <Users className="w-4 h-4" strokeWidth={1.8} /> },
     versions: { label: '版本追踪', icon: <GitBranch className="w-4 h-4" strokeWidth={1.8} /> },
-    architecture: { label: '系统剖析', icon: <Boxes className="w-4 h-4" strokeWidth={1.8} /> },
+    blueprints: { label: '项目蓝图', icon: <DraftingCompass className="w-4 h-4" strokeWidth={1.8} /> },
     todos: { label: '项目待办', icon: <ClipboardList className="w-4 h-4" strokeWidth={1.8} /> },
     package: { label: '打包下载', icon: <Package className="w-4 h-4" strokeWidth={1.8} /> },
   }
@@ -465,13 +470,6 @@ export default function ProjectPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
 
-  const handleArchitectureSessionCreated = (issue: any, _session: any) => {
-    refreshIssues()
-    if (issue?.id) {
-      api(`/api/issues/${issue.id}/sessions`).then((ss: any) => setSessionsMap(issue.id, ss)).catch(() => {})
-    }
-  }
-
   const openNewIssue = () => {
     if (!canCreateIssue) return
     setShowNewIssue(true)
@@ -577,7 +575,7 @@ export default function ProjectPage() {
   const saveMeta = useCallback(async () => {
     if (!project) return
     if (project.can_manage === false) {
-      setMetaErr('只有项目 owner/admin 可以修改项目设置')
+      setMetaErr('你当前是项目访客，只能查看和使用项目；只有项目所有者可以修改项目设置。')
       return
     }
     if (!isExtensionProject && !editName.trim()) {
@@ -632,7 +630,7 @@ export default function ProjectPage() {
       })
       setProjects(projects.map((p: any) => p.id === updated.id ? { ...p, ...updated } : p))
       setCurrentProject({ ...project, ...updated })
-    } catch (e: any) { setMetaErr(e?.message || '保存失败') }
+    } catch (e: any) { setMetaErr(friendlyApiError(e, '项目设置保存失败，请检查你的项目角色。')) }
     finally { setSavingMeta(false) }
   }, [
     project,
@@ -817,8 +815,9 @@ export default function ProjectPage() {
 
         <main className={`flex-1 min-h-0 ${isMobile ? 'overflow-y-auto' : 'overflow-hidden'}`} style={{ background: 'var(--bg-secondary)' }}>
           {/* 任务/研究列表是卡片网格, 在大屏放宽最大宽度让网格铺开更多列, 减少右侧留白;
-              项目设置表单仍保持 max-w-7xl 保证长表单可读性. */}
-          <div className={`${rightView === 'items' && !isMobile ? 'max-w-[1600px]' : 'max-w-7xl'} mx-auto p-3 sm:p-6 ${isMobile ? '' : 'h-full min-h-0'}`}>
+              项目设置表单仍保持 max-w-7xl 保证长表单可读性.
+              项目蓝图是文档阅读/编辑器, 直接占满右面板 — 不限宽、不留外边距, 否则宽屏两侧空带. */}
+          <div className={`${rightView === 'items' && !isMobile ? 'max-w-[1600px]' : (blueprintPane ? 'max-w-none' : 'max-w-7xl')} mx-auto ${blueprintPane ? '' : 'p-3 sm:p-6'} ${isMobile ? '' : 'h-full min-h-0'}`}>
             {(() => {
               const settingsPanel = (
                 <ProjectSettingsPanel
@@ -870,7 +869,6 @@ export default function ProjectPage() {
                   metaDirty={metaDirty}
                   onDeleteProject={() => setShowDelete(true)}
                   onOpenPathPicker={() => setPickerOpen(true)}
-                  onArchitectureSessionCreated={handleArchitectureSessionCreated}
                   controlledActivePane={settingsPane}
                   onSelectPane={setSettingsPane}
                   onExposeTabs={setExposedSettingsTabs}
@@ -945,7 +943,7 @@ export default function ProjectPage() {
 
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreated={(p: any) => {
         setShowNewProject(false)
-        if (p?.id && p?.created_by) navigate(`/u/${p.created_by}/p/${p.id}`)
+        if (p?.id) navigate(projectHref(p))
       }} />}
       {showNewIssue && <NewIssueModal projectId={projectId} defaultUseWorktree={!!project?.default_use_worktree} forcePlanning={newIssueForcePlanning}
         onClose={() => { setShowNewIssue(false); setNewIssueForcePlanning(false) }}

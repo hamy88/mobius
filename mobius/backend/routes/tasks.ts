@@ -29,6 +29,10 @@ router.get('/recent', auth, (req: express.Request, res: express.Response) => {
   const user = (req as any).user;
   const rawLimit = Number(req.query.limit || 12);
   const limit = Math.max(1, Math.min(50, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 12));
+  // agent_status 由 session-status-refresher 每 2s 刷新的快查字段提供, 这里只读不算:
+  // 探测走 spawnSync 与请求共用事件循环, 放在读路径上会把请求排在探测后面.
+  // agent_status comes from the fast field refreshed every 2s by session-status-refresher;
+  // this path only reads it — probing here would queue the request behind spawnSync work.
   res.json(Sessions.listRecentForUser(user.id, limit));
 });
 
@@ -164,11 +168,18 @@ router.get('/:id/bookmarks', auth, (req: express.Request, res: express.Response)
   res.json(Messages.bookmarksForTask(id));
 });
 
-// no-auth: wrapper/hooks 查询用
-router.get('/:id/risk', (req: express.Request, res: express.Response) => {
+// 风险等级: 与其它 session 读取端点同口径 —— 必须登录, 且只能读自己能读的会话
+// (原先无鉴权, 凭 session id 即可读他人会话的风险等级).
+router.get('/:id/risk', auth, (req: express.Request, res: express.Response) => {
+  const user = (req as any).user;
   const id = String(req.params.id);
-  const task = Sessions.findRiskById(id);
-  res.json({ risk_level: task ? task.risk_level : 'medium' });
+  const task = findSessionReadable(id, user);
+  if (!task) {
+    res.status(404).json({ error: '未找到' });
+    return;
+  }
+  const risk = Sessions.findRiskById(id);
+  res.json({ risk_level: risk ? risk.risk_level : 'medium' });
 });
 
 export = router;

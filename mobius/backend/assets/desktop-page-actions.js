@@ -163,7 +163,7 @@
       } else if (action === 'welcome') {
         location.assign(this.getAttribute('welcome-path') || '/welcome');
       } else if (action === 'system-visualization') {
-        location.assign(this.getAttribute('visualization-path') || '/u/fuqingxu/mobius_overview_cluster');
+        location.assign(this.getAttribute('visualization-path') || '/u/mobius/mobius_overview_cluster');
       }
     }
   }

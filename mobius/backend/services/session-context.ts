@@ -21,12 +21,6 @@ import { isAssistantSession } from './assistant-session';
 import { readIssueKnowledgeShape } from './project-knowledge';
 import { BUILTIN_MEMORIES } from './builtin-memories';
 import { pcClientRequiresAimuxSkill, pcTaskModePrompt } from './pc-client-context';
-import {
-  createChiefTeamToken,
-  createResearchSessionToken,
-  RESEARCH_SESSION_TOKEN_HEADER,
-  TEAM_TOKEN_HEADER,
-} from './research-team';
 import { SESSION_SECTIONS, QuestionTitle, type SectionCtx } from './session-context-sections';
 
 // =====================================================================
@@ -40,27 +34,19 @@ function normalizeLanguage(value: any): 'zh' | 'en' {
 }
 
 interface FormatDeps {
-  createResearchSessionToken: (researchId: string, sessionId: string) => string;
-  createChiefTeamToken: (researchId: string, chiefSessionId: string) => string;
   isGitRepoRoot: (root: string) => boolean;
   isAssistantSession: (session: any) => boolean;
   pcTaskModePrompt: (raw: unknown, language: 'zh' | 'en') => string;
   builtinMemories: any[];
   env: { port: any; hiddenFolderName: string; skillsSubdir: string };
-  blackboardTokenHeader: string;
-  teamTokenHeader: string;
 }
 
 const REAL_FORMAT_DEPS: FormatDeps = {
-  createResearchSessionToken,
-  createChiefTeamToken,
   isGitRepoRoot,
   isAssistantSession,
   pcTaskModePrompt,
   builtinMemories: BUILTIN_MEMORIES,
   env: { port: PORT, hiddenFolderName: HIDDEN_FOLDER_NAME, skillsSubdir: SKILLS_SUBDIR },
-  blackboardTokenHeader: RESEARCH_SESSION_TOKEN_HEADER,
-  teamTokenHeader: TEAM_TOKEN_HEADER,
 };
 
 // 把服务端能力预计算成纯数据注入 ctx, 让 sections 的 build 保持纯函数 (同 ctx → 同文本)。
@@ -74,10 +60,6 @@ function buildSectionCtx(sources: any, D: FormatDeps): SectionCtx {
     ...sources,
     env: D.env,
     builtin_memories: D.builtinMemories,
-    blackboard_session_token: (research && research.id && realSessionId) ? D.createResearchSessionToken(research.id, realSessionId) : '',
-    blackboard_token_header: D.blackboardTokenHeader,
-    chief_team_token: (research && research.id && session?.session_id) ? D.createChiefTeamToken(research.id, session.session_id) : '',
-    team_token_header: D.teamTokenHeader,
     worktree_is_repo_root: wtApplies ? D.isGitRepoRoot(sources.project.bind_path) : false,
     pc_task_mode_prompt_zh: D.pcTaskModePrompt(session?.pc_client_metadata, 'zh'),
     pc_task_mode_prompt_en: D.pcTaskModePrompt(session?.pc_client_metadata, 'en'),
@@ -333,8 +315,6 @@ function listBuiltinContextSkills(user: any, projectId: any): any {
   );
 }
 
-const ARCHITECTURE_ISSUE_TITLE = '项目结构绘制';
-const ARCHITECTURE_REQUIRED_BUILTIN_SKILL_ID = 'builtin:mobius-architecture-draw';
 const ASSISTANT_ISSUE_TITLE = '小莫对话';
 const ASSISTANT_REQUIRED_BUILTIN_SKILL_ID = 'builtin:mobius-assistant';
 // 拓展项目 (project.kind === 'extension') 的所有 Session 强制必选 mobius-extension skill,
@@ -351,7 +331,6 @@ const PC_TASK_REQUIRED_BUILTIN_SKILL_ID = 'builtin:mobius-aimux';
 
 function forcedIssueSkillIds(issue: any, project: any): Set<string> {
   const ids = new Set<string>();
-  if (issue?.title === ARCHITECTURE_ISSUE_TITLE) ids.add(ARCHITECTURE_REQUIRED_BUILTIN_SKILL_ID);
   if (issue?.title === ASSISTANT_ISSUE_TITLE) ids.add(ASSISTANT_REQUIRED_BUILTIN_SKILL_ID);
   if (project?.kind === 'extension') ids.add(EXTENSION_REQUIRED_BUILTIN_SKILL_ID);
   if (issue?.is_planning) ids.add(PLANNING_REQUIRED_BUILTIN_SKILL_ID);
@@ -501,8 +480,6 @@ function gatherResearchSources(user: any, research: any, sessionExclusions: any)
       description: research.description || '',
       status: research.status,
       project_id: research.project_id,
-      mode: research.mode || 'custom',
-      assistant_limit: research.assistant_limit || 3,
     } : null,
     skills: effectiveSkills,
     memories: effectiveMemories,

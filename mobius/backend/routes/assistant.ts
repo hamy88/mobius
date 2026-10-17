@@ -143,11 +143,6 @@ function isAssistantCloneSession(session: any, user: any): boolean {
   if (!session || !user?.id || session.user_id !== user.id) return false;
   const project = findAssistantProject(user);
   if (!project || session.project_id !== project.id) return false;
-  // 主体小莫派分身时被要求复用「小莫对话」issue，但它经常先在小莫助理项目里按任务
-  // 自建 issue（如「0.4.5 打包发布…」）再建 session，issue 标题不等于「小莫对话」。
-  // 只要 session 落在小莫助理项目内且名称符合分身命名（分身小莫 #N），就按分身对待；
-  // 「小莫对话」issue 下的全部 session 仍整体视为小莫会话/分身（用户自定义名也认）。
-  if (isAssistantCloneSessionName(session.name)) return true;
   const issue = Issues.findByProjectAndTitle(project.id, ASSISTANT_ISSUE_TITLE);
   return !!issue && session.issue_id === issue.id;
 }
@@ -606,7 +601,8 @@ function assistantPrompt(question: string, sessionId: string, clientContext: any
 }
 
 function normalizeAssistantAttachments(raw: any, user: any, project: any): any[] {
-  return normalizeSessionAttachments(raw, user, [project?.bind_path]);
+  // 附件准入交由 file-access 的权限表判断, 这里只传项目 id (不传 bind_path 白名单)
+  return normalizeSessionAttachments(raw, user, project?.id);
 }
 
 function assistantQuestionWithAttachments(question: string, attachments: any[]): string {
@@ -860,9 +856,6 @@ function listAssistantSessions(user: any, limit: number): any[] {
   // 但 name 是用户可自定义的（前端「分身名称」输入框），一旦不以「分身小莫 #」开头，
   // 分身便会创建成功却从列表永久消失（移动端/Web 都看不到）。小莫对话 issue 下的所有
   // active session 都属于该用户的小莫会话/分身，故条件 B 只看 issue、不再强制 name 前缀。
-  // 条件 C：主体小莫派分身时不一定复用「小莫对话」issue——它常在小莫助理项目里按任务
-  // 自建 issue（如「0.4.5 打包发布…」）再建 session。这类分身名称符合「分身小莫 #N」
-  // 命名且落在小莫助理项目内，据此识别（与 isAssistantCloneSession 的放宽保持一致）。
   return db.prepare(`
     SELECT *
     FROM sessions_v2
@@ -874,10 +867,6 @@ function listAssistantSessions(user: any, limit: number): any[] {
           FROM issues
           WHERE project_id = ?
             AND title = ?
-        )
-        OR (
-          project_id = ?
-          AND name LIKE ?
         )
       )
       AND status = 'active'
@@ -895,8 +884,6 @@ function listAssistantSessions(user: any, limit: number): any[] {
     assistantSessionKeyLike(user.id),
     assistantProjectId,
     ASSISTANT_ISSUE_TITLE,
-    assistantProjectId,
-    `${ASSISTANT_CLONE_SESSION_PREFIX}%`,
     MAIN_ASSISTANT_SESSION_NAME,
     `${ASSISTANT_CLONE_SESSION_PREFIX}%`,
     limit,
@@ -1235,9 +1222,6 @@ async function startAssistantSession(req: express.Request, session: any, questio
       mobiusPromptRecord,
       aimuxRemoteName: aimuxRemoteNameFromMeta(session?.pc_client_metadata),
       aimuxGuiAuthorized: aimuxGuiAuthorizedFromMeta(session?.pc_client_metadata),
-      // 小莫 assistant 注入 guling 实盘 MCP (HTTP), 让 claude 直接读资金/持仓.
-      // resolveGulingMcp() 未配置 env 时返回 null, 这里恒传 true 是安全 no-op.
-      enableGulingMcp: true,
     });
 
     const runtimeInfo = backend.listSessions().find((item: any) => item.sessionId === session.session_id);

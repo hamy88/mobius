@@ -1,24 +1,27 @@
 import { useContext, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_REMARK_PLUGINS, MARKDOWN_REHYPE_PLUGINS } from '../services/markdown'
-import { VSCodeOpenContext, fileDownloadUrl, isDownloadableFilePath, isLikelyFilesystemPath, resolveMediaSrc } from './jsonl-vscode-link'
-import { maskEncryptedPlaceholders } from '../services/text-redaction'
+import { VSCodeOpenContext, isLikelyFilesystemPath, resolveMediaSrc } from './jsonl-vscode-link'
+import { MarkdownPre } from './markdown-components'
 
 function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNode }) {
   const ctx = useContext(VSCodeOpenContext)
-  // 打包/二进制产物 (.fpk/.zip/.apk/...) → 直下载: 裸路径 href 在浏览器 404,
-  // 跳 VSCode 编辑器对二进制也没意义。改写为 /api/download 让浏览器原生保存。
-  const downloadHref = href && isDownloadableFilePath(href) ? fileDownloadUrl(href) : null
-  const effectiveHref = downloadHref || href
   const onClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
-    if (downloadHref) { e.preventDefault(); window.location.href = downloadHref; return }
     if (!href || !ctx || !isLikelyFilesystemPath(href)) return
+    // 无 code-server 权限 (landlock 隔离下的普通用户): 在原生文件编辑器打开, 不跳 VSCode.
+    if (ctx.codeServerAllowed === false) {
+      e.preventDefault()
+      window.dispatchEvent(new CustomEvent('mobius:request-open-file-in-sidebar', {
+        detail: { projectId: ctx.projectId || '', path: href },
+      }))
+      return
+    }
     const url = ctx.openLocalPath(href)
     if (!url) return // meta not ready yet → let default happen this once
     e.preventDefault()
     window.open(url, '_blank', 'noopener,noreferrer')
   }
-  return <a href={effectiveHref} target="_blank" rel="noreferrer" onClick={onClick}>{children}</a>
+  return <a href={href} target="_blank" rel="noreferrer" onClick={onClick}>{children}</a>
 }
 
 function MarkdownTable({ children, node: _node, ...props }: ComponentPropsWithoutRef<'table'> & { node?: unknown }) {
@@ -42,7 +45,7 @@ function MarkdownImage({ src, alt, node: _node, ...rest }: ComponentPropsWithout
   if (failed) {
     return (
       <span
-        className="inline-flex items-center gap-1 my-1 px-2 py-1 rounded border border-dashed border-[var(--border-color)] bg-[var(--prose-bg)] text-[11px] text-[var(--text-muted)] break-all"
+        className="inline-flex items-center gap-1 my-1 px-2 py-1 rounded border border-dashed border-[var(--border-color)] bg-[var(--prose-bg)] text-[length:var(--fs-sm)] text-[var(--text-muted)] break-all"
         title={src}
       >
         ⚠ 图片无法显示 · {alt || src}
@@ -62,9 +65,6 @@ function MarkdownImage({ src, alt, node: _node, ...rest }: ComponentPropsWithout
 }
 
 export default function JsonlCompactMarkdown({ text, variant = 'compact' }: { text: string; variant?: 'compact' | 'conversation' }) {
-  // 🔒 密文占位符 (后端 secret-guard 消毒产物) 在 markdown 渲染入口统一遮罩,
-  // 防止代码块/行内高亮把占位符原样裸露。
-  const safeText = maskEncryptedPlaceholders(text)
   // conversation 变体: 用于极简聊天的最终回复正文 — 复用专业聊天 .prose-chat 的完整
   // 排版 (标题层级/列表缩进/表格滚动/引用块), 而非 11px 的紧凑卡片样式。
   if (variant === 'conversation') {
@@ -77,8 +77,9 @@ export default function JsonlCompactMarkdown({ text, variant = 'compact' }: { te
             a: MarkdownAnchor as any,
             table: MarkdownTable as any,
             img: MarkdownImage as any,
+            pre: MarkdownPre as any,
           }}>
-          {safeText}
+          {text}
         </ReactMarkdown>
       </div>
     )
@@ -92,8 +93,9 @@ export default function JsonlCompactMarkdown({ text, variant = 'compact' }: { te
           a: MarkdownAnchor as any,
           table: MarkdownTable as any,
           img: MarkdownImage as any,
+          pre: MarkdownPre as any,
         }}>
-        {safeText}
+        {text}
       </ReactMarkdown>
     </div>
   )

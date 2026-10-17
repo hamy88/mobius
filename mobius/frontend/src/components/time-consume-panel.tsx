@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BarChart3, Clock3, PieChart, RefreshCw, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { BarChart3, CalendarClock, Clock3, PieChart, RefreshCw, Trash2 } from 'lucide-react'
 import { api } from '../store'
-import { formatCstDateTimeShort } from '../utils/time-format'
 import { pollRecursive } from '../services/polling'
+import { SessionScheduledTasksPanel } from './session-scheduled-tasks-panel'
 
 type TimeConsumeSegment = {
   kind: string
@@ -13,6 +13,7 @@ type TimeConsumeSegment = {
   duration_ms: number
   line_no?: number | null
   source?: string | null
+  job_done?: boolean
   open?: boolean
 }
 
@@ -35,7 +36,9 @@ type TimeConsumeWaterfallResponse = {
   } | null
 }
 
-type TimeConsumeView = 'waterfall' | 'pie'
+// 第三页「定时任务」由原顶栏「查看定时任务」菜单项迁移而来, 与耗时瀑布/占比并列
+// The third "定时任务" tab was migrated from the top-bar "查看定时任务" menu item
+type TimeConsumeView = 'waterfall' | 'pie' | 'scheduled'
 
 const KIND_LABELS: Record<string, string> = {
   model: '模型推理',
@@ -78,8 +81,9 @@ function formatDuration(ms: number): string {
 
 function formatClock(value?: string | null): string {
   if (!value) return '-'
-  // 全局统一北京时间（CST, UTC+8）+ 24h 制 (Issue 8f64748a)
-  return formatCstDateTimeShort(value) || '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '-'
+  return date.toLocaleString()
 }
 
 function describeArc(cx: number, cy: number, radius: number, startAngle: number, endAngle: number): string {
@@ -102,6 +106,42 @@ function polarToCartesian(cx: number, cy: number, radius: number, angle: number)
   }
 }
 
+// 瀑布图可见块数量超过该值时，若用户未手动调整过“时间缩放”，自动放大以削减块数
+const MAX_TIMELINE_BLOCKS = 100
+const TIMELINE_ZOOM_MAX = 16
+
+// 与渲染口径一致：窗口锚定在时间轴末尾（timelinePosition=1000），计算给定缩放下的可见块数
+function countVisibleBlocks(segments: TimeConsumeSegment[], totalMs: number, zoom: number): number {
+  if (!totalMs || !segments.length) return 0
+  const visibleDuration = totalMs / zoom
+  const windowStart = Math.max(0, totalMs - visibleDuration)
+  let count = 0
+  for (const segment of segments) {
+    const segmentEnd = Math.max(0, Number(segment.start_offset_ms) || 0) + displayDurationMs(segment)
+    if (segmentEnd > windowStart) count += 1
+  }
+  return count
+}
+
+// 二分求最小缩放（≥1，步进 0.5），使可见块数 ≤ maxBlocks；仍超则封顶 TIMELINE_ZOOM_MAX
+function findZoomToLimitBlocks(segments: TimeConsumeSegment[], totalMs: number, maxBlocks: number): number {
+  if (countVisibleBlocks(segments, totalMs, 1) <= maxBlocks) return 1
+  if (countVisibleBlocks(segments, totalMs, TIMELINE_ZOOM_MAX) > maxBlocks) return TIMELINE_ZOOM_MAX
+  let lo = 1
+  let hi = TIMELINE_ZOOM_MAX
+  while (hi - lo > 0.5) {
+    const mid = (lo + hi) / 2
+    if (countVisibleBlocks(segments, totalMs, mid) <= maxBlocks) hi = mid
+    else lo = mid
+  }
+  return Math.ceil(hi * 2) / 2
+}
+
+function displayDurationMs(segment: TimeConsumeSegment): number {
+  const duration = Math.max(0, Number(segment.duration_ms) || 0)
+  return segment.kind === 'tool' && segment.job_done && duration < 1 ? 1 : duration
+}
+
 export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) {
   const [data, setData] = useState<TimeConsumeWaterfallResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -110,6 +150,10 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
   const [view, setView] = useState<TimeConsumeView>('waterfall')
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelinePosition, setTimelinePosition] = useState(1000)
+  // 递增该值通知「定时任务」页重新拉取列表, 使面板头部刷新按钮对本页同样生效
+  // Bumping this makes the 定时任务 tab re-fetch, so the header refresh button works there too
+  const [scheduledRefreshKey, setScheduledRefreshKey] = useState(0)
+  const userAdjustedZoomRef = useRef(false)
 
   const load = useCallback(async (signal?: AbortSignal, showSpinner = false) => {
     if (!sessionId) {
@@ -141,6 +185,7 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
     setLoading(true)
     setTimelineZoom(1)
     setTimelinePosition(1000)
+    userAdjustedZoomRef.current = false
     void load(undefined, false)
     const stop = pollRecursive((signal) => {
       if (disposed) return
@@ -157,10 +202,19 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
     const fromData = Number(data?.total_ms) || 0
     if (fromData > 0) return fromData
     return segments.reduce((max, segment) => {
-      const end = Math.max(0, Number(segment.start_offset_ms) || 0) + Math.max(0, Number(segment.duration_ms) || 0)
+      const end = Math.max(0, Number(segment.start_offset_ms) || 0) + displayDurationMs(segment)
       return Math.max(max, end)
     }, 0)
   }, [data?.total_ms, segments])
+
+  // 可见块数超过阈值时，若用户未手动调整过“时间缩放”，自动放大削减块数
+  useEffect(() => {
+    if (userAdjustedZoomRef.current) return
+    if (!totalMs || !segments.length) return
+    if (countVisibleBlocks(segments, totalMs, timelineZoom) <= MAX_TIMELINE_BLOCKS) return
+    const target = findZoomToLimitBlocks(segments, totalMs, MAX_TIMELINE_BLOCKS)
+    if (target > timelineZoom) setTimelineZoom(target)
+  }, [segments, timelineZoom, totalMs])
 
   const pieSlices = useMemo(() => {
     const map = new Map<string, { key: string; label: string; color: string; duration: number; count: number }>()
@@ -193,7 +247,7 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
     return segments
       .map((segment) => {
         const segmentStart = Math.max(0, Number(segment.start_offset_ms) || 0)
-        const segmentEnd = segmentStart + Math.max(0, Number(segment.duration_ms) || 0)
+        const segmentEnd = segmentStart + displayDurationMs(segment)
         const clippedStart = Math.max(segmentStart, windowStart)
         const clippedEnd = Math.min(segmentEnd, windowEnd)
         return {
@@ -235,47 +289,92 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
   const pieCenter = 60
   let pieCursor = 0
 
+  const scheduledView = view === 'scheduled'
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
             <Clock3 className="h-3.5 w-3.5 text-sky-400" strokeWidth={1.9} />
-            <span>耗时</span>
+            <span>定时任务与耗时</span>
           </div>
         </div>
         <div className="flex items-center gap-1.5">
           <button
             type="button"
-            onClick={() => void load(undefined, true)}
-            disabled={loading || refreshing}
+            onClick={() => { if (scheduledView) setScheduledRefreshKey(key => key + 1); else void load(undefined, true) }}
+            disabled={!scheduledView && (loading || refreshing)}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors hover:bg-[var(--bg-card-hover)] disabled:cursor-wait disabled:opacity-50"
             style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-color)' }}
             title="刷新"
-            aria-label="刷新耗时统计"
+            aria-label={scheduledView ? '刷新定时任务' : '刷新耗时统计'}
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading || refreshing ? 'animate-spin' : ''}`} strokeWidth={1.9} />
+            <RefreshCw className={`h-3.5 w-3.5 ${!scheduledView && (loading || refreshing) ? 'animate-spin' : ''}`} strokeWidth={1.9} />
           </button>
-          <button
-            type="button"
-            onClick={() => void handleClear()}
-            disabled={loading || refreshing || !sessionId}
-            className="inline-flex h-7 items-center gap-1 rounded-md border px-2.5 text-[length:var(--fs-xs)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:cursor-wait disabled:opacity-50"
-            style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-color)' }}
-          >
-            <Trash2 className="h-3.5 w-3.5" strokeWidth={1.9} />
-            清空
-          </button>
+          {!scheduledView && (
+            <button
+              type="button"
+              onClick={() => void handleClear()}
+              disabled={loading || refreshing || !sessionId}
+              className="inline-flex h-7 items-center gap-1 rounded-md border px-2.5 text-[length:var(--fs-xs)] transition-colors hover:bg-[var(--bg-card-hover)] disabled:cursor-wait disabled:opacity-50"
+              style={{ color: 'var(--text-secondary)', borderColor: 'var(--border-color)' }}
+            >
+              <Trash2 className="h-3.5 w-3.5" strokeWidth={1.9} />
+              清空
+            </button>
+          )}
         </div>
       </div>
 
-      {error && (
+      {/* 耗时统计的加载错误只在瀑布/占比页展示, 免于污染定时任务页 */}
+      {/* The time-consume load error is shown only on the waterfall/pie tabs */}
+      {!scheduledView && error && (
         <div className="rounded-lg border px-3 py-2 text-[length:var(--fs-sm)] text-red-400" style={{ borderColor: 'rgba(248,113,113,0.28)', background: 'rgba(248,113,113,0.06)' }}>
           {error}
         </div>
       )}
 
-      {loading && !data ? (
+      {/* 切换条常驻显示: 无耗时段时也要能进入/退出定时任务页 */}
+      {/* The tab bar is always visible so the 定时任务 tab stays reachable */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="inline-flex rounded-md p-0.5" style={{ background: 'var(--bg-secondary)' }}>
+          {([
+            { key: 'waterfall' as const, label: '瀑布', icon: BarChart3 },
+            { key: 'pie' as const, label: '占比', icon: PieChart },
+            { key: 'scheduled' as const, label: '定时任务', icon: CalendarClock },
+          ]).map((item) => {
+            const Icon = item.icon
+            const active = view === item.key
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setView(item.key)}
+                aria-pressed={active}
+                className="inline-flex min-w-[62px] items-center justify-center gap-1 rounded px-2 py-1.5 text-[length:var(--fs-sm)] font-medium leading-none transition-colors hover:text-[var(--text-primary)]"
+                style={{
+                  color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+                  background: active ? 'var(--bg-active)' : 'transparent',
+                  boxShadow: active ? '0 1px 2px rgba(0,0,0,0.14)' : undefined,
+                }}
+              >
+                <Icon className="h-3.5 w-3.5" strokeWidth={1.9} />
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+        {!scheduledView && segments.length > 0 && (
+          <div className="text-right text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
+            <div>总计 {segments.length} 段</div>
+          </div>
+        )}
+      </div>
+
+      {scheduledView ? (
+        <SessionScheduledTasksPanel sessionId={sessionId} refreshKey={scheduledRefreshKey} />
+      ) : loading && !data ? (
         <div className="rounded-lg border px-3 py-8 text-center text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)', borderColor: 'var(--border-color)', background: 'rgba(255,255,255,0.02)' }}>
           正在加载耗时统计...
         </div>
@@ -283,41 +382,7 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
         <div className="rounded-lg border px-3 py-8 text-center text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)', borderColor: 'var(--border-color)', background: 'rgba(255,255,255,0.02)' }}>
           暂无可统计的耗时段
         </div>
-      ) : (
-        <>
-          <div className="flex items-center justify-between gap-2">
-            <div className="inline-flex rounded-md p-0.5" style={{ background: 'var(--bg-secondary)' }}>
-              {([
-                { key: 'waterfall' as const, label: '瀑布', icon: BarChart3 },
-                { key: 'pie' as const, label: '占比', icon: PieChart },
-              ]).map((item) => {
-                const Icon = item.icon
-                const active = view === item.key
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => setView(item.key)}
-                    aria-pressed={active}
-                    className="inline-flex min-w-[62px] items-center justify-center gap-1 rounded px-2 py-1.5 text-[length:var(--fs-sm)] font-medium leading-none transition-colors hover:text-[var(--text-primary)]"
-                    style={{
-                      color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-                      background: active ? 'var(--bg-active)' : 'transparent',
-                      boxShadow: active ? '0 1px 2px rgba(0,0,0,0.14)' : undefined,
-                    }}
-                  >
-                    <Icon className="h-3.5 w-3.5" strokeWidth={1.9} />
-                    {item.label}
-                  </button>
-                )
-              })}
-            </div>
-            <div className="text-right text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
-              <div>总计 {segments.length} 段</div>
-            </div>
-          </div>
-
-          {view === 'waterfall' ? (
+      ) : view === 'waterfall' ? (
             <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border-color)', background: 'rgba(255,255,255,0.02)' }}>
               <div className="mb-2 min-w-0">
                 <div className="flex items-center gap-2 text-[length:var(--fs-sm)] font-medium" style={{ color: 'var(--text-primary)' }}>
@@ -353,22 +418,29 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
                 <div className="absolute inset-x-0 inset-y-1">
                   {timelineSegments.map((segment) => {
                     const onModelTrack = segment.kind === 'model'
+                    const isJobDone = segment.kind === 'tool' && !!segment.job_done
                     return (
                       <div
                         key={`${segment.start_at}-${segment.line_no ?? 'n'}-${segment.kind}`}
                         className="absolute overflow-hidden rounded-sm border"
-                        title={`${segment.label} · ${formatDuration(segment.duration_ms)} · ${segment.start_at} → ${segment.end_at}`}
+                        title={`开始 ${segment.start_at} · 持续 ${formatDuration(segment.duration_ms)}`}
                         style={{
                           left: `${segment.startPercent}%`,
                           top: onModelTrack ? 'calc(25% - 10px)' : 'calc(75% - 10px)',
                           height: 'calc(25% - 4px)',
                           width: `${Math.max(segment.widthPercent, 0.45)}%`,
                           minWidth: 4,
-                          borderColor: onModelTrack ? 'rgba(125,211,252,0.24)' : 'rgba(196,181,253,0.24)',
-                          background: onModelTrack
+                          borderColor: isJobDone
+                            ? 'rgba(250,204,21,0.62)'
+                            : onModelTrack ? 'rgba(125,211,252,0.24)' : 'rgba(196,181,253,0.24)',
+                          background: isJobDone
+                            ? 'linear-gradient(180deg, rgba(250,204,21,0.96) 0%, rgba(202,138,4,0.84) 100%)'
+                            : onModelTrack
                             ? 'linear-gradient(180deg, rgba(56,189,248,0.88) 0%, rgba(2,132,199,0.74) 100%)'
                             : 'linear-gradient(180deg, rgba(167,139,250,0.88) 0%, rgba(124,58,237,0.74) 100%)',
-                          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.14)',
+                          boxShadow: isJobDone
+                            ? '0 0 8px rgba(250,204,21,0.24), inset 0 1px 0 rgba(255,255,255,0.22)'
+                            : 'inset 0 1px 0 rgba(255,255,255,0.14)',
                         }}
                       />
                     )
@@ -393,7 +465,10 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
                     max="16"
                     step="0.5"
                     value={timelineZoom}
-                    onChange={(event) => setTimelineZoom(Number(event.target.value))}
+                    onChange={(event) => {
+                      userAdjustedZoomRef.current = true
+                      setTimelineZoom(Number(event.target.value))
+                    }}
                     className="h-4 w-full cursor-pointer accent-sky-400"
                     aria-label="时间缩放"
                     aria-valuetext={`${timelineZoom.toFixed(timelineZoom % 1 === 0 ? 0 : 1)} 倍`}
@@ -474,8 +549,6 @@ export default function TimeConsumePanel({ sessionId }: { sessionId?: string }) 
               </div>
             </div>
           )}
-        </>
-      )}
     </div>
   )
 }

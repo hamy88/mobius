@@ -37,8 +37,6 @@ const envKeys = [
   'JWT_SECRET',
   'ENABLE_PASSWORD_LOGIN',
   'WORKSPACE_ROOT',
-  'HOME_WORKSPACE_ROOT',
-  'LOCAL_WORKSPACE_ROOT',
   'TURNS_SUMMARY_DIR',
   'CODEX_HOME',
   'MOBIUS_DEBUG_ENV_FILE',
@@ -64,8 +62,10 @@ const envKeys = [
   'MOBIUS_LOG_DIR',
   'MOBIUS_TOKEN_PROXY_HOST',
   'MOBIUS_TOKEN_PROXY_PORT',
-  'MOBIUS_GULING_MCP_URL',
-  'MOBIUS_GULING_MCP_TOKEN',
+  'MOBIUS_MOBILE_SYNC_REPO',
+  'GITHUB_TOKEN_DESKTOP',
+  'USER_ISOLATION_METHOD',
+  'USER_ISOLATION_DOCKER_IMAGE',
 ];
 
 const inheritedEnv = {};
@@ -127,40 +127,6 @@ module.exports = {
       merge_logs: true,
       env: {
         NODE_ENV: 'production',
-        ...inheritedEnv,
-      },
-    },
-    {
-      // shunot 定时撰稿调度器: 每 30~110 分钟随机派发撰稿 session (用户授权 2026-09-08)
-      name: 'mobius-system-shunot-scheduler',
-      cwd: mobiusDir,
-      script: path.join(mobiusDir, 'backend', 'shunot-scheduler.js'),
-      exec_mode: 'fork',
-      instances: '1',
-      autorestart: true,
-      kill_timeout: 5000,
-      max_memory_restart: '128M',
-      out_file: path.join(LOG_DIR, 'mobius-shunot-scheduler.log'),
-      error_file: path.join(LOG_DIR, 'mobius-shunot-scheduler-error.log'),
-      merge_logs: true,
-      env: {
-        ...inheritedEnv,
-      },
-    },
-    {
-      // 局域网 HTTPS 反代: 0.0.0.0:443 → 127.0.0.1:33316 (自签证书, 见 backend/https-proxy-certs/)
-      name: 'mobius-system-https',
-      cwd: mobiusDir,
-      script: path.join(mobiusDir, 'backend', 'https-proxy.js'),
-      exec_mode: 'fork',
-      instances: '1',
-      autorestart: true,
-      kill_timeout: 5000,
-      max_memory_restart: '128M',
-      out_file: path.join(LOG_DIR, 'mobius-https-proxy.log'),
-      error_file: path.join(LOG_DIR, 'mobius-https-proxy-error.log'),
-      merge_logs: true,
-      env: {
         ...inheritedEnv,
       },
     },

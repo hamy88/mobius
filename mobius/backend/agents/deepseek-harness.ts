@@ -2,15 +2,17 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { spawn } = require('child_process')
-const { AgentBackend } = require('./base')
+import { AgentBackend } from './base'
 import type { HistorySnapshot, QueryOpts } from './base'
 const { HarnessJsonRpcPeer } = require('./deepseek-harness-protocol')
 const { projectHarnessEvent } = require('./deepseek-harness-events')
 const {
-  appendMobiusCoreEntry,
-  watchMergedJsonl,
-  readMergedJsonlHistory,
-} = require('../services/mobius-jsonl')
+  getHistorySnapshot,
+  writeMobiusCoreEntry,
+  flushPendingOpeners,
+} = require('../services/mobius-agent-history')
+import type { MobiusPromptRecord } from '../services/mobius-agent-history'
+const { watch: watchJsonlFile } = require('../services/jsonl-watcher')
 const {
   timeConsumeWaterfallFromBackend,
   clearTimeConsumeWaterfallForBackend,
@@ -24,6 +26,10 @@ const {
 } = require('../utils/session-flags')
 const { recordPromptPaste } = require('../services/agent-prompt-events')
 const { MOBIUS_DATA_PATH } = require('../config')
+const { ensureTempRoot } = require('../services/file-access')
+import { DRIVER as LANDLOCK_DRIVER } from '../services/agent-sandbox'
+// 用户隔离 (docker 模式): spawn 分派进沙箱容器 (node 换容器内 node22)
+const { spawnHarnessChild, isolationActiveFor } = require('../services/user-isolation')
 
 const RUNTIME_FILE = path.join(MOBIUS_DATA_PATH, 'deepseek-harness-runtime.json')
 const ARCHIVE_FILE = path.join(MOBIUS_DATA_PATH, 'deepseek-harness-archive.json')
@@ -36,11 +42,15 @@ const DEFAULT_PROXY_BIN = '/usr/bin/proxychains'
 const DEFAULT_PROXY_CONFIG = path.join(os.homedir(), 'proxychains_config_for_llm_models.conf')
 const MAX_STDERR_BYTES = 64 * 1024
 
+// EPERM counts as alive: the process exists, it just belongs to someone else.
 function pidAlive(pid: number | null | undefined): boolean {
   if (!Number.isFinite(Number(pid)) || Number(pid) <= 0) return false
   try { process.kill(Number(pid), 0); return true } catch (error) { return error?.code === 'EPERM' }
 }
 
+// The command to spawn: an explicit override when given, otherwise the pinned Node plus the
+// bundled runtime entry, wrapped in proxychains when a proxy is requested. Throws when any
+// prerequisite is missing.
 function resolveRuntimeCommand(opts: any = {}) {
   const explicit = opts.runtimeCommand || process.env.DEEPSEEK_HARNESS_RUNTIME_COMMAND
   let command
@@ -69,8 +79,9 @@ function appendJsonl(file: string, entry: unknown) {
   fs.appendFileSync(file, `${JSON.stringify(entry)}\n`)
 }
 
-// dispatch 契约: 调用方传 modelLaunchOptions (model-registry.modelLaunchOptionsFor 的整包输出).
-// 本后端在此解包出自己需要的字段 (model/harness*/代理), 旧扁平字段作兼容兜底.
+// Dispatch contract: callers hand over modelLaunchOptions, the whole output of
+// model-registry.modelLaunchOptionsFor. This backend unpacks the fields it needs (model,
+// harness*, proxy) and keeps the old flat fields as a compatibility fallback.
 function unpackLaunch(opts: HarnessStartOpts) {
   const launch = (opts?.modelLaunchOptions || {}) as Record<string, any>
   return {
@@ -85,7 +96,7 @@ function unpackLaunch(opts: HarnessStartOpts) {
 }
 
 
-// runtime 条目: 每个 mobius session 的 harness 子进程 + JSON-RPC peer 运行态.
+// Runtime entry: one harness child process per Mobius session, plus its JSON-RPC peer state.
 interface HarnessSessionEntry {
   sessionId: string
   agentSessionId: string
@@ -110,8 +121,10 @@ interface HarnessSessionEntry {
   terminating?: boolean
 }
 
-// dispatch 契约字段 (session-message-runner 下传): modelLaunchOptions 整包 + 旧扁平兜底.
+// Dispatch contract fields, passed down by session-message-runner: the whole
+// modelLaunchOptions plus the old flat fallbacks.
 interface HarnessStartOpts {
+  userId?: string
   cwd?: string
   flagRoot?: string
   agentSessionId?: string | null
@@ -125,16 +138,19 @@ interface HarnessStartOpts {
   harnessRequestTimeoutMs?: number | string
   useProxy?: boolean
   systemPrompt?: string
-  mobiusPromptRecord?: Record<string, unknown> | null
+  runtimeEnv?: Record<string, string>
+  mobiusPromptRecord?: MobiusPromptRecord | null
   suppressRunningFlag?: boolean
   spawn?: unknown
   [key: string]: unknown
 }
 
 class DeepSeekHarnessBackend extends AgentBackend {
-  // constructor 裸赋值属性的字段声明 (TS2339). runtime 类型收窄见基类注释.
+  // Declared up front: TS requires it for properties assigned bare in the constructor
+  // (TS2339). For the narrowed runtime type, see the base class comment.
   declare runtime: Map<string, HarnessSessionEntry>
-  spawn: (cmd: string, args: string[], opts: any) => any // 测试可注入 fake
+  spawn: (cmd: string, args: string[], opts: any) => any // injectable fake for tests
+  spawnHarness: (userId: any, command: { command: string; args: string[] }, opts: { cwd: string; env: Record<string, any> }) => any // docker 隔离分派 (可注入 fake)
   runtimeOptions: Record<string, unknown>
   sessionRoot: string
 
@@ -142,6 +158,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
     super({ name: 'deepseek-harness', runtimeFile: opts.runtimeFile || RUNTIME_FILE, archiveFile: opts.archiveFile || ARCHIVE_FILE })
     this.runtime = new Map()
     this.spawn = opts.spawn || spawn
+    this.spawnHarness = spawnHarnessChild
     this.runtimeOptions = opts.runtimeOptions || {}
     this.sessionRoot = opts.sessionRoot || SESSION_ROOT
     for (const [sessionId, entry] of Object.entries(this.persisted) as Array<[string, any]>) {
@@ -152,18 +169,25 @@ class DeepSeekHarnessBackend extends AgentBackend {
   _sessionDir(sessionId: string): string { return path.join(this.sessionRoot, sessionId) }
   _jsonlPath(sessionId: string): string { return path.join(this._sessionDir(sessionId), 'mobius-harness.jsonl') }
   _nativeRoot(sessionId: string): string { return path.join(this._sessionDir(sessionId), 'native') }
+  // Live entry first, then the persisted mapping, then archive.
   _resolveJsonlPath(sessionId: string): string | null {
     return this.runtime.get(sessionId)?.jsonlPath || this._lookupPersistedJsonlPath(sessionId) || this._lookupArchivedJsonlPath(sessionId)
   }
 
+  // Tail the session jsonl. A null sentinel means "from the current end of file", so a
+  // freshly started watcher does not replay what the history store already has.
   _watch(sessionId: string, jsonlPath: string, startSentinel: number | null) {
     const entry = this.runtime.get(sessionId)
     if (!entry) return
     entry.watcher?.stop?.()
-    entry.watcher = watchMergedJsonl({
+    let startOffset = Math.max(0, Math.floor(Number(startSentinel) || 0))
+    if (startSentinel == null) {
+      try { startOffset = fs.existsSync(jsonlPath) ? fs.statSync(jsonlPath).size : 0 } catch { startOffset = 0 }
+    }
+    entry.watcher = watchJsonlFile({
       path: jsonlPath,
-      startSentinel,
-      onEntry: (entry: any) => this._emitRaw(sessionId, entry),
+      startOffset,
+      onEntry: (raw: any) => this._emitRaw(sessionId, raw),
       onError: (error: Error) => this._captureError(sessionId, error),
     })
   }
@@ -175,24 +199,28 @@ class DeepSeekHarnessBackend extends AgentBackend {
     entry.recentError = { message: String(err?.message || error), rawLine: String(rawLine || ''), capturedAt: new Date().toISOString() }
   }
 
-  harnessWriteMobiusCoreEntry(entry: HarnessSessionEntry, mobiusPromptRecord: Record<string, unknown> | null | undefined) {
+  // The send path writes a user_input/compact card, which opens a new round. It goes into
+  // agent-history-store rather than a file.
+  harnessWriteMobiusCoreEntry(entry: HarnessSessionEntry, mobiusPromptRecord: MobiusPromptRecord | null | undefined) {
     if (!entry?.jsonlPath || !mobiusPromptRecord) return false
     try {
-      appendMobiusCoreEntry({
-        jsonlPath: entry.jsonlPath,
+      return writeMobiusCoreEntry({
         sessionId: entry.sessionId,
         agentSessionId: entry.agentSessionId,
         cwd: entry.cwd,
         backendName: this.name,
+        primaryPath: entry.jsonlPath,
         ...mobiusPromptRecord,
+        containDequeueEvent: this.containDequeueEvent.bind(this),
       })
-      return true
     } catch (error) {
       this._captureError(entry.sessionId, error)
       return false
     }
   }
 
+  // session.status drives the working flag and clears pending once the run stops;
+  // session.event is projected into the jsonl, and a turn/end error is captured.
   _onNotification(sessionId: string, method: string, params: any) {
     const entry = this.runtime.get(sessionId)
     if (!entry) return
@@ -211,6 +239,8 @@ class DeepSeekHarnessBackend extends AgentBackend {
     }
   }
 
+  // Spawn the runtime, wire up its peer and stderr tail, persist the entry, then initialize
+  // and send the opening prompt. The launch context reaches the child through env.
   async _start(sessionId: string, optsRaw: HarnessStartOpts, prompt: string) {
     const opts = { ...optsRaw, ...unpackLaunch(optsRaw) }
     const previous = this.runtime.get(sessionId)
@@ -225,14 +255,26 @@ class DeepSeekHarnessBackend extends AgentBackend {
     const command = resolveRuntimeCommand({ ...this.runtimeOptions, ...opts, useProxy: !!opts.useProxy })
     const env = {
       ...process.env,
+      ...(opts.runtimeEnv || {}),
       DEEPSEEK_API_KEY: String(opts.harnessSecretValue || ''),
       DEEPSEEK_BASE_URL: String(opts.harnessBaseUrl || 'https://api.deepseek.com'),
       DSH_CWD: cwd,
       DSH_SESSION_ROOT: nativeRoot,
       DSH_MAX_TOKENS_AS_SUCCESS: 'false',
       DSH_SYSTEM_PROMPT: String(opts.systemPrompt || 'You are a coding agent operating inside Mobius.'),
+      MOBIUS_SESSION_ID: sessionId,
+      MOBIUS_USER_ID: String(opts.userId || ''),
+      // 本人的 per-user temp 根: agent 产物要落在权限表放行的位置 (同 file-access.tempRootFor)
+      // The subject's per-user temp root, so agent artifacts land where the permission table allows
+      TMPDIR: ensureTempRoot(opts.userId),
     }
-    const child = this.spawn(command.command, command.args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
+    const sandboxPolicy = (optsRaw as any).sandboxPolicy;
+    // docker 隔离优先于 landlock: 普通用户进沙箱容器 (docker 模式下 sandboxPolicy 恒为 null)
+    const child = isolationActiveFor(opts.userId)
+      ? this.spawnHarness(opts.userId, command, { cwd, env })
+      : sandboxPolicy
+        ? this.spawn(LANDLOCK_DRIVER, ['--policy', String(sandboxPolicy), '--', command.command, ...command.args], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
+        : this.spawn(command.command, command.args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
     const entry = {
       sessionId, agentSessionId, cwd, flagRoot, jsonlPath, nativeRoot, pid: child.pid || null,
       model: opts.model, provider: opts.harnessProvider || 'deepseek-official', maxTokens: opts.harnessMaxTokens || null,
@@ -282,6 +324,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
     }
   }
 
+  // Park the prompt in `pending`, then send it over the peer.
   async _sendPrompt(entry: HarnessSessionEntry, prompt: string) {
     const text = String(prompt || '').trim()
     if (!text) return
@@ -295,6 +338,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
     return result
   }
 
+  // Start a fresh runtime; rejects when the session is already alive.
   createNewSession(opts: HarnessStartOpts & { sessionId: string; prompt: string }) {
     return this._withLock(opts.sessionId, async () => {
       if (this.isAlive(opts.sessionId)) throw new Error(`DeepSeek Harness session already alive: ${opts.sessionId}`)
@@ -302,6 +346,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
     })
   }
 
+  // Queue a prompt onto the live runtime, restarting it when it is no longer alive.
   noPauseCurrentAndQueueQueryAtSession(opts: HarnessStartOpts & { sessionId: string; prompt: string }) {
     return this._withLock(opts.sessionId, async () => {
       let entry = this.runtime.get(opts.sessionId)
@@ -317,6 +362,8 @@ class DeepSeekHarnessBackend extends AgentBackend {
     })
   }
 
+  // Stop the running runtime, then either clear the running flag (empty prompt) or relaunch
+  // it with the new prompt.
   pauseCurrentAndResumeFromSession(opts: HarnessStartOpts & { sessionId: string; prompt: string }) {
     return this._withLock(opts.sessionId, async () => {
       const old = this.runtime.get(opts.sessionId)
@@ -329,6 +376,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
     })
   }
 
+  // Ask the peer to shut down, then SIGTERM and escalate to SIGKILL after 3s.
   async _stopRuntime(entry: HarnessSessionEntry | null | undefined, graceful: boolean = true) {
     if (!entry?.child) return
     entry.terminating = true
@@ -357,6 +405,9 @@ class DeepSeekHarnessBackend extends AgentBackend {
       this.runtime.delete(sessionId)
       this._forgetPersisted(sessionId)
       if (entry?.flagRoot || entry?.cwd) safeRemoveFlagDir(entry.flagRoot || entry.cwd, sessionId, this.name)
+      // Termination fallback: flush parked pending_round_openers at once, so a crash cannot
+      // leave the dequeue event permanently unemitted.
+      try { flushPendingOpeners(sessionId) } catch {}
     })
   }
 
@@ -365,6 +416,7 @@ class DeepSeekHarnessBackend extends AgentBackend {
     return !!entry?.child && pidAlive(entry.child.pid)
   }
   isWorking(sessionId: string): boolean { return this.isAlive(sessionId) && !!this.runtime.get(sessionId)?.working }
+  // Alive sessions only.
   listSessions() {
     return [...this.runtime.values()].filter((entry: HarnessSessionEntry) => this.isAlive(entry.sessionId)).map((entry: HarnessSessionEntry) => ({
       sessionId: entry.sessionId, agentSessionId: entry.agentSessionId, pid: entry.child?.pid || null,
@@ -375,9 +427,9 @@ class DeepSeekHarnessBackend extends AgentBackend {
   }
   getPendingRequests(sessionId: string) { return [...(this.runtime.get(sessionId)?.pending || [])] }
   getRecentError(sessionId: string) { return this.runtime.get(sessionId)?.recentError || null }
-  getHistory(sessionId: string, opts: QueryOpts = {}): HistorySnapshot {
-    const jsonlPath = this._resolveJsonlPath(sessionId)
-    return jsonlPath ? readMergedJsonlHistory(jsonlPath, opts) : { entries: [], sentinel: null }
+  // History snapshot from the agent-history-store DB, topped up from the native jsonl first.
+  getHistory(sessionId: string, _opts: QueryOpts = {}): HistorySnapshot {
+    return getHistorySnapshot(sessionId, this._resolveJsonlPath(sessionId), this.containDequeueEvent.bind(this), []) as HistorySnapshot
   }
 
   get_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
@@ -387,16 +439,22 @@ class DeepSeekHarnessBackend extends AgentBackend {
   clear_time_consume_waterfall(sessionId: string, opts: QueryOpts = {}) {
     return clearTimeConsumeWaterfallForBackend(this, sessionId, opts)
   }
-  getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, opts: QueryOpts = {}) {
+  getAgentRawThoughtStream(sessionId: string, listener: (raw: unknown) => void, _opts: QueryOpts = {}) {
+    // The shared deepseek watcher may not be running yet (runtime fills it in only once the
+    // session goes quiet), so start an independent live tail on subscribe to avoid dropping
+    // increments. Backfilling history is agent-history-store's job.
     const jsonlPath = this._resolveJsonlPath(sessionId)
-    if (!jsonlPath) return super.getAgentRawThoughtStream(sessionId, listener, opts)
-    const watcher = watchMergedJsonl({
+    if (!jsonlPath) return super.getAgentRawThoughtStream(sessionId, listener, _opts)
+    let startOffset = 0
+    try { startOffset = fs.existsSync(jsonlPath) ? fs.statSync(jsonlPath).size : 0 } catch { startOffset = 0 }
+    const w = watchJsonlFile({
       path: jsonlPath,
-      startSentinel: (opts.fromSentinel as number | null) ?? null,
+      startOffset,
       onEntry: (entry: unknown) => listener(entry),
     })
-    return () => watcher.stop?.()
+    return () => { try { w.stop() } catch {} }
   }
+  // Flag-file checks, same convention as tmux-claude-code.
   isJobGoalAccomplished(sessionId: string): boolean {
     const entry = this.runtime.get(sessionId) || this._lookupPersistedEntry(sessionId)
     const root = entry?.flagRoot || entry?.cwd

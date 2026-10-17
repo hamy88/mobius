@@ -20,6 +20,8 @@ import * as path from 'path';
 import * as net from 'net';
 import { spawn, execFile } from 'child_process';
 import * as os from 'os';
+// 用户隔离 (docker 模式): 普通用户的 code-server 进沙箱容器, 由 user-isolation 适配器接管
+const { dockerCodeServerActive, ensureDocker, killDocker } = require('./user-isolation/code-server');
 
 const HOME = os.homedir();
 const CODE_SERVER_DATA_ROOT = process.env.CODE_SERVER_DATA_ROOT || '/data/code_server';
@@ -251,6 +253,7 @@ function lruEvictForUser(userId: string): void {
 }
 
 function kill(k: string): void {
+  if (killDocker(k, k.split('__')[0], k.split('__')[1] || '')) return; // docker 模式实例由适配器处理
   const e = pool.get(k);
   if (!e) return;
   pool.delete(k);
@@ -283,13 +286,20 @@ async function waitForReady(port: number, timeoutMs: number): Promise<boolean> {
 
 async function ensure(user: any, projectId: string, bindPath: string): Promise<{ port: number; key: string; started: boolean }> {
   if (!user?.id || !projectId || !bindPath) throw new Error('cs-pool: 缺 user / projectId / bindPath');
+  // docker 隔离分派: 沙箱用户的 code-server 在其容器内起, 本 pool 不再管
+  const d = await ensureDocker(user, projectId, bindPath);
+  if (d) return d;
   // 等启动期 reconcile 完成, 避免 spawn 和 re-adopt 同 key 竞态覆盖.
   if (reconcilePromise) { try { await reconcilePromise; } catch {} }
   if (!fs.existsSync(bindPath) || !fs.statSync(bindPath).isDirectory()) {
     throw Object.assign(new Error(`bind_path 不存在或不是目录: ${bindPath}`), { code: 'BIND_PATH_INVALID' });
   }
-  try { fs.accessSync(bindPath, fs.constants.W_OK); }
-  catch { throw Object.assign(new Error(`bind_path 对当前进程不可写: ${bindPath} (请联系管理员调权限)`), { code: 'BIND_PATH_RO' }); }
+  // 管理员不受写权限约束: 只读目录 (如 /etc) 也能在 VSCode 里打开查看.
+  // Admins are not blocked by a read-only workspace — VSCode opens it fine.
+  if (user.role !== 'admin') {
+    try { fs.accessSync(bindPath, fs.constants.W_OK); }
+    catch { throw Object.assign(new Error(`bind_path 对当前进程不可写: ${bindPath} (请联系管理员调权限)`), { code: 'BIND_PATH_RO' }); }
+  }
 
   const k = key(user.id, projectId);
   const existing = pool.get(k);

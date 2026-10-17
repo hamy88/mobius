@@ -2,6 +2,7 @@ import { db } from '../../db';
 import {
   APP_DIR,
   DEFAULT_FORGOTTEN_FLAG_MESSAGE,
+  normalizeForgottenFlagMessage,
   DEFAULT_FORGOTTEN_FLAG_ISSUE_INTERVAL_MINUTES,
   DEFAULT_FORGOTTEN_FLAG_RESEARCH_INTERVAL_MINUTES,
   DEFAULT_FORGOTTEN_FLAG_ISSUE_BACKOFF,
@@ -14,9 +15,26 @@ import {
   FORGOTTEN_FLAG_BACKOFF_MAX,
   FORGOTTEN_FLAG_PATIENCE_MIN,
   FORGOTTEN_FLAG_PATIENCE_MAX,
+  EXTENSION_SYSTEM_USER_ID,
 } from '../config';
 import type { AimuxRemoteInventoryEntry, ProjectRow, ProjectRawRow } from '../types/rows';
 import { ProjectMemberships } from './project-memberships';
+
+// migration: 简易模式 / 桌面欢迎页的「兜底容器」改名
+// (旧: let-us-chat + a random chat → 新: 快捷任务 + 日常会话, 与前端
+// services/easy-mode-defaults.ts 的常量一致). 幂等: 跑过一次后没有匹配行.
+// 只改显示用的名字, 不动 bind_path —— 磁盘目录照旧, 已经跑起来的会话不受影响.
+(() => {
+  try {
+    const projects = db.prepare("UPDATE projects SET name = '快捷任务' WHERE LOWER(TRIM(name)) = 'let-us-chat'").run();
+    const issues = db.prepare("UPDATE issues SET title = '日常会话' WHERE LOWER(TRIM(title)) = 'a random chat'").run();
+    if (projects.changes || issues.changes) {
+      console.log(`[migration] easy-mode fallback container renamed: ${projects.changes} project(s), ${issues.changes} issue(s)`);
+    }
+  } catch (err) {
+    console.error('[migration] rename easy-mode fallback container failed:', err);
+  }
+})();
 
 type ProjectVisibility = 'private' | 'team' | 'public' | 'allowlist';
 const CARD_BORDER_THEME_IDS = new Set([
@@ -163,7 +181,7 @@ function hydrate(row: ProjectRawRowWithExtras | null | undefined): ProjectRow | 
     // 前端用它预填输入框 (单一真相源在 config.DEFAULT_FORGOTTEN_FLAG_MESSAGE).
     forgotten_flag_message_effective:
       (typeof row.forgotten_flag_message === 'string' && row.forgotten_flag_message.trim())
-        ? row.forgotten_flag_message
+        ? normalizeForgottenFlagMessage(row.forgotten_flag_message)
         : DEFAULT_FORGOTTEN_FLAG_MESSAGE,
     forgotten_flag_issue_interval_minutes: issueInit,
     forgotten_flag_research_interval_minutes: researchInit,
@@ -201,9 +219,23 @@ interface UpsertExtensionArgs {
   id: string;
   name: string;
   description?: string | null;
-  createdBy: string;
+  // 仅新建时使用; 缺省则落到系统里最早出现的非 system 管理员.
+  createdBy?: string | null;
   bindPath: string;
   extensionName: string;
+}
+
+// 拓展项目由文件系统扫描落库, 磁盘上直接丢进来的目录没有"点创建的人".
+// created_by 就是项目所有者, 且必须是真实用户 (system 只是 URL 命名空间占位, 永不作所有者),
+// 因此兜底取系统里最早出现的非 system 管理员; 一个都没有时返回 null 由调用方报错.
+function resolveExtensionOwner(): string | null {
+  const row = db.prepare(`
+    SELECT id FROM users
+    WHERE role = 'admin' AND id <> ? AND deleted_at IS NULL
+    ORDER BY created_at ASC, id ASC
+    LIMIT 1
+  `).get(EXTENSION_SYSTEM_USER_ID) as { id: string } | undefined;
+  return row ? row.id : null;
 }
 
 interface WhitelistRow {
@@ -264,7 +296,7 @@ const Projects = {
     `).all() as ProjectRawRowWithExtras[]).map(hydrate);
   },
 
-  // 创建项目 = 单事务: 写项目行 + 创建者 owner 关系 + 首批成员 (member).
+  // 创建项目 = 单事务: 写项目行 + 创建者 owner 关系 + 首批成员.
   // 任一首批成员非法 → addMany 抛错 → 整个事务回滚, 不会留下"没有项目组的半成品项目".
   insert: ({ id, name, description, createdBy, bindPath, bindPathManual, gitRepos, defaultUseWorktree, researchEnabled, visibility, canPostIssue, canRunSession, defaultModel, memberUserIds, members }: InsertArgs) => {
     const insertProject = db.prepare(
@@ -277,10 +309,10 @@ const Projects = {
         (typeof defaultModel === 'string' && defaultModel.trim()) ? defaultModel.trim() : null);
       // 创建者自动成为项目负责人 (owner).
       ProjectMemberships.ensureOwner(id, createdBy, createdBy);
-      // 首批成员: 优先用带角色的 members, 否则回落到 memberUserIds (全 member). 排除创建者本人.
+      // 首批成员: 优先用带角色的 members, 否则回落到 memberUserIds (全 developer). 排除创建者本人.
       const rawInitial = Array.isArray(members) && members.length
-        ? members.map((m) => ({ user_id: String((m && m.user_id) || '').trim(), role: String((m && m.role) || 'member').trim() || 'member' }))
-        : (Array.isArray(memberUserIds) ? memberUserIds.map((u) => ({ user_id: String(u || '').trim(), role: 'member' })) : []);
+        ? members.map((m) => ({ user_id: String((m && m.user_id) || '').trim(), role: String((m && m.role) || 'developer').trim() || 'developer' }))
+        : (Array.isArray(memberUserIds) ? memberUserIds.map((u) => ({ user_id: String(u || '').trim(), role: 'developer' })) : []);
       // 同一用户只保留首次出现的角色.
       const seen = new Set<string>();
       const byRole = new Map<string, string[]>();
@@ -315,10 +347,16 @@ const Projects = {
   listExtensions: (): Array<ProjectRow | null | undefined> => (db.prepare(
     "SELECT *, 0 AS starred FROM projects WHERE kind = 'extension'"
   ).all() as ProjectRawRowWithExtras[]).map(hydrate),
+  // 拓展项目落库: 由 registry 扫描文件系统调用, 不经过 insert 事务,
+  // 因此这里必须自己补所有者 owner 关系, 否则团队面板一直显示"暂无项目成员".
+  // Extension rows bypass the insert transaction, so the owner membership is ensured here.
   upsertExtension: ({ id, name, description, createdBy, bindPath, extensionName }: UpsertExtensionArgs): string => {
-    const existing = db.prepare('SELECT id FROM projects WHERE extension_name = ?').get(extensionName) as { id: string } | undefined;
+    const existing = db.prepare('SELECT id, created_by FROM projects WHERE extension_name = ?').get(extensionName) as { id: string; created_by: string } | undefined;
+    const projectId = existing ? existing.id : id;
+    let ownerId: string;
     if (existing) {
-      // 已存在: 把可能漂移的字段同步回锁定值 (name/description 来自 manifest), 并清 disabled.
+      // 已存在: 所有者不动 (可能已由创建它的管理员接管), 只把漂移字段同步回锁定值并清 disabled.
+      ownerId = existing.created_by;
       db.prepare(`
         UPDATE projects SET
           name = ?, description = ?, bind_path = ?, bind_path_manual = 1,
@@ -326,16 +364,37 @@ const Projects = {
           kind = 'extension', disabled = 0
         WHERE id = ?
       `).run(name, description || '', bindPath, existing.id);
-      return existing.id;
+    } else {
+      ownerId = createdBy || resolveExtensionOwner() || '';
+      if (!ownerId) {
+        throw new Error(`拓展 "${extensionName}" 落库失败: 系统里没有可用的管理员账号作为所有者`);
+      }
+      db.prepare(`
+        INSERT INTO projects (
+          id, name, description, created_by, bind_path, bind_path_manual,
+          git_repos, default_use_worktree, research_enabled,
+          kind, extension_name, disabled
+        ) VALUES (?, ?, ?, ?, ?, 1, '[]', 0, 0, 'extension', ?, 0)
+      `).run(id, name, description || '', ownerId, bindPath, extensionName);
     }
-    db.prepare(`
-      INSERT INTO projects (
-        id, name, description, created_by, bind_path, bind_path_manual,
-        git_repos, default_use_worktree, research_enabled,
-        kind, extension_name, disabled
-      ) VALUES (?, ?, ?, ?, ?, 1, '[]', 0, 0, 'extension', ?, 0)
-    `).run(id, name, description || '', createdBy, bindPath, extensionName);
-    return id;
+    ProjectMemberships.ensureOwner(projectId, ownerId, ownerId);
+    return projectId;
+  },
+  // 拓展项目由 registry 先归到兜底管理员, UI 创建路径随后把所有权交给点创建的那个管理员:
+  // 改 created_by (唯一 owner 真相) + 迁移 owner 成员行. 幂等.
+  transferOwnership: (projectId: string, newOwnerId: string): void => {
+    const row = db.prepare('SELECT created_by FROM projects WHERE id = ?').get(projectId) as { created_by: string } | undefined;
+    if (!row || row.created_by === newOwnerId) return;
+    db.transaction(() => {
+      // 旧所有者 (多为兜底占位) 的成员行一并清掉: 非创建者的 owner 行不构成所有者.
+      db.prepare('DELETE FROM project_memberships WHERE project_id = ? AND user_id = ?').run(projectId, row.created_by);
+      db.prepare('UPDATE projects SET created_by = ? WHERE id = ?').run(newOwnerId, projectId);
+      db.prepare(`
+        INSERT INTO project_memberships (project_id, user_id, role, created_by)
+        VALUES (?, ?, 'owner', ?)
+        ON CONFLICT(project_id, user_id) DO UPDATE SET role = 'owner'
+      `).run(projectId, newOwnerId, newOwnerId);
+    })();
   },
   setExtensionDisabled: (extName: string, disabled: boolean) => db.prepare(
     "UPDATE projects SET disabled = ? WHERE kind = 'extension' AND extension_name = ?"

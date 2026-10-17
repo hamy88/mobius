@@ -567,6 +567,26 @@ export function isFunctionCallOutputPayload(payload: any): boolean {
   return payload?.type === 'function_call_output' || payload?.type === 'custom_tool_call_output'
 }
 
+// 从 reasoning payload 提取可读思考正文 (response_item.payload.type === 'reasoning').
+// OpenAI Responses / Codex 的 reasoning 常同时带 content[] 明文 (reasoning_text/summary_text)
+// 与 encrypted_content 引用; 只有 content 无可读文本时才真算"加密不可解". 返回空串 = 无可读正文.
+export function reasoningText(payload: any): string {
+  const content = payload?.content
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((b: any) => {
+      if (!b || typeof b !== 'object') return ''
+      if (typeof b.text === 'string') return b.text
+      if (typeof b.reasoning === 'string') return b.reasoning
+      if (typeof b.summary === 'string') return b.summary
+      return ''
+    })
+    .filter((t: string) => t.trim())
+    .join('\n')
+    .trim()
+}
+
 function decodeJsString(raw: string): string {
   try { return JSON.parse(`"${raw}"`) }
   catch { return raw.replace(/\\([\\"'nrt])/g, (_m, c) => ({ n: '\n', r: '\r', t: '\t' } as Record<string, string>)[c] || c) }
@@ -1194,10 +1214,50 @@ export function entryDisplayImages(entry: AnyEntry): string[] {
 
 export type DisplayFileRef = { path: string; remote?: string; root?: string }
 
+/*
+ * Tokenize one shell command only through its argv prefix. Unquoted control operators and
+ * redirects terminate argv, while quoted or escaped operator characters stay in file names.
+ */
+function tokenizeCommandArgv(seg: string): string[] {
+  const toks: string[] = []
+  let cur = ''
+  let started = false
+  let quoted = false
+  let quote: '"' | "'" | null = null
+  const push = () => {
+    if (started) toks.push(cur)
+    cur = ''
+    started = false
+    quoted = false
+  }
+  for (let i = 0; i < seg.length; i++) {
+    const ch = seg[i]
+    if (quote) {
+      if (ch === quote) quote = null
+      else if (ch === '\\' && quote === '"' && i + 1 < seg.length) { cur += seg[i + 1]; i++ }
+      else cur += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") { quote = ch; started = true; quoted = true; continue }
+    if (ch === '\\' && i + 1 < seg.length) { cur += seg[i + 1]; i++; started = true; quoted = true; continue }
+    if (ch === ' ' || ch === '\t') { push(); continue }
+    if (ch === '\n' || ch === ';' || ch === '|' || ch === '&' || ch === '<' || ch === '>') {
+      // 未加引号并紧贴重定向符的纯数字是 fd，不是 display-files 的路径参数
+      // An unquoted digit run attached to a redirect is an fd, not a display-files path
+      if (!((ch === '<' || ch === '>') && started && !quoted && /^\d+$/.test(cur))) push()
+      return toks
+    }
+    cur += ch
+    started = true
+  }
+  push()
+  return toks
+}
+
 function collectDisplayFiles(command: string, depth: number, out: DisplayFileRef[]): void {
   if (depth > 3) return
   for (const seg of splitShellSegments(command)) {
-    const toks = tokenizeSegment(seg.trim())
+    const toks = tokenizeCommandArgv(seg.trim())
     if (toks.length === 0) continue
     const base = toks[0].split('/').pop() || toks[0]
     if (base === 'display-files') {
@@ -1238,6 +1298,8 @@ export function entryDisplayFiles(entry: AnyEntry): DisplayFileRef[] {
     }
   }
   if (entry?.type === 'response_item' && isFunctionCallPayload(entry?.payload)) {
+    const name = typeof entry?.payload?.name === 'string' ? entry.payload.name.toLowerCase() : ''
+    if (!['exec', 'exec_command', 'bash', 'shell'].includes(name)) return []
     const args = functionCallArguments(entry.payload)
     const command = args?.cmd ?? args?.command ?? args?.input?.command
     if (typeof command === 'string') commands.push(command)

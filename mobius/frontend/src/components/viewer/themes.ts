@@ -69,6 +69,11 @@ export const ASSISTANT_END_TURN_THEME: CardTheme = { ...TYPE_THEME.system, label
 // 的思考块与空思考块 (空思考块摘要仍兜底"思考内容被隐藏", 但类型徽章也统一标"思考").
 export const THINKING_ONLY_THEME: CardTheme = { ...TYPE_THEME.attachment, label: '思考' }
 
+// 特例: codex response_item.payload.type === 'reasoning' 的思考卡片 (与 Claude assistant
+// 只含 thinking 块的卡片同义, 都是模型思考过程而非助手回复). 复用同款 purple"思考"主题,
+// 避免落入顶层 response_item 的"应答"蓝色, 让"这是思考"在长列表里一眼可辨.
+export const REASONING_THEME: CardTheme = { ...TYPE_THEME.attachment, label: '思考' }
+
 // 特例: user 消息里的 Claude Code compact 完成信号
 // (content 被 <local-command-stdout> ... </local-command-stdout> 包裹, 正文以 "Compacted" 开头).
 // 这是一次对话上下文压缩完成的产物, 套了 user 外壳但不是人类提问.

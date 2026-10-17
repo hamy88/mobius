@@ -20,6 +20,7 @@ import {
   functionOutputBody,
   isFunctionCallPayload,
   isFunctionCallOutputPayload,
+  reasoningText,
   isReadToolUseName,
   extractReadCallFromBlock,
   readCallOneLineSummary,
@@ -249,7 +250,13 @@ export function buildHeaderSummary(entry: AnyEntry): HeaderSummary {
         return { short: clipped.short, shortTail: clipped.short, full: ic.raw, truncated: true, canCompact: true }
       }
       const body = contentBlocksText(payload?.content)
-      return clip(`${payload?.role || 'message'}${body ? ` · ${body}` : ''}`, HEADER_SHORT_LIMIT)
+      // The message body is also fed to the compact Markdown renderer.  Do not
+      // prepend the protocol role (for example "assistant · ") here: when the
+      // body starts with a line-sensitive construct such as a GFM table, that
+      // prefix changes the Markdown grammar and turns the table into a
+      // paragraph.  The card header already exposes the entry type/label, so
+      // the role prefix adds no information that belongs in `full`.
+      return clip(body, HEADER_SHORT_LIMIT)
     }
     if (isFunctionCallPayload(payload)) {
       if (payload?.name === 'update_plan') {
@@ -267,6 +274,9 @@ export function buildHeaderSummary(entry: AnyEntry): HeaderSummary {
     }
     if (isFunctionCallOutputPayload(payload)) return compactCodeSummary(functionOutputBody(payload?.output))
     if (pt === 'reasoning') {
+      // 优先展示可读思考正文; 只有 content 无可读文本 (闭源模型只留 encrypted_content) 才标"加密不可解".
+      const text = reasoningText(payload)
+      if (text) return clip(text, HEADER_SHORT_LIMIT)
       const encryptedContent = payload?.encrypted_content
       return clip(typeof encryptedContent === 'string' && encryptedContent.length > 0 ? ENCRYPTED_REASONING_LABEL : 'reasoning', HEADER_SHORT_LIMIT)
     }

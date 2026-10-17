@@ -143,6 +143,8 @@ export interface RoundItem {
   lineNo: number  // 全局行号 (1-based)
 }
 
+// 巨轮渲染窗口跳过的一段内容. at = 提示行插在 round.items 中的下标 (0..items.length),
+// count = 被跳过的原始条目数. 渲染层在 at 处插一张"本轮过长"提示卡 (见 RoundGroups.HiddenGapCard).
 export interface RoundHiddenGap {
   at: number
   count: number
@@ -151,12 +153,17 @@ export interface RoundHiddenGap {
 export interface Round {
   roundNum: number  // 可见窗口内 1-based 编号
   items: RoundItem[]
+  // 折叠态轻量投影: 完整 opener 与最后一条应答/结论, 展开后由整组条目接管.
+  essential_dict?: {
+    opener: AnyEntry | null
+    final: AnyEntry | null
+  }
+  // 条目数超过渲染窗口上限时, 被窗口跳过的中段会在这里留下标记 (没有跳过则缺省).
   hiddenGaps?: RoundHiddenGap[]
-  essential_dict?: { opener: any | null; final: any | null }
 }
 
 export type JsonlRenderBlock =
   | { key: string; kind: 'continuation'; items: JsonlViewItem[] }
   | { key: string; kind: 'preItem'; item: JsonlViewItem }
   | { key: string; kind: 'round'; round: Round; index: number }
-  | { key: string; kind: 'pending'; pending: { id: string; user_summary?: string }[] }
+  | { key: string; kind: 'pending'; pending: { id: string; user_summary: string }[] }

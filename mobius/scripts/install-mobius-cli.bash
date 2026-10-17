@@ -1,36 +1,49 @@
 #!/usr/bin/env bash
-# install-mobius-cli.bash — 把 mobius CLI 安装到 ~/.local/bin.
-#
-#   bash scripts/install-mobius-cli.bash
-#
-# 安装内容 (均无秘密, 可被 agent 任意查看):
-#   multiagent_send        跨智能体双向通讯 (纯 curl → /api/multiagent_communication)
-#   generate_localhost_jwt 从 .env 读 JWT_SECRET 签短期用户 JWT (node + jsonwebtoken)
+# Install the Mobius CLI commands into ~/.local/bin.
 set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
-SRC_DIR="$(cd "$(dirname "$(readlink -f "$0")")/cli" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SRC_DIR="$SCRIPT_DIR/cli"
 
-mkdir -p "$PREFIX"
+if [[ ! -d "$SRC_DIR" ]]; then
+  echo "ERROR: CLI source directory not found: $SRC_DIR" >&2
+  exit 1
+fi
+for required in bash awk curl node python3 install; do
+  command -v "$required" >/dev/null 2>&1 || { echo "ERROR: required command not found: $required" >&2; exit 1; }
+done
+mkdir -p -- "$PREFIX"
 
-for cmd in multiagent_send generate_localhost_jwt; do
+APP_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
+if [[ ! -f "$APP_DIR/.env" ]]; then
+  echo "ERROR: required Mobius environment file not found: $APP_DIR/.env" >&2
+  exit 1
+fi
+
+for cmd in multiagent_send generate_localhost_jwt declare_job_done declare_job_failed research_blackboard_read research_blackboard_write display-files mobius_schedule_wake_me_up mobius_schedule_list mobius_schedule_cancel_all; do
   src="$SRC_DIR/$cmd"
-  if [ ! -f "$src" ]; then
-    echo "ERROR: source not found: $src" >&2
-    exit 1
-  fi
-  install -m 755 "$src" "$PREFIX/$cmd"
+  [[ -f "$src" ]] || { echo "ERROR: source not found: $src" >&2; exit 1; }
+  install -m 755 -- "$src" "$PREFIX/$cmd"
   echo "installed: $PREFIX/$cmd"
 done
+install -m 755 -- "$SRC_DIR/research_blackboard_cli.js" "$PREFIX/.research_blackboard_cli"
+install -m 755 -- "$SRC_DIR/mobius_schedule_cli.js" "$PREFIX/.mobius_schedule_cli"
+printf '%s\n' "$APP_DIR" > "$PREFIX/.mobius-cli-app-dir"
+chmod 644 "$PREFIX/.mobius-cli-app-dir"
 
 echo
-echo "Done. Verification examples:"
+echo "Done. Safe verification examples:"
 echo "  multiagent_send --help"
-echo "  generate_localhost_jwt <user_id>   # prints a 1h JWT"
-
+echo "  generate_localhost_jwt --help"
+echo "  declare_job_done --help"
+echo "  declare_job_failed --help"
+echo "  research_blackboard_read --help"
+echo "  research_blackboard_write --help"
+echo "  mobius_schedule_wake_me_up --help"
+echo "  mobius_schedule_list --help"
+echo "  mobius_schedule_cancel_all --help"
 case ":$PATH:" in
   *":$PREFIX:"*) ;;
-  *) echo
-     echo "Note: \$PATH does not contain $PREFIX; add this to your shell configuration:"
-     echo "  export PATH=\"$PREFIX:\$PATH\"" ;;
+  *) echo; echo "Note: PATH does not contain $PREFIX; add: export PATH=\"$PREFIX:\$PATH\"" ;;
 esac

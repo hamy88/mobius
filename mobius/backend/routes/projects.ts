@@ -19,15 +19,8 @@ import { Memories } from '../repositories/memories';
 import { Users } from '../repositories/users';
 import { ProjectDeletionAudit, type ProjectDeletionImpact } from '../repositories/project-deletion-audit';
 // @ts-ignore — service 仍是 .js
-import {
-  buildIssueContextPreview,
-  buildIssueSelectionDefaults,
-  buildProjectIssueContextPreview,
-  buildProjectIssueSelectionDefaults,
-  stripContextItemBodies,
-} from '../services/session-context';
-// @ts-ignore — service 仍是 .js
 import { ensureGuidedDemoAssets } from '../services/guided-demo-assets';
+import { searchDirectory } from '../services/user-directory';
 // @ts-ignore — service 仍是 .js
 import { defaultCodeServerWorkspace } from '../services/code-server-workspace';
 import {
@@ -40,10 +33,13 @@ import {
   contentTypeFor,
 } from '../services/project-file-ops';
 import { resolveProjectPath } from '../services/project-path';
+import { isWithin } from '../services/file-access';
 import * as aimuxRemote from '../services/aimux-remote';
+import { aimuxRemoteNameFromMeta, parsePcClientMetadata } from '../services/pc-client-context';
 // @ts-ignore — service 仍是 .js
 import {
   canReadProject,
+  effectiveProjectRole,
   canReadIssue,
   canReadResearch,
   canReadSession,
@@ -92,13 +88,12 @@ import {
   FORGOTTEN_FLAG_PATIENCE_MAX,
   HIDDEN_FOLDER_NAME,
 } from '../config';
+// @ts-ignore — user-isolation 统一出口 (TS)
+import { codeServerAllowedFor } from '../services/user-isolation';
 
 const router = express.Router();
 const GIT_SOURCES_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-// dirty (未提交计数) 变化快 — agent 随时在改文件, 24h 缓存会让"N 个未提交"长期失真
-// (甚至仓库已删仍显示)。dirty 数据单独用短 TTL, 过期即重查; 其余慢变信息仍走 24h。
-const GIT_DIRTY_CACHE_TTL_MS = 5 * 60 * 1000;
-type GitSourceCacheEntry = { expiresAt: number; scannedAt: string; dirtyStaleAt?: number; source: any };
+type GitSourceCacheEntry = { expiresAt: number; scannedAt: string; source: any };
 const gitSourceCache = new Map<string, GitSourceCacheEntry>();
 const remotePathCache = new Map<string, { expiresAt: number; path: string }>();
 
@@ -332,7 +327,7 @@ function fileIncludes(absPath: string, marker: string): boolean {
 }
 
 function removePathIfExists(absPath: string, root: string, removed: string[]): void {
-  if (!absPath || absPath === root || !absPath.startsWith(root + path.sep)) return;
+  if (!absPath || !isWithin(root, absPath)) return;
   if (!fs.existsSync(absPath)) return;
   fs.rmSync(absPath, { recursive: true, force: true });
   removed.push('/' + path.relative(root, absPath).replace(/\\/g, '/'));
@@ -393,13 +388,13 @@ function resolveBindPath(rawPath: unknown, userWorkDir: unknown, options: Resolv
   const createIfMissing = !!options.createIfMissing;
   const userRoot = path.resolve(String(userWorkDir));
   let abs: string;
-  if (path.isAbsolute(rawPath) && (rawPath === userRoot || rawPath.startsWith(userRoot + path.sep))) {
+  if (path.isAbsolute(rawPath) && isWithin(userRoot, rawPath)) {
     abs = path.resolve(rawPath);
   } else {
     // 相对路径或相对家目录的伪绝对路径 (e.g. "/imac-test")
     abs = path.resolve(userRoot, rawPath.replace(/^\//, ''));
   }
-  if (abs !== userRoot && !abs.startsWith(userRoot + path.sep)) throw new Error('绑定路径必须位于您的工作目录下');
+  if (!isWithin(userRoot, abs)) throw new Error('绑定路径必须位于您的工作目录下');
   if (!fs.existsSync(abs)) {
     if (!createIfMissing) throw new Error('路径不存在');
     try {
@@ -513,6 +508,15 @@ const EXTENSION_DISPLAY_NAME_MAX_LENGTH = 120;
 const EXTENSION_DESCRIPTION_MAX_LENGTH = 1000;
 const PROJECT_OVERVIEW_MAX_PROJECTS = 100;
 const PROJECT_OVERVIEW_ITEM_LIMIT = 5;
+const CLUSTER_OVERVIEW_RANGES_MS: Record<string, number> = {
+  '1h': 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '48h': 48 * 60 * 60 * 1000,
+  '72h': 72 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+};
 
 function hasOwn(obj: any, key: string): boolean {
   return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
@@ -586,7 +590,7 @@ function shapeProjectForUser(project: any, user: any, opts: { mutedIds?: Set<str
   if (!project) return project;
   const canCreate = canCreateIssue(user, project);
   // 当前用户在该项目的成员角色 (非成员为 null), 供前端区分"项目组成员"与"可见性读者".
-  const membershipRole = user?.id ? ProjectMemberships.roleFor(project.id, user.id) : null;
+  const membershipRole = user?.id ? effectiveProjectRole(user, project) : null;
   const muted = opts.mutedIds
     ? opts.mutedIds.has(project.id)
     : (user?.id ? UserProjectView.isMuted(user.id, project.id) : false);
@@ -609,6 +613,24 @@ function shapeProjectForUser(project: any, user: any, opts: { mutedIds?: Set<str
     muted_label: muted ? '已屏蔽' : null,
     hidden,
   };
+}
+
+async function stopProjectSessionsForUser(projectId: string, userId: string): Promise<void> {
+  try {
+    const { terminateBackgroundSession } = require('./sessions');
+    const rows = db.prepare(`
+      SELECT * FROM sessions_v2
+      WHERE project_id = ? AND user_id = ? AND status = 'active'
+    `).all(projectId, userId) as any[];
+    for (const session of rows) {
+      try { await terminateBackgroundSession(session, String(session.session_id)); } catch (e) {
+        console.warn(`[project-membership] stop session failed ${session.session_id}: ${(e as Error).message}`);
+      }
+      try { db.prepare("UPDATE sessions_v2 SET agent_status = 'idle' WHERE session_id = ?").run(session.session_id); } catch {}
+    }
+  } catch (e) {
+    console.warn(`[project-membership] stop sessions unavailable: ${(e as Error).message}`);
+  }
 }
 
 function normalizeText(value: unknown, fallback: string, maxLength: number): string {
@@ -926,11 +948,25 @@ function loadReadableProject(req: express.Request, res: express.Response, id: st
 }
 
 function loadManageableProject(req: express.Request, res: express.Response, id: string): any | null {
+  const user = userOf(req);
+  const project = user?.role === 'admin' ? Projects.findById(id) : loadReadableProject(req, res, id);
+  if (!project) {
+    if (user?.role === 'admin') res.status(404).json({ error: '项目未找到' });
+    return null;
+  }
+  if (user?.role !== 'admin' && !canManageProject(user, project)) {
+    res.status(403).json({ error: '只有项目 owner/admin 可以修改项目待办' });
+    return null;
+  }
+  return project;
+}
+
+function loadWritableProject(req: express.Request, res: express.Response, id: string): any | null {
   const project = loadReadableProject(req, res, id);
   if (!project) return null;
   const user = userOf(req);
-  if (!canManageProject(user, project)) {
-    res.status(403).json({ error: '只有项目 owner/admin 可以修改项目待办' });
+  if (!projectAllowsReaderWrite(user, project, 'can_write_files')) {
+    res.status(403).json({ error: '当前项目角色没有文件写入权限' });
     return null;
   }
   return project;
@@ -975,13 +1011,6 @@ const GIT_REPO_SCAN_MAX_DEPTH = 3;
 const GIT_REPO_SCAN_MAX_DIRS = 500;
 const GIT_COMMIT_LIMIT_DEFAULT = 12;
 const GIT_COMMIT_LIMIT_MAX = 30;
-const ARCHITECTURE_ISSUE_TITLE = '项目结构绘制';
-const ARCHITECTURE_ISSUE_DESCRIPTION = [
-  '自动生成或刷新项目系统结构剖析图。',
-  `请分析当前项目结构，优先输出单文件 HTML/SVG 架构图到项目绑定路径下的 ${HIDDEN_FOLDER_NAME}/generated_figures/arch.html。`,
-  '如需兼容截图或封面，也可以额外输出 arch.svg、arch.png、arch.jpg、arch.jpeg、arch.webp 等常见预览格式。',
-].join('\n');
-const ARCHITECTURE_FIGURE_EXTENSIONS = ['.html', '.htm', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'];
 const GIT_FIELD_SEPARATOR = '\x1f';
 const GIT_RECORD_SEPARATOR = '\x1e';
 const PACKAGE_ZIP_RELATIVE_DIR = path.join(HIDDEN_FOLDER_NAME, 'package_zip');
@@ -1695,89 +1724,6 @@ function buildUserContextWhitelistPayload(projectId: string, userId: string): Us
   };
 }
 
-function findArchitectureIssue(projectId: string): any {
-  return Issues.findByProjectAndTitle(projectId, ARCHITECTURE_ISSUE_TITLE);
-}
-
-function ensureArchitectureIssue(projectId: string, userId: string): { issue: any; created: boolean } {
-  const existing = findArchitectureIssue(projectId);
-  if (existing) return { issue: existing, created: false };
-  const issueId = uuid().slice(0, 8);
-  Issues.insert({
-    id: issueId,
-    project_id: projectId,
-    title: ARCHITECTURE_ISSUE_TITLE,
-    description: ARCHITECTURE_ISSUE_DESCRIPTION,
-    created_by: userId,
-    use_worktree: false,
-    worktree_branch: '',
-  } as any);
-  return { issue: Issues.findById(issueId), created: true };
-}
-
-function toIdList(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map((v: any) => String(v).trim()).filter(Boolean);
-  if (typeof value === 'string' && value.length > 0) {
-    return value.split(',').map((v) => v.trim()).filter(Boolean);
-  }
-  return [];
-}
-
-function contentTypeForFigure(file: string): string {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === '.html' || ext === '.htm') return 'text/html; charset=utf-8';
-  if (ext === '.svg') return 'image/svg+xml; charset=utf-8';
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
-  if (ext === '.png') return 'image/png';
-  if (ext === '.webp') return 'image/webp';
-  if (ext === '.gif') return 'image/gif';
-  if (ext === '.bmp') return 'image/bmp';
-  return 'application/octet-stream';
-}
-
-function figureKind(file: string): 'html' | 'svg' | 'image' {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === '.html' || ext === '.htm') return 'html';
-  if (ext === '.svg') return 'svg';
-  return 'image';
-}
-
-interface ArchitectureFigure {
-  absPath: string;
-  name: string;
-  ext: string;
-  stat: fs.Stats;
-}
-
-function findArchitectureFigure(project: any): ArchitectureFigure | null {
-  const bindPath = (project?.bind_path || '').trim();
-  if (!bindPath) return null;
-  const dir = path.resolve(bindPath, HIDDEN_FOLDER_NAME, 'generated_figures');
-  try {
-    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null;
-    const entries = fs.readdirSync(dir, { withFileTypes: true })
-      .filter(entry => entry.isFile())
-      .map((entry): ArchitectureFigure | null => {
-        const absPath = path.join(dir, entry.name);
-        const ext = path.extname(entry.name).toLowerCase();
-        if (!ARCHITECTURE_FIGURE_EXTENSIONS.includes(ext)) return null;
-        if (path.basename(entry.name, ext).toLowerCase() !== 'arch') return null;
-        const stat = fs.statSync(absPath);
-        return { absPath, name: entry.name, ext, stat };
-      })
-      .filter((x): x is ArchitectureFigure => x !== null)
-      .sort((a, b) => {
-        const pa = ARCHITECTURE_FIGURE_EXTENSIONS.indexOf(a.ext);
-        const pb = ARCHITECTURE_FIGURE_EXTENSIONS.indexOf(b.ext);
-        if (pa !== pb) return pa - pb;
-        return b.stat.mtimeMs - a.stat.mtimeMs;
-      });
-    return entries[0] || null;
-  } catch {
-    return null;
-  }
-}
-
 function readableProjectsForUser(user: any): any[] {
   return Projects.listAll(user.id).filter((project: any) => canReadProject(user, project));
 }
@@ -1811,7 +1757,8 @@ function sendProjectSearch(req: express.Request, res: express.Response): void {
 
 function sendProjectHierarchySearch(req: express.Request, res: express.Response): void {
   const user = userOf(req);
-  const result = searchProjectHierarchy(req.query.q ?? req.query.search ?? '', user);
+  // ?project_id=: 限定在单个项目内搜索 (项目内页/搜索弹窗的范围切换); 缺省跨全部项目.
+  const result = searchProjectHierarchy(req.query.q ?? req.query.search ?? '', user, req.query.project_id);
   const projects = result.projects.map((group) => group.project);
   auditAdminProjectList(req, 'search_project_hierarchy', projects);
   res.json({
@@ -1877,6 +1824,113 @@ function createSessionBucket(ids: Set<string>): Record<string, any[]> {
   ids.forEach((id) => { bucket[id] = []; });
   return bucket;
 }
+
+function clusterOverviewRange(raw: unknown): { key: string; ms: number } {
+  const key = String(raw || '24h');
+  return { key: CLUSTER_OVERVIEW_RANGES_MS[key] ? key : '24h', ms: CLUSTER_OVERVIEW_RANGES_MS[key] || CLUSTER_OVERVIEW_RANGES_MS['24h'] };
+}
+
+function overviewActivityMs(item: any): number {
+  const value = item?.last_session_activity_at || item?.last_active || item?.updated_at || item?.created_at;
+  const ms = new Date(value || 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function rowsForProjects(table: 'issues' | 'researches', projectIds: string[]): any[] {
+  if (projectIds.length === 0) return [];
+  const alias = table === 'issues' ? 'i' : 'r';
+  const rows: any[] = [];
+  for (let offset = 0; offset < projectIds.length; offset += 100) {
+    const chunk = projectIds.slice(offset, offset + 100);
+    const placeholders = chunk.map(() => '?').join(',');
+    rows.push(...db.prepare(`
+      SELECT ${alias}.*, u.display_name AS created_by_name
+      FROM ${table} ${alias}
+      LEFT JOIN users u ON ${alias}.created_by = u.id
+      WHERE ${alias}.project_id IN (${placeholders})
+      ORDER BY ${alias}.last_active DESC
+    `).all(...chunk));
+  }
+  return rows;
+}
+
+// 点阵纵观首屏快照：项目、父级与时间窗口内的会话一次返回。旧实现对每个项目分别请求
+// issues / researches / sessions-overview（3 × N 个 HTTP 请求），大项目还会把数百个父级 ID
+// 拼进 URL。批量快照在服务端按至多 100 个项目一批完成查询、权限过滤和分桶；前端首屏
+// 与轮询都只需一个请求，也不会因项目总数超过 100 而静默漏掉活跃数据。
+router.get('/cluster-overview', auth, (req: express.Request, res: express.Response) => {
+  const user = userOf(req);
+  const { key: range, ms: rangeMs } = clusterOverviewRange(req.query.range);
+  const sinceMs = Date.now() - rangeMs;
+  const sinceIso = new Date(sinceMs).toISOString();
+  const readableProjects = filterProjectListForUser(readableProjectsForUser(user), user, { showAll: true })
+    .filter((project: any) => !isHidden(user.id, 'project', project.id));
+  const activeProjects = readableProjects
+    .filter((project: any) => overviewActivityMs(project) >= sinceMs);
+  const projectIds = activeProjects.map((project: any) => String(project.id));
+
+  const readableIssues = rowsForProjects('issues', projectIds)
+    .filter((issue: any) => canReadIssue(user, issue));
+  const readableResearches = rowsForProjects('researches', projectIds)
+    .filter((research: any) => canReadResearch(user, research));
+  const issuesById = new Map(readableIssues.map((issue: any) => [String(issue.id), issue]));
+  const researchesById = new Map(readableResearches.map((research: any) => [String(research.id), research]));
+  const sessions = Sessions.listActiveForProjectsSince(projectIds, sinceIso, 500)
+    .filter((session: any) => {
+      if (!canReadSession(user, session)) return false;
+      if (session.scope_type === 'issue') return issuesById.has(String(session.issue_id || ''));
+      if (session.scope_type === 'research') return researchesById.has(String(session.research_id || ''));
+      return false;
+    });
+
+  const graphs: Record<string, any> = {};
+  activeProjects.forEach((project: any) => {
+    graphs[project.id] = { issues: [], researches: [], sessionsByIssue: {}, sessionsByResearch: {} };
+  });
+  sessions.forEach((session: any) => {
+    const graph = graphs[String(session.project_id || '')];
+    if (!graph) return;
+    if (session.scope_type === 'issue') {
+      const parentId = String(session.issue_id || '');
+      if (!graph.sessionsByIssue[parentId]) graph.sessionsByIssue[parentId] = [];
+      graph.sessionsByIssue[parentId].push(session);
+    } else if (session.scope_type === 'research') {
+      const parentId = String(session.research_id || '');
+      if (!graph.sessionsByResearch[parentId]) graph.sessionsByResearch[parentId] = [];
+      graph.sessionsByResearch[parentId].push(session);
+    }
+  });
+  readableIssues.forEach((issue: any) => {
+    const graph = graphs[String(issue.project_id || '')];
+    const bucket = graph?.sessionsByIssue?.[String(issue.id)] || [];
+    if (!graph || bucket.length === 0) return;
+    graph.issues.push(shapeOverviewItem({
+      ...issue,
+      session_count: bucket.length,
+      running_session_count: bucket.filter((session: any) => session.agent_status === 'running').length,
+    }));
+  });
+  readableResearches.forEach((research: any) => {
+    const graph = graphs[String(research.project_id || '')];
+    const bucket = graph?.sessionsByResearch?.[String(research.id)] || [];
+    if (!graph || bucket.length === 0) return;
+    graph.researches.push(shapeOverviewItem({
+      ...research,
+      session_count: bucket.length,
+      running_session_count: bucket.filter((session: any) => session.agent_status === 'running').length,
+      chief_count: bucket.filter((session: any) => session.research_role === 'chief_researcher').length,
+    }));
+  });
+
+  auditAdminProjectList(req, 'cluster_overview_projects', activeProjects);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({
+    range,
+    generated_at: new Date().toISOString(),
+    projects: shapeProjectList(readableProjects, req),
+    graphs,
+  });
+});
 
 router.get('/overview', auth, (req: express.Request, res: express.Response) => {
   const user = userOf(req);
@@ -2035,17 +2089,20 @@ router.post('/', auth, (req: express.Request, res: express.Response) => {
     kind?: string;
     extensionName?: string;
   };
+  if (bindPathManual && user.role !== 'admin') {
+    return res.status(403).json({ error: '只有管理员可以使用手动绑定路径' });
+  }
   if (!name) return res.status(400).json({ error: '请填写项目名称' });
   const visibility = normalizeProjectVisibility(req.body?.visibility, 'private');
   const canPostIssue = boolFromBody(req.body || {}, 'can_post_issue', 'canPostIssue', false);
   const canRunSession = boolFromBody(req.body || {}, 'can_run_session', 'canRunSession', false);
-  // 创建时一并加入的首批项目组成员; 支持 members (带角色, 优先) 或 member_user_ids (全 member). 排除创建者本人.
+  // 创建时一并加入的首批项目组成员; 支持 members (带角色, 优先) 或 member_user_ids (全 developer). 排除创建者本人.
   const rawMembers = req.body?.members;
   const members = Array.isArray(rawMembers)
     ? (rawMembers as any[])
         .map((m: any) => ({
           user_id: String(m?.user_id ?? m?.userId ?? '').trim(),
-          role: String(m?.role || 'member').trim() || 'member',
+          role: String(m?.role || 'developer').trim() || 'developer',
         }))
         .filter((m: { user_id: string; role: string }) => m.user_id && m.user_id !== user.id)
     : null;
@@ -2056,8 +2113,8 @@ router.post('/', auth, (req: express.Request, res: express.Response) => {
 
   // ── 莫比乌斯拓展项目 ──────────────────────────────────────────────────────
   if (kind === 'extension') {
-    if (user.role !== 'admin' && user.role !== 'developer') {
-      return res.status(403).json({ error: '只有管理员或开发者可以创建莫比乌斯拓展项目' });
+    if (user.role !== 'admin') {
+      return res.status(403).json({ error: '只有管理员可以创建莫比乌斯拓展项目' });
     }
     if (hasBoolField(req.body || {}, 'can_post_issue', 'canPostIssue')
       || hasBoolField(req.body || {}, 'can_run_session', 'canRunSession')) {
@@ -2083,6 +2140,8 @@ router.post('/', auth, (req: express.Request, res: express.Response) => {
         const error = reloadResult?.errors?.find((item: any) => item?.name === normalizedExtensionName)?.error || '拓展注册失败';
         return res.status(500).json({ error });
       }
+      // 扫描落库时只认兜底管理员, 这里把所有权交给真正点创建的管理员 (created_by 即所有者).
+      Projects.transferOwnership(project.id, user.id);
       setProjectAccess(project.id, { ...projectAccessBody(req.body), visibility });
       return res.json({
         ...shapeProjectForUser(Projects.findById(project.id, user.id), user),
@@ -2160,13 +2219,12 @@ router.post('/', auth, (req: express.Request, res: express.Response) => {
 // ===== 项目组成员管理 (project membership) =====
 // 与"项目可见性 / allowlist"是两个层次: 成员是协作层 (有角色, 可读可写可管理),
 // 可见性是共享层 (只读). 写操作统一要求 owner/manager (canManage); reader 仅能 GET 列表.
-const ACTIVE_USER_SQL_FOR_QUERY = "(deleted_at IS NULL OR deleted_at = '')";
 
 router.get('/:id/members', auth, (req: express.Request, res: express.Response) => {
   const user = userOf(req);
   const id = String(req.params.id);
   const project = Projects.findById(id);
-  if (!project || !canReadProject(user, project)) return res.status(404).json({ error: '未找到' });
+  if (!project || (user.role !== 'admin' && !canReadProject(user, project))) return res.status(404).json({ error: '未找到' });
   const dbRole = ProjectMemberships.roleFor(id, user.id);
   const actorRole = dbRole || (project.created_by === user.id ? 'owner' : null);
   res.json({
@@ -2178,32 +2236,20 @@ router.get('/:id/members', auth, (req: express.Request, res: express.Response) =
   });
 });
 
-// 项目团队管理者可搜的候选员工; 只返回 id/display_name/groups/already_member,
+// 项目团队管理者可搜的候选员工; 只返回 id/display_name/already_member,
 // 绝不暴露 password/work_dir/preference/管理员字段.
+// 名册查询走 services/user-directory: 管理员可包含匹配, 普通用户 (即使他有本项目
+// 管理权限) 也只能按完整账号 id / 完整昵称精确解析, 拿不到全站账号列表.
 router.get('/:id/member-candidates', auth, (req: express.Request, res: express.Response) => {
   const user = userOf(req);
   const id = String(req.params.id);
   const project = Projects.findById(id);
-  if (!project || !canReadProject(user, project)) return res.status(404).json({ error: '未找到' });
+  if (!project || (user.role !== 'admin' && !canReadProject(user, project))) return res.status(404).json({ error: '未找到' });
   if (!ProjectMemberships.canManage(id, user)) return res.status(403).json({ error: '需要项目管理权限' });
-  const q = String(req.query.q || '').trim();
-  const like = '%' + q.replace(/[%_\\]/g, (m) => '\\' + m) + '%';
   const memberIds = new Set(ProjectMemberships.list(id).map((m) => m.user_id));
-  const rows = db.prepare(
-    `SELECT id, display_name FROM users
-     WHERE ${ACTIVE_USER_SQL_FOR_QUERY}
-       AND (id LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')
-     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, display_name COLLATE NOCASE ASC
-     LIMIT 30`
-  ).all(like, like, q) as Array<{ id: string; display_name: string }>;
-  const candidates = rows.map((r) => ({
+  const candidates = searchDirectory(user, req.query.q, 30).map((r) => ({
     id: r.id,
     display_name: r.display_name || r.id,
-    groups: Users.listGroupMemberships(r.id).map((g) => ({
-      id: g.group_id,
-      name: g.group_name,
-      is_primary: !!g.is_primary,
-    })),
     already_member: memberIds.has(r.id),
   }));
   // 返回数组: UserPicker 期望 searchPath 返回数组 (非 {candidates} 对象), 否则判定为空.
@@ -2218,9 +2264,17 @@ router.post('/:id/members', auth, (req: express.Request, res: express.Response) 
   if (!ProjectMemberships.canManage(id, user)) return res.status(403).json({ error: '需要项目管理权限' });
   const rawIds = req.body?.user_ids ?? req.body?.userIds;
   const userIds = Array.isArray(rawIds) ? rawIds : [];
-  const role = String(req.body?.role || 'member').trim() || 'member';
-  // manager 不能添加 owner —— 只有项目负责人/系统管理员可以.
+  const role = String(req.body?.role || 'developer').trim() || 'developer';
+  const targetIds = userIds.map((x: any) => String(x || '').trim()).filter(Boolean);
+  if (project.kind === 'extension' && role !== 'viewer' && role !== 'none') {
+    const targetRows = targetIds.length ? db.prepare(`SELECT id, role FROM users WHERE id IN (${targetIds.map(() => '?').join(',')})`).all(...targetIds) as any[] : [];
+    if (user.role !== 'admin' || targetRows.some((x) => x.role !== 'admin')) {
+      return res.status(400).json({ error: '拓展项目中的普通用户只能是 viewer 或 none' });
+    }
+  }
+  // developer 不能添加 owner —— 只有项目负责人/系统管理员可以.
   const actorRole = ProjectMemberships.roleFor(id, user.id);
+  if (role === 'owner') return res.status(403).json({ error: '项目负责人由项目创建者唯一确定' });
   if (role === 'owner' && actorRole !== 'owner' && user.role !== 'admin') {
     return res.status(403).json({ error: '只有项目负责人可以添加负责人' });
   }
@@ -2243,12 +2297,34 @@ router.patch('/:id/members/:userId', auth, (req: express.Request, res: express.R
   const role = String(req.body?.role || '').trim();
   const actorRole = ProjectMemberships.roleFor(id, user.id);
   const target = ProjectMemberships.roleFor(id, userId);
-  // manager 不能改 owner 的角色, 也不能把人提为 owner.
-  if (actorRole !== 'owner' && user.role !== 'admin' && (target === 'owner' || role === 'owner')) {
-    return res.status(403).json({ error: '只有项目负责人可以调整负责人角色' });
+  const targetSystemRole = (db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as any)?.role;
+  if (project.kind === 'extension' && (role === 'developer' || role === 'owner')
+      && targetSystemRole !== 'admin') {
+    return res.status(400).json({ error: '拓展项目中的普通用户只能是 viewer 或 none' });
+  }
+  // created_by 是唯一 owner 真相；任何人都不能改动项目创建者的 owner 身份。
+  if (userId === project.created_by || target === 'owner' || role === 'owner') {
+    return res.status(403).json({ error: '项目负责人身份不可通过成员接口变更' });
+  }
+  if (user.role !== 'admin') {
+    if (actorRole === 'owner') {
+      // 项目负责人可以调整普通成员，但不能降低管理员的系统权限映射。
+      if (targetSystemRole === 'admin' && role !== 'developer') {
+        return res.status(403).json({ error: '项目负责人只能提升管理员在项目中的角色' });
+      }
+    } else if (actorRole === 'developer') {
+      if (userId !== user.id) return res.status(403).json({ error: '开发者只能调整自己的项目角色' });
+      const rank: Record<string, number> = { none: -1, viewer: 0, developer: 1, owner: 2 };
+      if ((rank[role] ?? -2) > (rank[target || 'developer'] ?? 1)) {
+        return res.status(403).json({ error: '开发者只能降低自己的项目角色' });
+      }
+    } else {
+      return res.status(403).json({ error: '需要项目负责人权限' });
+    }
   }
   try {
     const result = ProjectMemberships.updateRole({ projectId: id, userId, role, actorId: user.id });
+    if (role === 'none' || role === 'viewer') void stopProjectSessionsForUser(id, userId);
     res.json({ ...result, members: ProjectMemberships.list(id), counts: ProjectMemberships.counts(id) });
   } catch (e) {
     const err = e as { status?: number; message?: string };
@@ -2270,6 +2346,7 @@ router.delete('/:id/members/:userId', auth, (req: express.Request, res: express.
   }
   try {
     ProjectMemberships.remove({ projectId: id, userId });
+    void stopProjectSessionsForUser(id, userId);
     res.json({ ok: true, members: ProjectMemberships.list(id), counts: ProjectMemberships.counts(id) });
   } catch (e) {
     const err = e as { status?: number; message?: string };
@@ -2281,7 +2358,7 @@ router.get('/:id/delete-preview', auth, (req: express.Request, res: express.Resp
   const user = userOf(req);
   const id = String(req.params.id);
   const project = Projects.findById(id);
-  if (!project || !canReadProject(user, project)) return res.status(404).json({ error: '未找到' });
+  if (!project || (user.role !== 'admin' && !canReadProject(user, project))) return res.status(404).json({ error: '未找到' });
   res.json({
     policy: projectDeletePolicy(project, user),
     impact: ProjectDeletionAudit.impact(id),
@@ -2292,7 +2369,7 @@ router.delete('/:id', auth, (req: express.Request, res: express.Response) => {
   const user = userOf(req);
   const id = String(req.params.id);
   const project = Projects.findById(id);
-  if (!project || !canReadProject(user, project)) return res.status(404).json({ error: '未找到' });
+  if (!project || (user.role !== 'admin' && !canReadProject(user, project))) return res.status(404).json({ error: '未找到' });
 
   const policy = projectDeletePolicy(project, user);
   const impact = ProjectDeletionAudit.impact(id);
@@ -2451,7 +2528,7 @@ router.patch('/:id', auth, (req: express.Request, res: express.Response) => {
   const id = String(req.params.id);
   const project = Projects.findById(id);
   if (!project) return res.status(404).json({ error: '未找到' });
-  if (!canManageProject(user, project)) return res.status(403).json({ error: '只有项目 owner/admin 可以修改项目设置' });
+  if (user.role !== 'admin' && !canManageProject(user, project)) return res.status(403).json({ error: '只有项目 owner/admin 可以修改项目设置' });
   const {
     name,
     description,
@@ -2605,6 +2682,9 @@ router.patch('/:id', auth, (req: express.Request, res: express.Response) => {
   }
   let resolvedBindPath: string | undefined;
   if (bindPath !== undefined) {
+    if (bindPathManual && user.role !== 'admin') {
+      return res.status(403).json({ error: '只有管理员可以使用手动绑定路径' });
+    }
     try {
       resolvedBindPath = bindPathManual
         ? resolveBindPathManual(bindPath)
@@ -2675,14 +2755,35 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
   let queriedSourceCount = 0;
   try {
     const inventory = Array.isArray(project.aimux_remote_inventory) ? project.aimux_remote_inventory : [];
+    // ✨ 会话绑定的 aimux bridge 设备恒为第一优先远程源: bridge 连接名随客户端重连而变,
+    // 项目清单里登记的旧名字会变成"失联但状态仍是 connected"的幽灵条目, 以会话实时绑定为准.
+    // ✨ The session-bound aimux bridge device is always the first remote source: bridge names
+    // change when a client reconnects, so inventory entries go stale while still saying "connected".
+    const bridge = sessionAimuxBridgeDevice(req, req.query.session);
+    const remoteTargets: Array<{ name: string; remotePath: string; status: string; hostname: string; bridge: boolean }> = [];
+    if (bridge) {
+      remoteTargets.push({
+        name: bridge.aimuxId,
+        remotePath: bridge.localPath,
+        status: 'connected',
+        hostname: '',
+        bridge: true,
+      });
+    }
+    for (const remote of inventory) {
+      const name = String(remote?.name || '').trim();
+      if (!name || name === bridge?.aimuxId) continue;
+      remoteTargets.push({
+        name,
+        remotePath: String(remote?.remote_path || '').trim(),
+        status: String(remote?.status || ''),
+        hostname: String(remote?.hostname || ''),
+        bridge: false,
+      });
+    }
     const remember = (key: string, source: any): any => {
       const expiresAt = Date.now() + GIT_SOURCES_CACHE_TTL_MS;
-      const entry: GitSourceCacheEntry = {
-        expiresAt,
-        scannedAt: new Date().toISOString(),
-        dirtyStaleAt: Date.now() + GIT_DIRTY_CACHE_TTL_MS,
-        source: { ...source, cache_expires_at: expiresAt },
-      };
+      const entry = { expiresAt, scannedAt: new Date().toISOString(), source: { ...source, cache_expires_at: expiresAt } };
       gitSourceCache.set(key, entry);
       cacheEntries.push(entry);
       queriedSourceCount += 1;
@@ -2692,8 +2793,6 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
       if (forceRefresh) return null;
       const entry = gitSourceCache.get(key);
       if (!entry || entry.expiresAt <= Date.now()) return null;
-      // dirty 短 TTL: 未提交计数过期 → 当 miss 重查, 避免"仓库已删仍显示 N 个未提交"
-      if (entry.source?.dirty && typeof entry.dirtyStaleAt === 'number' && entry.dirtyStaleAt <= Date.now()) return null;
       cacheEntries.push(entry);
       return { ...entry.source, cache_expires_at: entry.expiresAt };
     };
@@ -2718,14 +2817,24 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
       }));
     }
 
-    const remoteSources = await Promise.all(inventory.map(async (remote: any) => {
-      const name = String(remote?.name || '').trim();
-      const requestedPath = String(remote?.remote_path || '').trim() || '~';
-      if (!name) return null;
+    const remoteSources = await Promise.all(remoteTargets.map(async (target) => {
+      const name = target.name;
+      const requestedPath = target.remotePath || '~';
       let rootPath = '';
       try {
-        rootPath = await resolveAbsoluteRemotePath(name, requestedPath);
+        // ✨ bridge 设备不做绝对化解析: 它的 file list 不回显解析后的根目录 (相对根返回相对条目),
+        // 而 bridge 客户端本身就把 '.' 与相对路径按自己的工作目录展开, 照原样传给它即可.
+        // ✨ Bridge sources skip absolute-path resolution: a bridge never echoes the resolved root,
+        // and the client itself resolves '.' / relative roots against its own working directory.
+        rootPath = target.bridge ? (target.remotePath || '.') : await resolveAbsoluteRemotePath(name, requestedPath);
       } catch (e) {
+        const message = (e as Error).message || '';
+        // ✨ 名字既不在 ssh config 也不在 bridge registry = 这台机器彻底失联 (bridge 设备重连会换名,
+        // 项目清单里冻结的旧名字就会永久查不到). 原样把 aimux 的英文报错甩给用户没有意义,
+        // 同时清掉清单里那份早已过期的 connected 快照, 避免卡片自相矛盾.
+        // ✨ The name resolves nowhere: the machine is gone (bridge names change on reconnect), so the
+        // frozen inventory snapshot is stale — say so in plain words and drop the bogus "connected".
+        const lostRemote = /not found in ~\/\.ssh\/config or bridge registry/i.test(message);
         return {
           id: `remote:${name}`,
           kind: 'remote',
@@ -2734,9 +2843,12 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
           branch: null,
           head: null,
           path: isAbsoluteRemotePath(requestedPath) ? requestedPath : '',
-          status: String(remote?.status || ''),
-          hostname: String(remote?.hostname || ''),
-          reason: (e as Error).message || '无法解析远端 Git 路径为绝对路径',
+          status: lostRemote ? '' : target.status,
+          hostname: target.hostname,
+          bridge: target.bridge,
+          reason: lostRemote
+            ? '机器已离线或名称已变更（bridge 重连会换名）'
+            : (message || '无法解析远端 Git 路径为绝对路径'),
         };
       }
       const remoteCacheKey = gitSourceCacheKey(name, rootPath);
@@ -2747,8 +2859,9 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
           id: `remote:${name}`,
           label: name,
           path: rootPath,
-          status: String(remote?.status || ''),
-          hostname: String(remote?.hostname || ''),
+          status: target.status,
+          hostname: target.hostname,
+          bridge: target.bridge,
         };
       }
       const unavailable = (reason: string) => ({
@@ -2759,8 +2872,9 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
         branch: null,
         head: null,
         path: rootPath,
-        status: String(remote?.status || ''),
-        hostname: String(remote?.hostname || ''),
+        status: target.status,
+        hostname: target.hostname,
+        bridge: target.bridge,
         reason,
       });
       try {
@@ -2784,8 +2898,9 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
           branch: branchMatch?.[1]?.trim() || null,
           head: detachedHead,
           path: rootPath,
-          status: String(remote?.status || ''),
-          hostname: String(remote?.hostname || ''),
+          status: target.status,
+          hostname: target.hostname,
+          bridge: target.bridge,
           reason: branchMatch ? '' : (detachedHead ? '游离 HEAD，当前没有分支' : '已检测到 Git，但无法从 HEAD 解析分支'),
         });
       } catch (e) {
@@ -2798,7 +2913,7 @@ router.get('/:id/git-sources', auth, async (req: express.Request, res: express.R
     const payload = {
       project_id: project.id,
       sources,
-      registered_remote_names: inventory.map((remote: any) => String(remote?.name || '').trim()).filter(Boolean),
+      registered_remote_names: remoteTargets.map(target => target.name),
       scanned_at: new Date().toISOString(),
     };
     const expiresAt = cacheEntries.length ? Math.min(...cacheEntries.map(entry => entry.expiresAt)) : Date.now();
@@ -3006,99 +3121,6 @@ router.post('/:id/package/download', auth, (req: express.Request, res: express.R
   });
 });
 
-function handleArchitectureSessionPresetContextPreview(req: express.Request, res: express.Response): void {
-  const user = userOf(req);
-  const project = loadReadableProject(req, res, String(req.params.id));
-  if (!project) return;
-  const src = (req.method === 'POST' && req.body && typeof req.body === 'object')
-    ? req.body : req.query;
-  const draftSession = {
-    name: typeof src.name === 'string' ? src.name : '',
-    description: typeof src.description === 'string' ? src.description : '',
-    pc_client_metadata: src.pc_client_metadata ?? null,
-  };
-  const excludedSkillIds = toIdList(src.excluded_skill_ids);
-  const excludedMemoryIds = toIdList(src.excluded_memory_ids);
-  const language = src.language === 'en' ? 'en' : 'zh';
-  const boolFlag = (v: unknown): boolean => v === true || v === 'true' || v === '1' || v === 1;
-  const falseFlag = (v: unknown): boolean => v === false || v === 'false' || v === '0' || v === 0;
-  const includeBody = !falseFlag((src as any).include_body);
-  const includeItemBodies = !falseFlag((src as any).include_item_bodies);
-  const existingIssue = findArchitectureIssue(project.id);
-  const ctx = existingIssue
-    ? buildIssueContextPreview(user, existingIssue.id, draftSession, excludedSkillIds, excludedMemoryIds, language, { includeBody })
-    : buildProjectIssueContextPreview(
-      user,
-      project.id,
-      { title: ARCHITECTURE_ISSUE_TITLE, description: ARCHITECTURE_ISSUE_DESCRIPTION },
-      draftSession,
-      excludedSkillIds,
-      excludedMemoryIds,
-      language,
-      { includeBody },
-    );
-  const canReuseSourcesForDefaults = excludedSkillIds.length === 0 && excludedMemoryIds.length === 0;
-  const includeDefaults = boolFlag((src as any).include_defaults);
-  const defaults = includeDefaults
-    ? existingIssue
-      ? buildIssueSelectionDefaults(user, existingIssue.id, canReuseSourcesForDefaults ? ctx.sources : undefined)
-      : buildProjectIssueSelectionDefaults(user, project.id, {
-        title: ARCHITECTURE_ISSUE_TITLE,
-        description: ARCHITECTURE_ISSUE_DESCRIPTION,
-      }, canReuseSourcesForDefaults ? ctx.sources : undefined)
-    : null;
-  res.json({
-    body: ctx.body,
-    sources: includeItemBodies ? ctx.sources : stripContextItemBodies(ctx.sources),
-    ...(includeDefaults ? { defaults } : {}),
-  });
-}
-
-router.get('/:id/architecture-session-preset/context-preview', auth, handleArchitectureSessionPresetContextPreview);
-router.post('/:id/architecture-session-preset/context-preview', auth, handleArchitectureSessionPresetContextPreview);
-
-router.get('/:id/architecture-session-preset/session-selection-defaults', auth, (req: express.Request, res: express.Response) => {
-  const user = userOf(req);
-  const project = loadReadableProject(req, res, String(req.params.id));
-  if (!project) return;
-  const existingIssue = findArchitectureIssue(project.id);
-  if (existingIssue) return res.json(buildIssueSelectionDefaults(user, existingIssue.id));
-  res.json(buildProjectIssueSelectionDefaults(user, project.id, {
-    title: ARCHITECTURE_ISSUE_TITLE,
-    description: ARCHITECTURE_ISSUE_DESCRIPTION,
-  }));
-});
-
-router.post('/:id/architecture-issue', auth, (req: express.Request, res: express.Response) => {
-  const user = userOf(req);
-  const project = loadReadableProject(req, res, String(req.params.id));
-  if (!project) return;
-  if (!canCreateIssue(user, project)) return res.status(403).json({ error: '无权在此项目创建 Issue' });
-  const result = ensureArchitectureIssue(project.id, user.id);
-  res.json(result);
-});
-
-router.get('/:id/architecture-figure', auth, (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
-  if (!project) return;
-  const figure = findArchitectureFigure(project);
-  if (!figure) return res.status(404).json({ error: '项目结构图不存在或正在绘制中' });
-  const kind = figureKind(figure.name);
-  res.setHeader('Content-Type', contentTypeForFigure(figure.name));
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Architecture-Figure-Name', encodeURIComponent(figure.name));
-  res.setHeader('X-Architecture-Figure-Kind', kind);
-  res.setHeader('X-Architecture-Figure-Updated-At', figure.stat.mtime.toISOString());
-  if (kind === 'html' || kind === 'svg') {
-    res.setHeader(
-      'Content-Security-Policy',
-      "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; script-src 'none'"
-    );
-  }
-  res.sendFile(figure.absPath);
-});
-
 // 项目设置中的"用户级 Skill 与 Memory 白名单".
 // 只影响当前用户的用户级条目和平台内置 Skill; 项目级 Skill/Memory 始终保留.
 router.get('/:id/user-context-whitelist', auth, (req: express.Request, res: express.Response) => {
@@ -3160,6 +3182,7 @@ router.get('/:id/files', auth, (req: express.Request, res: express.Response) => 
       bind_path: '', vscode_web_url: '', vscode_web_url_legacy: VSCODE_WEB_URL || '',
       vscode_workspace_path: '',
       bind_path_writable: false, cs_url_token_required: true,
+      code_server_allowed: codeServerAllowedFor(user),
       path: '/', entries: [],
     });
   }
@@ -3198,6 +3221,8 @@ router.get('/:id/files', auth, (req: express.Request, res: express.Response) => 
       vscode_workspace_path: vscodeWorkspacePath,
       bind_path_writable: writable,
       cs_url_token_required: true,
+      // landlock 模式下普通用户为 false: 前端据此把「代码 / 在 VSCode 中打开」改为激活原生文件编辑器.
+      code_server_allowed: codeServerAllowedFor(user),
       path: relPath,
       entries,
     });
@@ -3206,37 +3231,82 @@ router.get('/:id/files', auth, (req: express.Request, res: express.Response) => 
   }
 });
 
-function projectRemoteFileSource(project: any, rawName: unknown): any | null {
+// 当前会话绑定的 aimux bridge 设备 (与前端元素1 RemoteAimuxMcpIndicator 同一判定口径:
+// pc_client_metadata.add_remote_aimux_mcp === true 且 aimux_id 非空)。用户须能读该会话,
+// 否则不暴露。返回 { aimuxId, localPath } 或 null。localPath 优先取 pc_client_metadata.local_path,
+// 缺失时回落 '.' (aimux 登录目录)。
+function sessionAimuxBridgeDevice(req: express.Request, sessionId: unknown): { aimuxId: string; localPath: string } | null {
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  const session = Sessions.findById(sessionId);
+  if (!session || !canReadSession(userOf(req), session)) return null;
+  const aimuxId = aimuxRemoteNameFromMeta(session.pc_client_metadata);
+  if (!aimuxId) return null;
+  const meta = parsePcClientMetadata(session.pc_client_metadata);
+  const localPath = typeof meta?.local_path === 'string' ? meta.local_path.trim() : '';
+  return { aimuxId, localPath: localPath || '.' };
+}
+
+/*
+ * Normalize the optional browse-root the user typed in the remote file browser.
+ * An empty result means "keep the project's registered remote_path"; only the format is
+ * checked here (control chars, "." and ".." segments) — existence is left to aimux.
+ */
+function remoteRootOverride(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  if (text.length > 1000 || /[\r\n\0]/.test(text)) throw new Error('远程目录格式非法');
+  if (text.split(/[\\/]/).some((part) => part === '.' || part === '..')) throw new Error('远程目录不能包含 . 或 ..');
+  return text;
+}
+
+function projectRemoteFileSource(project: any, rawName: unknown, bridge: { aimuxId: string; localPath: string } | null): any | null {
   const name = typeof rawName === 'string' ? rawName.trim() : '';
   if (!name) return null;
+  // 会话绑定的 bridge 设备优先: 即使不在项目清单里也可作为远程文件源 (第一优先顺序)。
+  if (bridge && name === bridge.aimuxId) {
+    return { name: bridge.aimuxId, status: 'connected', remote_path: bridge.localPath };
+  }
   const inventory = Array.isArray(project?.aimux_remote_inventory) ? project.aimux_remote_inventory : [];
   return inventory.find((entry: any) => entry?.name === name) || null;
 }
 
 // 当前 Project 已注册的远程算力文件源。只暴露项目清单内的机器，不返回全局 aimux remote。
+// 若带 ?session=<id> 且该会话绑定了 aimux bridge 设备, 则该设备作为第一优先的远程文件源注入列表。
 router.get('/:id/remote-file-sources', auth, (req: express.Request, res: express.Response) => {
   const project = loadReadableProject(req, res, String(req.params.id));
   if (!project) return;
+  const bridge = sessionAimuxBridgeDevice(req, req.query.session);
   const inventory = Array.isArray(project.aimux_remote_inventory) ? project.aimux_remote_inventory : [];
-  res.json({
-    remotes: inventory.map((entry: any) => ({
-      name: String(entry.name || ''),
-      status: String(entry.status || ''),
-      remote_path: String(entry.remote_path || ''),
-      hostname: String(entry.hostname || ''),
-      hardware: String(entry.hardware || ''),
-    })).filter((entry: any) => entry.name),
-  });
+  const inventoryRemotes = inventory.map((entry: any) => ({
+    name: String(entry.name || ''),
+    status: String(entry.status || ''),
+    remote_path: String(entry.remote_path || ''),
+    hostname: String(entry.hostname || ''),
+    hardware: String(entry.hardware || ''),
+  })).filter((entry: any) => entry.name);
+  const bridgeRemotes = bridge ? [{
+    name: bridge.aimuxId,
+    status: 'connected',
+    remote_path: bridge.localPath,
+    hostname: '',
+    hardware: '',
+    bridge: true,
+  }] : [];
+  res.json({ remotes: [...bridgeRemotes, ...inventoryRemotes] });
 });
 
 // 远程文件统一走 aimux file：普通 SSH remote 与 reverse bridge remote 自动分派。
 router.get('/:id/remote-files', auth, async (req: express.Request, res: express.Response) => {
   const project = loadReadableProject(req, res, String(req.params.id));
   if (!project) return;
-  const remote = projectRemoteFileSource(project, req.query.remote);
+  const bridge = sessionAimuxBridgeDevice(req, req.query.session);
+  const remote = projectRemoteFileSource(project, req.query.remote, bridge);
   if (!remote) return res.status(400).json({ error: '该远程机器未注册到当前项目' });
   try {
-    res.json(await aimuxRemote.listRemoteFiles(remote.name, remote.remote_path, req.query.path || '/'));
+    // ✨ 「远程」模式可带 ?root= 覆盖根目录 (用户在文件浏览器里更改目录), 缺省用项目注册的 remote_path
+    // ✨ Optional ?root= overrides the browse root in remote mode; defaults to the project's registered remote_path
+    const root = remoteRootOverride(req.query.root) || remote.remote_path;
+    res.json(await aimuxRemote.listRemoteFiles(remote.name, root, req.query.path || '/'));
   } catch (e) {
     res.status(400).json({ error: (e as Error).message || '加载远程文件失败' });
   }
@@ -3245,32 +3315,53 @@ router.get('/:id/remote-files', auth, async (req: express.Request, res: express.
 router.get('/:id/remote-file', auth, async (req: express.Request, res: express.Response) => {
   const project = loadReadableProject(req, res, String(req.params.id));
   if (!project) return;
-  const remote = projectRemoteFileSource(project, req.query.remote);
+  const bridge = sessionAimuxBridgeDevice(req, req.query.session);
+  const remote = projectRemoteFileSource(project, req.query.remote, bridge);
   if (!remote) return res.status(400).json({ error: '该远程机器未注册到当前项目' });
   try {
-    res.json(await aimuxRemote.readRemoteFile(remote.name, remote.remote_path, req.query.path || '/'));
+    // 根目录同列表接口: 与 listRemoteFiles 用同一覆盖值, 相对路径才能对齐
+    // Same root override as the listing API so relative paths stay aligned
+    const root = remoteRootOverride(req.query.root) || remote.remote_path;
+    res.json(await aimuxRemote.readRemoteFile(remote.name, root, req.query.path || '/'));
   } catch (e) {
     res.status(400).json({ error: (e as Error).message || '读取远程文件失败' });
   }
 });
 
 router.post('/:id/remote-file', auth, async (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
-  const remote = projectRemoteFileSource(project, req.body?.remote);
+  const bridge = sessionAimuxBridgeDevice(req, req.query.session);
+  const remote = projectRemoteFileSource(project, req.body?.remote, bridge);
   if (!remote) return res.status(400).json({ error: '该远程机器未注册到当前项目' });
   try {
-    res.json(await aimuxRemote.writeRemoteFile(remote.name, remote.remote_path, req.body?.path || '/', req.body?.content));
+    // 根目录同列表接口 (写入也必须对齐, 否则会写错机器上的路径)
+    // Same root override as the listing API, otherwise the write lands on the wrong path
+    const root = remoteRootOverride(req.body?.root) || remote.remote_path;
+    res.json(await aimuxRemote.writeRemoteFile(remote.name, root, req.body?.path || '/', req.body?.content));
   } catch (e) {
     res.status(400).json({ error: (e as Error).message || '保存远程文件失败' });
   }
 });
 
+// 项目内文件读写的符号链接护栏: 逐段 lstat, 任一环是链接即拒 (防止链接把真实路径引出项目根).
+// 路径不存在时返回 false, 交由调用方后续 stat 给出 404, 保持原有响应语义。
+async function rejectIfSymlinked(res: express.Response, root: string, absPath: string, message: string): Promise<boolean> {
+  try {
+    await assertNoSymlink(root, absPath);
+    return false;
+  } catch (e) {
+    if ((e as FileOpError)?.code === 'NOT_FOUND') return false;
+    res.status(403).json({ error: message });
+    return true;
+  }
+}
+
 // 读取项目 bind_path 下单个文件内容 (代码对话 v2 的"代码浏览"用).
 // 复用 resolveProjectPath 做路径穿越防护; 限制: 必须是文件, ≤ 1.5MB (超出截断 + truncated:true),
 // 含 NUL 字节视为二进制不返回内容. 只读, 不写.
 const FILE_READ_MAX_BYTES = 1.5 * 1024 * 1024;
-router.get('/:id/file', auth, (req: express.Request, res: express.Response) => {
+router.get('/:id/file', auth, async (req: express.Request, res: express.Response) => {
   const project = loadReadableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!project.bind_path) return res.status(400).json({ error: '项目未绑定路径' });
@@ -3278,6 +3369,8 @@ router.get('/:id/file', auth, (req: express.Request, res: express.Response) => {
   const resolved = resolveProjectPath(project.bind_path, req.query.path || '/');
   if ('error' in resolved) return res.status(400).json({ error: resolved.error });
   const { absPath, relPath } = resolved;
+  // assertNoSymlink 是异步的: 必须 await, 否则拒绝变成未处理的 rejection 而被静默跳过。
+  if (await rejectIfSymlinked(res, resolved.root, absPath, '不支持读取符号链接')) return;
   let stat: fs.Stats;
   try { stat = fs.statSync(absPath); } catch { return res.status(404).json({ error: 'Not found' }); }
   if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
@@ -3302,14 +3395,16 @@ router.get('/:id/file', auth, (req: express.Request, res: express.Response) => {
 // 复用 resolveProjectPath 防穿越; 限制: 必须是已存在文件 (不新建, 避免任意路径写),
 // content 为字符串且 ≤ 5MB, 同步覆盖写. 不处理并发冲突 (last-write-wins, 编辑器场景可接受).
 const FILE_WRITE_MAX_BYTES = 5 * 1024 * 1024;
-router.post('/:id/file', auth, (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+router.post('/:id/file', auth, async (req: express.Request, res: express.Response) => {
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!project.bind_path) return res.status(400).json({ error: '项目未绑定路径' });
 
   const resolved = resolveProjectPath(project.bind_path, req.body?.path || '/');
   if ('error' in resolved) return res.status(400).json({ error: resolved.error });
   const { absPath, relPath } = resolved;
+  // 与 GET 对称: 读写都不许经过符号链接, 否则写会顺着链接落到项目根之外。
+  if (await rejectIfSymlinked(res, resolved.root, absPath, '不支持写入符号链接')) return;
   let stat: fs.Stats;
   try { stat = fs.statSync(absPath); } catch { return res.status(404).json({ error: 'Not found' }); }
   if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
@@ -3404,7 +3499,7 @@ function ensureGitInitIfNeeded(bindPath: string): void {
 
 // POST /:id/import-zip — multipart 上传 zip/tar, 解压导入到项目 bind_path.
 router.post('/:id/import-zip', auth, importZipUpload.single('file'), (req: express.Request, res: express.Response) => {
-  const project = loadManageableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!ensureProjectWritable(res, project)) return;
   const file = (req as any).file as { path: string; originalname: string; size: number } | undefined;
@@ -3449,6 +3544,7 @@ router.get('/:id/file/download', auth, async (req: express.Request, res: express
     return res.status(404).json({ error: '文件不存在', code: 'NOT_FOUND' });
   }
   if (lst.isSymbolicLink()) return res.status(400).json({ error: '不支持下载符号链接', code: 'SYMLINK_UNSUPPORTED' });
+  try { await assertNoSymlink(resolved.root, absPath); } catch { return res.status(403).json({ error: '不支持下载符号链接', code: 'SYMLINK_UNSUPPORTED' }); }
   if (!lst.isFile()) return res.status(400).json({ error: '只能下载文件，目录打包下载暂不支持', code: 'INVALID_NAME' });
   const name = path.basename(absPath);
   res.setHeader('Content-Type', contentTypeFor(name));
@@ -3466,7 +3562,7 @@ router.get('/:id/file/download', auth, async (req: express.Request, res: express
 
 // POST /:id/files/copy { sourcePath, targetDir } - 同项目内复制文件/目录 (设计文档 §8.3, §14)。
 router.post('/:id/files/copy', auth, async (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!ensureProjectWritable(res, project)) return;
   const src = resolveProjectPath(project.bind_path, req.body?.sourcePath);
@@ -3521,7 +3617,7 @@ router.post('/:id/files/copy', auth, async (req: express.Request, res: express.R
 // POST /:id/files/move { sourcePath, targetDir } - 在项目目录内移动文件/目录到另一目录.
 // 跨目录 fs.rename 即移动 (同卷原子). 拒绝移动到自身/子目录; 同名 CONFLICT; 已在目标目录则空操作.
 router.post('/:id/files/move', auth, async (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!ensureProjectWritable(res, project)) return;
   const src = resolveProjectPath(project.bind_path, req.body?.sourcePath);
@@ -3560,7 +3656,7 @@ router.post('/:id/files/move', auth, async (req: express.Request, res: express.R
     }
     const baseName = path.basename(srcAbs);
     const dstAbs = path.join(tgtAbs, baseName);
-    if (dstAbs !== root && !dstAbs.startsWith(root + path.sep)) {
+    if (!isWithin(root, dstAbs)) {
       return res.status(400).json({ error: '新路径越出项目根目录', code: 'OUTSIDE_ROOT' });
     }
     // 已在目标目录 (源父目录 === 目标): 空操作, 视为成功 (与复制语义对齐, 避免误报).
@@ -3583,7 +3679,7 @@ router.post('/:id/files/move', auth, async (req: express.Request, res: express.R
 
 // POST /:id/files/mkdir { parentPath, name } - 在项目目录内创建单个新目录。
 router.post('/:id/files/mkdir', auth, async (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!ensureProjectWritable(res, project)) return;
   const parent = resolveProjectPath(project.bind_path, req.body?.parentPath || '/');
@@ -3611,7 +3707,7 @@ router.post('/:id/files/mkdir', auth, async (req: express.Request, res: express.
       return res.status(403).json({ error: '目录只读或无写权限', code: 'READ_ONLY' });
     }
     const dstAbs = path.join(parentAbs, name);
-    if (dstAbs !== root && !dstAbs.startsWith(root + path.sep)) {
+    if (!isWithin(root, dstAbs)) {
       return res.status(400).json({ error: '新路径越出项目根目录', code: 'OUTSIDE_ROOT' });
     }
     try {
@@ -3628,7 +3724,7 @@ router.post('/:id/files/mkdir', auth, async (req: express.Request, res: express.
 
 // POST /:id/files/create { parentPath, name } - 在项目目录内创建空文件。
 router.post('/:id/files/create', auth, async (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!ensureProjectWritable(res, project)) return;
   const parent = resolveProjectPath(project.bind_path, req.body?.parentPath || '/');
@@ -3656,7 +3752,7 @@ router.post('/:id/files/create', auth, async (req: express.Request, res: express
       return res.status(403).json({ error: '目录只读或无写权限', code: 'READ_ONLY' });
     }
     const dstAbs = path.join(parentAbs, name);
-    if (dstAbs !== root && !dstAbs.startsWith(root + path.sep)) {
+    if (!isWithin(root, dstAbs)) {
       return res.status(400).json({ error: '新路径越出项目根目录', code: 'OUTSIDE_ROOT' });
     }
     try {
@@ -3674,7 +3770,7 @@ router.post('/:id/files/create', auth, async (req: express.Request, res: express
 
 // POST /:id/files/rename { path, newName } - 重命名文件/目录 (设计文档 §8.6, §14)。
 router.post('/:id/files/rename', auth, async (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!ensureProjectWritable(res, project)) return;
   const resolved = resolveProjectPath(project.bind_path, req.body?.path);
@@ -3699,7 +3795,7 @@ router.post('/:id/files/rename', auth, async (req: express.Request, res: express
     const parentAbs = path.dirname(absPath);
     const newAbs = path.join(parentAbs, newName);
     // newName 已确保无分隔符, 父目录在根内, 新路径必在根内; 仍防御性校验。
-    if (newAbs !== root && !newAbs.startsWith(root + path.sep)) {
+    if (!isWithin(root, newAbs)) {
       return res.status(400).json({ error: '新路径越出项目根目录', code: 'OUTSIDE_ROOT' });
     }
     try {
@@ -3737,6 +3833,7 @@ router.get('/:id/main-project-port', auth, (req: express.Request, res: express.R
 });
 
 router.get('/:id/ssh-forward-config', auth, (req: express.Request, res: express.Response) => {
+  const user = userOf(req);
   const project = loadReadableProject(req, res, String(req.params.id));
   if (!project) return;
 
@@ -3750,6 +3847,9 @@ router.get('/:id/ssh-forward-config', auth, (req: express.Request, res: express.
   if (!sshPort) missing.push('MOBIUS_SSH_PORT');
   if (!key.privateKeyExists) missing.push('ssh_private_key');
 
+  // 私钥本体是服务器 forward 账号的登录凭据: 只要给出去就等于交出主机访问权,
+  // 所以只有管理员能拿到; 普通项目成员只看到"有没有配好"和连接参数.
+  const isAdmin = user?.role === 'admin';
   res.json({
     enabled: missing.length === 0,
     ssh_url: MOBIUS_SSH_URL || '',
@@ -3757,15 +3857,15 @@ router.get('/:id/ssh-forward-config', auth, (req: express.Request, res: express.
     port: sshPort,
     mobius_ssh_port: MOBIUS_SSH_PORT || null,
     user: MOBIUS_SSH_FORWARD_USER,
-    private_key: key.privateKey,
-    private_key_path: MOBIUS_SSH_PRIVATE_KEY_PATH || '',
+    private_key: isAdmin ? key.privateKey : '',
+    private_key_path: isAdmin ? (MOBIUS_SSH_PRIVATE_KEY_PATH || '') : '',
     private_key_exists: key.privateKeyExists,
     missing,
   });
 });
 
 router.post('/:id/main-project-port', auth, (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!project.bind_path) return res.status(400).json({ error: '项目未配置 bind_path' });
   const port = normalizeProjectPort(req.body?.port);
@@ -3792,7 +3892,7 @@ router.get('/:id/dev-ports', auth, (req: express.Request, res: express.Response)
 });
 
 router.post('/:id/dev-ports', auth, (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!project.bind_path) return res.status(400).json({ error: '项目未配置 bind_path' });
   try {
@@ -3822,7 +3922,7 @@ router.post('/:id/dev-ports', auth, (req: express.Request, res: express.Response
 });
 
 router.delete('/:id/dev-ports/:port', auth, (req: express.Request, res: express.Response) => {
-  const project = loadReadableProject(req, res, String(req.params.id));
+  const project = loadWritableProject(req, res, String(req.params.id));
   if (!project) return;
   if (!project.bind_path) return res.status(400).json({ error: '项目未配置 bind_path' });
   const port = normalizeProjectPort(req.params.port);

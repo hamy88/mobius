@@ -17,8 +17,8 @@ import { stringField } from './utils'
 export type ToolStatus = 'running' | 'success' | 'error'
 
 // 已落地结果的 callId → 结果摘要. isError/interrupted 取并集 (同一 call 多次结果时任一失败即记失败).
-export type ResolvedCallInfo = { isError: boolean; interrupted: boolean }
-export type ResolvedCallMap = Map<string, ResolvedCallInfo>
+export type ToolStatusInfo = { isError: boolean; interrupted: boolean }
+export type ToolStatusMap = Map<string, ToolStatusInfo>
 
 // 头部状态图标的视觉元数据 (图标组件映射在 EntryCard.tsx, 这里只放纯数据, 保持本文件无 React 依赖).
 export const TOOL_STATUS_META: Record<ToolStatus, { iconClass: string; spin: boolean; label: string }> = {
@@ -50,8 +50,8 @@ export function extractToolUseIds(entry: AnyEntry): string[] {
 
 // 扫描全部 entries, 收集 "已有 tool_result 落地" 的 callId 及其错误标志.
 // 复用 extractBashToolResultRecords: 它已统一处理两种协议的 tool_result, 这里只做聚合.
-export function collectResolvedCallIds(entries: AnyEntry[]): ResolvedCallMap {
-  const map: ResolvedCallMap = new Map()
+export function collectResolvedCallIds(entries: AnyEntry[]): ToolStatusMap {
+  const map: ToolStatusMap = new Map()
   entries.forEach((entry, index) => {
     const records = extractBashToolResultRecords(entry, index + 1)
     for (const r of records) {
@@ -68,7 +68,7 @@ export function collectResolvedCallIds(entries: AnyEntry[]): ResolvedCallMap {
 
 // 由 entry 与已落地结果集合推导该卡片工具状态. 无 tool_use (非工具卡) 返回 null, 不显示图标.
 // 聚合规则: 任一 call 失败 → error (最高优先, 折叠也不藏错误); 否则任一 call 未落地 → running; 否则 success.
-export function deriveToolCallStatus(entry: AnyEntry, resolved: ResolvedCallMap | null | undefined): ToolStatus | null {
+export function deriveToolCallStatus(entry: AnyEntry, resolved: ToolStatusMap | null | undefined): ToolStatus | null {
   if (!resolved) return null
   const ids = extractToolUseIds(entry)
   if (ids.length === 0) return null

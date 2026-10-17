@@ -376,6 +376,14 @@ function saveStoredConnection(connection: StoredConnection): void {
   try { fs.chmodSync(CONNECTION_PATH, 0o600) } catch {}
 }
 
+function deleteStoredConnection(): void {
+  try {
+    if (fs.existsSync(CONNECTION_PATH)) fs.unlinkSync(CONNECTION_PATH)
+  } catch (e) {
+    console.warn(`[bestapi] 删除连接文件失败 (${CONNECTION_PATH}): ${(e as Error).message}`)
+  }
+}
+
 function autoSyncStatus(): any {
   return {
     enabled: AUTO_SYNC_ENABLED,
@@ -700,6 +708,28 @@ export function syncBestApi(): Promise<any> {
       recordSyncFailure(error)
       throw error
     }
+  })
+}
+
+// Remove every model this connection injected, then drop the stored connection:
+// keeping it would let the auto-sync put all models back within one interval.
+// Only refs recorded in the connection are touched, manual models stay intact.
+export function removeAllBestApiModels(): Promise<any> {
+  return serializeMutation(async () => {
+    const existing = loadStoredConnection()
+    if (!existing) throw new Error('尚未连接 BestAPI，没有可删除的模型')
+    let removed = 0
+    for (const model of existing.models) {
+      const ok = model.backend === 'codex'
+        ? modelAccess.deleteCodexModel(model.key)
+        : model.backend === 'claude_code'
+          ? modelAccess.deleteClaudeCodeModel(model.key)
+          : modelAccess.deleteHarnessModel(model.key)
+      if (ok) removed += 1
+    }
+    deleteStoredConnection()
+    recordSyncSuccess(false)
+    return { ...publicConnection(null), removed }
   })
 }
 

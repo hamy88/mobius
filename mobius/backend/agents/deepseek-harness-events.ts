@@ -1,5 +1,7 @@
 const crypto = require('crypto')
 
+// Event time as ISO. Numbers below 1e12 are read as seconds, larger ones as milliseconds;
+// anything unusable falls back to now.
 function timestampOf(event: any): string {
   const raw = event?.time ?? event?.timestamp
   if (typeof raw === 'number' && Number.isFinite(raw)) {
@@ -9,6 +11,8 @@ function timestampOf(event: any): string {
   return new Date().toISOString()
 }
 
+// Content blocks whether the event carries them directly, under .content, or under
+// .message.content.
 function contentBlocks(value: any): any[] {
   if (Array.isArray(value)) return value
   if (Array.isArray(value?.content)) return value.content
@@ -16,6 +20,7 @@ function contentBlocks(value: any): any[] {
   return []
 }
 
+// Concatenated text, reasoning and thinking blocks.
 function textFromBlocks(blocks: any[]): string {
   return blocks
     .filter((block: any) => block?.type === 'text' || block?.type === 'reasoning' || block?.type === 'thinking')
@@ -23,6 +28,7 @@ function textFromBlocks(blocks: any[]): string {
     .join('')
 }
 
+// A tool call normalized into an Anthropic-style tool_use block, parsing stringified input.
 function toolUseBlock(block: any) {
   const id = String(block?.id || block?.callId || block?.toolCallId || crypto.randomUUID())
   const name = String(block?.name || block?.toolName || block?.function?.name || 'tool')
@@ -38,6 +44,8 @@ function toolUseBlock(block: any) {
   return { type: 'tool_use', id, name, input }
 }
 
+// The assistant event's text and thinking blocks, in order. Tool calls are projected
+// separately from tool/call events.
 function assistantBlocks(event: any): any[] {
   const blocks = contentBlocks(event?.data)
   const result: any[] = []
@@ -51,6 +59,8 @@ function assistantBlocks(event: any): any[] {
   return result
 }
 
+// A tool result flattened to text: strings pass through, block arrays are concatenated, and
+// anything else is JSON-encoded.
 function resultContentText(value: any): string {
   if (typeof value === 'string') return value
   if (!Array.isArray(value)) return value == null ? '' : JSON.stringify(value)
@@ -63,6 +73,7 @@ function resultContentText(value: any): string {
   }).join('')
 }
 
+// Human-readable message for a turn/end reason; "" means the turn completed normally.
 function errorText(reason: any): string {
   if (!reason) return ''
   if (typeof reason === 'string') return reason
@@ -76,6 +87,7 @@ function errorText(reason: any): string {
   return kind ? `DeepSeek Harness turn ended: ${kind}` : ''
 }
 
+// Envelope fields shared by every projected entry.
 function baseEntry(event: any, context: any) {
   return {
     uuid: `deepseek-harness:${context.sessionId}:${event?.seq ?? crypto.randomUUID()}`,
@@ -95,6 +107,8 @@ function baseEntry(event: any, context: any) {
   }
 }
 
+// Project one Harness event into Mobius jsonl entries, or [] when it has no Mobius form.
+// Events matched by none of the branches below are dropped.
 function projectHarnessEvent(event: any, context: any): any[] {
   if (!event || typeof event !== 'object' || !event.type) return []
   const base = baseEntry(event, context)

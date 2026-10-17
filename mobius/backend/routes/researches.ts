@@ -7,9 +7,6 @@ import { Researches } from '../repositories/researches';
 import { Projects } from '../repositories/projects';
 import { Sessions } from '../repositories/sessions';
 import { Messages } from '../repositories/messages';
-import { Users } from '../repositories/users';
-import { db } from '../../db';
-import { PORT } from '../config';
 import { SessionPendingMentions } from '../repositories/session-pending-mentions';
 // @ts-ignore — service 仍是 .js
 import modelRegistry from '../services/model-registry';
@@ -28,7 +25,6 @@ import {
   findSessionOperable,
   sessionJsonlPath,
   terminateBackgroundSession,
-  inspectBackgroundSession,
   type AnySession,
 } from './sessions';
 // @ts-ignore — service 仍是 .js
@@ -39,7 +35,14 @@ import {
   stripContextItemBodies,
 } from '../services/session-context';
 // @ts-ignore — service 仍是 .js
-import { appendBlackboardRecord, normalizeWriteInput, readBlackboard } from '../services/research-blackboard';
+import {
+  appendBlackboardRecord,
+  normalizeWriteInput,
+  prefixLimitedReceiverContent,
+  readBlackboard,
+  readBlackboardForSession,
+  sanitizedRecord,
+} from '../services/research-blackboard';
 // @ts-ignore — service 仍是 .js
 import { readGraph, resolveGraphImage } from '../services/research-graph';
 // @ts-ignore — service 仍是 .js
@@ -61,23 +64,13 @@ import {
 } from '../services/access-control';
 // @ts-ignore — service 仍是 .js
 import { recordAdminAuditIfCrossUser } from '../services/admin-audit';
+import { db } from '../../db';
+import { JWT_SECRET } from '../config';
+// @ts-ignore — util 仍是 .js
 import {
-  RESEARCH_SESSION_TOKEN_HEADER,
-  TEAM_TOKEN_HEADER,
-  createChiefTeamToken,
-  findActionByRequest,
-  normalizeAssistantLimit,
-  normalizeResearchMode,
-  queueResearchTeamSystemPrompt,
-  recordTeamAction,
-  reserveRecruitment,
-  reserveRemoval,
-  teamFingerprint,
-  teamState,
-  updateTeamAction,
-  verifyChiefTeamToken,
-  verifyResearchSessionToken,
-} from '../services/research-team';
+  RESEARCH_BLACKBOARD_CLI_TOKEN_HEADER,
+  verifyResearchBlackboardCliToken,
+} from '../utils/research-blackboard-capability';
 
 const router = express.Router();
 const projectScoped = express.Router({ mergeParams: true });
@@ -95,152 +88,6 @@ function readJobFlagState(root: string, sessionId: string) {
 
 function sanitizeIds(arr: unknown): string[] {
   return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x.length > 0) : [];
-}
-
-function requiredText(value: any, label: string, minLength = 1): string {
-  const text = String(value || '').trim();
-  if (text.length < minLength) {
-    const err: any = new Error(`${label}不能为空${minLength > 1 ? `，至少 ${minLength} 个字符` : ''}`);
-    err.status = 400;
-    err.code = 'invalid_team_agent_config';
-    throw err;
-  }
-  return text;
-}
-
-function explicitResearchSelection(
-  user: any,
-  researchId: string,
-  draft: any,
-  skillIdsInput: any,
-  memoryIdsInput: any,
-  memorySelectionConfirmed: any,
-): { excludedSkillIds: string[]; excludedMemoryIds: string[]; selectedSkills: any[]; selectedMemories: any[] } {
-  if (!Array.isArray(skillIdsInput) || skillIdsInput.length === 0) {
-    throw Object.assign(new Error('必须明确选择至少一个 Skill'), { status: 400, code: 'skill_selection_required' });
-  }
-  if (!Array.isArray(memoryIdsInput) || memorySelectionConfirmed !== true) {
-    throw Object.assign(new Error('必须明确确认 Memory 选择；允许显式选择无 Memory'), { status: 400, code: 'memory_selection_required' });
-  }
-  const preview: any = buildResearchContextPreview(user, researchId, draft, [], [], draft?.language === 'en' ? 'en' : 'zh', { includeBody: false });
-  const skills = Array.isArray(preview?.sources?.skills) ? preview.sources.skills : [];
-  const memories = Array.isArray(preview?.sources?.memories) ? preview.sources.memories : [];
-  const requestedSkills = new Set(skillIdsInput.map((id: any) => String(id || '').trim()).filter(Boolean));
-  const requestedMemories = new Set(memoryIdsInput.map((id: any) => String(id || '').trim()).filter(Boolean));
-  const selectedSkills = skills.filter((item: any) => requestedSkills.has(String(item.id)) || requestedSkills.has(String(item.name)));
-  const selectedMemories = memories.filter((item: any) => requestedMemories.has(String(item.id)) || requestedMemories.has(String(item.name)));
-  if (selectedSkills.length !== requestedSkills.size) {
-    throw Object.assign(new Error('包含不可用的 Skill'), { status: 400, code: 'invalid_skill_selection' });
-  }
-  if (selectedMemories.length !== requestedMemories.size) {
-    throw Object.assign(new Error('包含不可用的 Memory'), { status: 400, code: 'invalid_memory_selection' });
-  }
-  return {
-    excludedSkillIds: skills.filter((item: any) => !selectedSkills.some((chosen: any) => chosen.id === item.id)).map((item: any) => item.id),
-    excludedMemoryIds: memories.filter((item: any) => !selectedMemories.some((chosen: any) => chosen.id === item.id)).map((item: any) => item.id),
-    selectedSkills,
-    selectedMemories,
-  };
-}
-
-async function createStartedResearchSession(input: {
-  user: any;
-  research: any;
-  role: 'chief_researcher' | 'research_assistant';
-  config: any;
-  requestId: string;
-}): Promise<any> {
-  const { user, research, role, config, requestId } = input;
-  const name = requiredText(config?.name, 'Agent 名称');
-  const purpose = requiredText(config?.purpose ?? config?.description, 'Agent 职责');
-  const initialPrompt = requiredText(config?.initial_prompt, '初始 Prompt');
-  const model = requiredText(config?.model, '模型');
-  const language = config?.language === 'en' ? 'en' : 'zh';
-  const selection = explicitResearchSelection(
-    user,
-    research.id,
-    { name, description: purpose, role, language },
-    config?.skill_ids,
-    config?.memory_ids,
-    config?.memory_selection_confirmed,
-  );
-  if (role === 'chief_researcher' && !selection.selectedSkills.some((item: any) => item.name === 'research-chief-agent')) {
-    throw Object.assign(new Error('Chief 必须启用 research-chief-agent Skill'), { status: 400, code: 'chief_skill_required' });
-  }
-  const resolvedModel = modelRegistry.resolveSessionModelForCreate(model) as any;
-  const limitCheck = modelPromptLimits.checkCreateAllowed(user.id, resolvedModel.key);
-  if (!limitCheck.allowed) {
-    throw Object.assign(new Error(limitCheck.error), { status: limitCheck.status, code: limitCheck.code, usage: limitCheck.usage });
-  }
-  const sessionId = uuid().slice(0, 8);
-  const selectionSnapshot = buildResearchSessionSelectionSnapshot(
-    user,
-    research.id,
-    selection.excludedSkillIds,
-    selection.excludedMemoryIds,
-    { pc_client_metadata: config?.pc_client_metadata },
-  );
-  Sessions.insert({
-    session_id: sessionId,
-    issue_id: null,
-    project_id: research.project_id,
-    scope_type: 'research',
-    research_id: research.id,
-    research_role: role,
-    user_id: user.id,
-    name,
-    description: purpose,
-    session_key: `web:${user.id}:${sessionId}`,
-    excluded_skill_ids: selection.excludedSkillIds,
-    excluded_memory_ids: selection.excludedMemoryIds,
-    selection_snapshot: selectionSnapshot,
-    model: resolvedModel.sessionModelValue,
-    language,
-    pc_client_metadata: config?.pc_client_metadata,
-    name_human_edited: 1,
-  });
-  try {
-    await runSessionMessage({
-      user,
-      sessionId,
-      content: initialPrompt,
-      inputText: initialPrompt,
-      hasInputText: true,
-      requestId,
-      source: 'http.research_team.provision',
-      logger: console,
-    } as any);
-  } catch (error) {
-    try { Sessions.permanentDelete(sessionId); } catch {}
-    throw error;
-  }
-  return Sessions.findById(sessionId);
-}
-
-function requireChiefCapability(req: express.Request, researchId: string): any {
-  const token = req.header(TEAM_TOKEN_HEADER) || req.header('x-research-team-token');
-  const verified = verifyChiefTeamToken(token, researchId);
-  if (!verified) throw Object.assign(new Error('Chief 团队能力 token 无效'), { status: 401, code: 'invalid_chief_capability' });
-  const chief = Sessions.findById(verified.chiefSessionId) as any;
-  if (!chief || chief.scope_type !== 'research' || chief.research_id !== researchId || chief.research_role !== 'chief_researcher') {
-    throw Object.assign(new Error('Chief Session 不存在或不属于当前 Research'), { status: 403, code: 'chief_capability_scope_mismatch' });
-  }
-  return chief;
-}
-
-function researchBlackboardAccess(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const researchId = String(req.params.researchId);
-  const token = req.header(RESEARCH_SESSION_TOKEN_HEADER);
-  const verified = token ? verifyResearchSessionToken(token, researchId) : null;
-  if (verified) {
-    const session = Sessions.findById(verified.sessionId) as any;
-    if (session && session.scope_type === 'research' && session.research_id === researchId) {
-      (req as any).researchSession = session;
-      next();
-      return;
-    }
-  }
-  auth(req, res, next);
 }
 
 function toIdList(v: unknown): string[] {
@@ -301,7 +148,7 @@ projectScoped.get('/', auth, (req: express.Request, res: express.Response) => {
   res.json(researches.map((research: any) => shapeResearchForUser(research, user)));
 });
 
-projectScoped.post('/', auth, async (req: express.Request, res: express.Response) => {
+projectScoped.post('/', auth, (req: express.Request, res: express.Response) => {
   const user = (req as any).user;
   const project = Projects.findById(String(req.params.projectId));
   if (!project) { res.status(404).json({ error: '未找到' }); return; }
@@ -310,41 +157,6 @@ projectScoped.post('/', auth, async (req: express.Request, res: express.Response
   const { title, description } = (req.body || {}) as { title?: string; description?: string };
   if (!title) { res.status(400).json({ error: '请填写 Research 标题' }); return; }
   if (!description) { res.status(400).json({ error: '请填写 Research 描述' }); return; }
-  let mode: 'custom' | 'chief_led';
-  let assistantLimit: number;
-  try {
-    mode = normalizeResearchMode(req.body?.mode);
-    assistantLimit = normalizeAssistantLimit(req.body?.assistant_limit);
-  } catch (e) {
-    const err = e as any;
-    res.status(err.status || 400).json({ error: err.message, code: err.code });
-    return;
-  }
-  if (!req.body?.chief || typeof req.body.chief !== 'object') {
-    // Research 本身默认不创建任何 Agent; Chief (Leader) 可在此立即创建, 也可稍后从团队入口补建.
-    const researchId = uuid().slice(0, 8);
-    Researches.insert({
-      id: researchId,
-      project_id: String(req.params.projectId),
-      title,
-      description,
-      created_by: user.id,
-      mode,
-      assistant_limit: assistantLimit,
-      visibility: normalizeVisibility(req.body?.visibility, 'inherit', true) as any,
-    });
-    recordAdminAuditIfCrossUser(user, 'create_research', 'project', project.id, project.created_by);
-    if (req.body?.visibility !== undefined
-      || req.body?.allow_user_ids !== undefined || req.body?.allowUserIds !== undefined
-      || req.body?.allow_group_ids !== undefined || req.body?.allowGroupIds !== undefined) {
-      setResourcePolicy('research', researchId, { ...researchAccessBody(req.body), createdBy: user.id });
-    }
-    res.json({
-      ...shapeResearchForUser(Researches.findById(researchId), user),
-      chief_session: null,
-    });
-    return;
-  }
   const researchId = uuid().slice(0, 8);
   Researches.insert({
     id: researchId,
@@ -352,8 +164,6 @@ projectScoped.post('/', auth, async (req: express.Request, res: express.Response
     title,
     description,
     created_by: user.id,
-    mode,
-    assistant_limit: assistantLimit,
     visibility: normalizeVisibility(req.body?.visibility, 'inherit', true) as any,
   });
   recordAdminAuditIfCrossUser(user, 'create_research', 'project', project.id, project.created_by);
@@ -362,40 +172,7 @@ projectScoped.post('/', auth, async (req: express.Request, res: express.Response
     || req.body?.allow_group_ids !== undefined || req.body?.allowGroupIds !== undefined) {
     setResourcePolicy('research', researchId, { ...researchAccessBody(req.body), createdBy: user.id });
   }
-  let chiefSession: any = null;
-  {
-    try {
-      const research = Researches.findById(researchId) as any;
-      chiefSession = await createStartedResearchSession({
-        user,
-        research,
-        role: 'chief_researcher',
-        config: req.body.chief,
-        requestId: `chief-init-${researchId}`,
-      });
-      appendBlackboardRecord({
-        researchId,
-        author: 'HR',
-        content: `Chief 已加入并启动: session_id=${chiefSession.session_id}, name=${chiefSession.name}`,
-        metadata: {
-          event: 'session_joined',
-          session_id: chiefSession.session_id,
-          role: 'chief_researcher',
-          name: chiefSession.name,
-          source: 'research_creation',
-        },
-      });
-    } catch (e) {
-      try { db.prepare('DELETE FROM researches WHERE id = ?').run(researchId); } catch {}
-      const err = e as any;
-      res.status(err.status || 500).json({ error: err.message || 'Chief 创建或启动失败', code: err.code, usage: err.usage });
-      return;
-    }
-  }
-  res.json({
-    ...shapeResearchForUser(Researches.findById(researchId), user),
-    chief_session: chiefSession ? withSessionProxyState(chiefSession) : null,
-  });
+  res.json(shapeResearchForUser(Researches.findById(researchId), user));
 });
 
 router.get('/:id', auth, (req: express.Request, res: express.Response) => {
@@ -405,394 +182,6 @@ router.get('/:id', auth, (req: express.Request, res: express.Response) => {
   if (!canReadResearch(user, research)) { res.status(404).json({ error: '未找到' }); return; }
   auditResearchAccess(user, 'read_research', research);
   res.json(shapeResearchForUser(research, user));
-});
-
-router.get('/:id/team', auth, (req: express.Request, res: express.Response) => {
-  const user = (req as any).user;
-  const research = Researches.findById(String(req.params.id));
-  if (!research || !canReadResearch(user, research)) { res.status(404).json({ error: '未找到' }); return; }
-  const state = teamState(String(req.params.id));
-  res.json(state);
-});
-
-// 为已存在的 Research 补建唯一 Leader (Chief): "AI-Leader 自动组队"路径的起点.
-// Research 创建本身不建 Agent; 用户从这里 (或创建 Research 时的"立即创建 Leader") 装配 Leader.
-router.post('/:id/leader', auth, async (req: express.Request, res: express.Response) => {
-  const user = (req as any).user;
-  const researchId = String(req.params.id);
-  const research = Researches.findById(researchId) as any;
-  if (!research || !canManageResearch(user, research)) { res.status(404).json({ error: '未找到' }); return; }
-  if (Sessions.findChiefForResearch(researchId)) {
-    res.status(409).json({ error: '当前 Research 已存在 Leader (Chief)', code: 'leader_exists' });
-    return;
-  }
-  if (!req.body || typeof req.body !== 'object' || !req.body.initial_prompt) {
-    res.status(400).json({ error: '创建 Leader 必须提供初始 Prompt', code: 'leader_config_required' });
-    return;
-  }
-  try {
-    // mode 必须在会话启动【之前】置为 chief_led: Leader 的首条 bootstrap 上下文
-    // (buildSessionContext → Chief 团队管理能力段) 是在 createStartedResearchSession
-    // 内部构建的, 那时读到的还是旧 mode. 先改 mode, 创建失败再回滚.
-    const previousMode = normalizeResearchMode(research.mode);
-    Researches.updateMode(researchId, 'chief_led');
-    let leaderSession: any;
-    try {
-      leaderSession = await createStartedResearchSession({
-        user,
-        research,
-        role: 'chief_researcher',
-        config: req.body,
-        requestId: `leader-init-${researchId}`,
-      });
-    } catch (e) {
-      Researches.updateMode(researchId, previousMode);
-      throw e;
-    }
-    appendBlackboardRecord({
-      researchId,
-      author: 'HR',
-      content: `Leader 已加入并启动: session_id=${leaderSession.session_id}, name=${leaderSession.name}`,
-      metadata: {
-        event: 'session_joined',
-        session_id: leaderSession.session_id,
-        role: 'chief_researcher',
-        name: leaderSession.name,
-        source: 'leader_provision',
-      },
-    });
-    res.json({
-      ok: true,
-      leader_session: withSessionProxyState(leaderSession),
-      research: shapeResearchForUser(Researches.findById(researchId), user),
-    });
-  } catch (e) {
-    const err = e as any;
-    res.status(err.status || 500).json({ error: err.message || 'Leader 创建或启动失败', code: err.code, usage: err.usage });
-  }
-});
-
-router.post('/:id/team/authorize', auth, async (req: express.Request, res: express.Response) => {
-  const user = (req as any).user;
-  const research = Researches.findById(String(req.params.id)) as any;
-  if (!research) { res.status(404).json({ error: '未找到' }); return; }
-  if (!canManageResearch(user, research)) { res.status(403).json({ error: '只有 Research 管理者可以授权 Chief 创建团队' }); return; }
-  if (normalizeResearchMode(research.mode) !== 'chief_led') {
-    res.status(400).json({ error: '只有 Chief 主导模式需要创建团队授权', code: 'not_chief_led' });
-    return;
-  }
-  const chief = Sessions.findChiefForResearch(research.id) as any;
-  if (!chief) { res.status(409).json({ error: '当前 Research 尚未创建 Chief', code: 'chief_missing' }); return; }
-  const requestId = typeof req.body?.request_id === 'string' && req.body.request_id.trim()
-    ? req.body.request_id.trim()
-    : `authorize-${uuid().slice(0, 12)}`;
-  let action = findActionByRequest(research.id, requestId);
-  if (!action) {
-    action = recordTeamAction({
-      researchId: research.id,
-      actorSessionId: chief.session_id,
-      actionType: 'authorize',
-      requestId,
-      status: 'authorized',
-      payload: { source: 'user_button', authorized_by: user.id },
-    });
-  }
-  const capabilityToken = createChiefTeamToken(research.id, chief.session_id);
-  const instruction = [
-    '[Research 团队创建授权]',
-    `authorization_id: ${action.id}`,
-    '用户已确认，请按你们讨论的方案现在创建团队。',
-    '你可以先判断方案是否成熟；如果仍有未定项，应先向用户说明，不要勉强创建。',
-    `创建 Assistant 时调用 POST http://localhost:${PORT}/api/researches/${research.id}/team/agents`,
-    `请求头 ${TEAM_TOKEN_HEADER}: ${capabilityToken}`,
-    '每个 Agent 必须同时提供 name、purpose、model、skill_ids、memory_ids、memory_selection_confirmed=true、initial_prompt、recruit_reason、request_id 和 authorization_id。',
-    `当前团队 limit=${normalizeAssistantLimit(research.assistant_limit)}，Chief 不占名额。`,
-  ].join('\n');
-  try {
-    await queueResearchTeamSystemPrompt(chief, user, instruction, 'Research 团队创建授权');
-    appendBlackboardRecord({
-      researchId: research.id,
-      author: 'HR',
-      content: '用户已授权 Chief 按讨论方案创建团队。Chief 可以继续确认方案，或开始招募 Assistant。',
-      metadata: { event: 'team_authorized', authorization_id: action.id, chief_session_id: chief.session_id },
-    });
-    res.json({ ok: true, authorization_id: action.id, chief_session_id: chief.session_id });
-  } catch (e) {
-    const err = e as any;
-    updateTeamAction(research.id, requestId, { status: 'failed', error: err.message });
-    res.status(err.status || 500).json({ error: err.message || '授权消息投递失败', code: err.code });
-  }
-});
-
-router.post('/:id/team/manual-agents', auth, async (req: express.Request, res: express.Response) => {
-  const researchId = String(req.params.id);
-  const user = (req as any).user;
-  const research = Researches.findById(researchId) as any;
-  if (!research || !canReadResearch(user, research)) { res.status(404).json({ error: '未找到' }); return; }
-  // 人类直接创建不区分模式: chief_led 下用户同样是团队的主人, 可直接补建 Assistant.
-  // limit / 建删震荡守卫只对 Chief 能力路径硬性执行, 人类路径只提醒.
-  try {
-    const requestId = requiredText(req.body?.request_id, 'request_id');
-    const payload = {
-      name: requiredText(req.body?.name, 'Agent 名称'),
-      purpose: requiredText(req.body?.purpose, 'Agent 职责'),
-      model: requiredText(req.body?.model, '模型'),
-      skill_ids: req.body?.skill_ids,
-      memory_ids: req.body?.memory_ids,
-      memory_selection_confirmed: req.body?.memory_selection_confirmed,
-      initial_prompt: requiredText(req.body?.initial_prompt, '初始 Prompt'),
-      recruit_reason: requiredText(req.body?.recruit_reason || '用户明确创建该 Agent，当前任务需要其专长', '创建理由', 10),
-      expected_outcome: requiredText(req.body?.expected_outcome || req.body?.purpose, '预期产出'),
-      replacement_of: req.body?.replacement_of ? String(req.body.replacement_of) : null,
-      language: req.body?.language === 'en' ? 'en' : 'zh',
-    };
-    const actorSessionId = Sessions.findChiefForResearch(researchId)?.session_id || `user:${user.id}`;
-    const reserved: any = reserveRecruitment({ researchId, actorSessionId, requestId, payload, enforceLimit: false, enforceGuard: false });
-    if (reserved.existing) {
-      const existingSession = reserved.action.target_session_id ? Sessions.findById(reserved.action.target_session_id) : null;
-      res.json({ ok: reserved.action.status === 'completed', idempotent: true, action: reserved.action, session: existingSession });
-      return;
-    }
-    let created: any = null;
-    try {
-      created = await createStartedResearchSession({
-        user,
-        research,
-        role: 'research_assistant',
-        config: payload,
-        requestId: `manual-team-start-${requestId}`,
-      });
-      updateTeamAction(researchId, requestId, { status: 'starting', targetSessionId: created.session_id });
-      const hr = appendBlackboardRecord({
-        researchId,
-        author: 'HR',
-        content: [
-          `新的 research_assistant 已由用户创建并收到初始任务: session_id=${created.session_id}, name=${created.name}`,
-          reserved.overLimit
-            ? `提醒: 当前存活 Assistant (${reserved.assistantCount}/${reserved.assistantLimit}) 已超过团队 limit；本条为用户指定创建，不受硬性限制。`
-            : '',
-        ].filter(Boolean).join('\n'),
-        metadata: {
-          event: 'session_joined', source: 'custom_team_provision', session_id: created.session_id,
-          role: 'research_assistant', name: created.name, request_id: requestId,
-          initial_prompt: payload.initial_prompt, recruit_reason: payload.recruit_reason,
-          over_limit: reserved.overLimit === true,
-        },
-      });
-      if ((hr as any).error) throw new Error((hr as any).error);
-      const action = updateTeamAction(researchId, requestId, { status: 'completed', targetSessionId: created.session_id });
-      res.json({ ok: true, action, session: withSessionProxyState(created), team: teamState(researchId) });
-    } catch (e) {
-      if (created) {
-        try { await terminateBackgroundSession(created, created.session_id); } catch {}
-        try { Sessions.permanentDelete(created.session_id); } catch {}
-      }
-      const err = e as any;
-      const action = updateTeamAction(researchId, requestId, { status: 'failed', error: err.message || '创建或启动失败' });
-      appendBlackboardRecord({
-        researchId, author: 'HR', content: `自定义 Agent 创建或启动失败: name=${payload.name}, reason=${err.message || '未知错误'}`,
-        metadata: { event: 'agent_start_failed', request_id: requestId, name: payload.name, error: err.message || '未知错误' },
-      });
-      res.status(err.status || 500).json({ error: err.message || 'Agent 创建或启动失败', code: err.code, action });
-    }
-  } catch (e) {
-    const err = e as any;
-    res.status(err.status || 500).json({ error: err.message || 'Agent 创建失败', code: err.code });
-  }
-});
-
-router.post('/:id/team/agents', async (req: express.Request, res: express.Response) => {
-  const researchId = String(req.params.id);
-  try {
-    const chief = requireChiefCapability(req, researchId);
-    const research = Researches.findById(researchId) as any;
-    if (!research) throw Object.assign(new Error('Research 未找到'), { status: 404 });
-    const user = Users.findById(chief.user_id) as any;
-    if (!user) throw Object.assign(new Error('Chief 所属用户不存在'), { status: 403 });
-    const requestId = requiredText(req.body?.request_id, 'request_id');
-    const recruitReason = requiredText(req.body?.recruit_reason, '招募理由', 10);
-    const authorizationId = String(req.body?.authorization_id || '').trim();
-    const authorizationSource = req.body?.authorization_source === 'natural_language' ? 'natural_language' : 'button';
-    if (authorizationSource === 'button') {
-      const authorization: any = db.prepare(`
-        SELECT * FROM research_team_actions
-        WHERE id = ? AND research_id = ? AND action_type = 'authorize' AND status = 'authorized'
-      `).get(authorizationId, researchId);
-      if (!authorization) throw Object.assign(new Error('缺少有效的用户团队创建授权'), { status: 403, code: 'team_authorization_required' });
-    } else {
-      requiredText(req.body?.authorization_quote, '用户自然语言授权原文', 4);
-    }
-    const payload = {
-      name: requiredText(req.body?.name, 'Agent 名称'),
-      purpose: requiredText(req.body?.purpose, 'Agent 职责'),
-      model: requiredText(req.body?.model, '模型'),
-      skill_ids: req.body?.skill_ids,
-      memory_ids: req.body?.memory_ids,
-      memory_selection_confirmed: req.body?.memory_selection_confirmed,
-      initial_prompt: requiredText(req.body?.initial_prompt, '初始 Prompt'),
-      recruit_reason: recruitReason,
-      expected_outcome: requiredText(req.body?.expected_outcome || req.body?.purpose, '预期产出'),
-      replacement_of: req.body?.replacement_of ? String(req.body.replacement_of) : null,
-      authorization_id: authorizationId || null,
-      authorization_source: authorizationSource,
-      authorization_quote: authorizationSource === 'natural_language' ? String(req.body.authorization_quote) : null,
-      language: req.body?.language === 'en' ? 'en' : 'zh',
-    };
-    const reserved: any = reserveRecruitment({
-      researchId,
-      actorSessionId: chief.session_id,
-      requestId,
-      payload,
-    });
-    if (reserved.existing) {
-      const state = reserved.action.status === 'completed' && reserved.action.target_session_id
-        ? Sessions.findById(reserved.action.target_session_id)
-        : null;
-      res.json({ ok: reserved.action.status === 'completed', idempotent: true, action: reserved.action, session: state });
-      return;
-    }
-    let created: any = null;
-    try {
-      created = await createStartedResearchSession({
-        user,
-        research,
-        role: 'research_assistant',
-        config: payload,
-        requestId: `team-start-${requestId}`,
-      });
-      updateTeamAction(researchId, requestId, { status: 'starting', targetSessionId: created.session_id });
-      const hr = appendBlackboardRecord({
-        researchId,
-        author: 'HR',
-        content: `新的 research_assistant 已加入并收到初始任务: session_id=${created.session_id}, name=${created.name}\n招募理由: ${recruitReason}`,
-        metadata: {
-          event: 'session_joined',
-          source: 'chief_team_provision',
-          session_id: created.session_id,
-          role: 'research_assistant',
-          name: created.name,
-          request_id: requestId,
-          authorization_id: authorizationId || null,
-          initial_prompt: payload.initial_prompt,
-          recruit_reason: recruitReason,
-          expected_outcome: payload.expected_outcome,
-        },
-      });
-      if ((hr as any).error) throw new Error((hr as any).error);
-      const action = updateTeamAction(researchId, requestId, { status: 'completed', targetSessionId: created.session_id });
-      res.json({ ok: true, action, session: withSessionProxyState(created), team: teamState(researchId) });
-    } catch (e) {
-      if (created) {
-        try { await terminateBackgroundSession(created, created.session_id); } catch {}
-        try { Sessions.permanentDelete(created.session_id); } catch {}
-      }
-      const err = e as any;
-      const action = updateTeamAction(researchId, requestId, { status: 'failed', error: err.message || '创建或启动失败' });
-      appendBlackboardRecord({
-        researchId,
-        author: 'HR',
-        content: `Assistant 创建或启动失败: name=${payload.name}, reason=${err.message || '未知错误'}`,
-        metadata: { event: 'agent_start_failed', request_id: requestId, name: payload.name, error: err.message || '未知错误' },
-      });
-      res.status(err.status || 500).json({ error: err.message || 'Agent 创建或启动失败', code: err.code, action });
-    }
-  } catch (e) {
-    const err = e as any;
-    res.status(err.status || 500).json({ error: err.message || '团队创建失败', code: err.code, removed_session_id: err.removed_session_id });
-  }
-});
-
-router.delete('/:id/team/agents/:sessionId', async (req: express.Request, res: express.Response) => {
-  const researchId = String(req.params.id);
-  try {
-    const chief = requireChiefCapability(req, researchId);
-    const target = Sessions.findById(String(req.params.sessionId)) as any;
-    if (!target || target.research_id !== researchId || target.scope_type !== 'research') {
-      throw Object.assign(new Error('目标 Research Agent 不存在'), { status: 404 });
-    }
-    if (target.research_role === 'chief_researcher') {
-      throw Object.assign(new Error('Chief 不能通过团队管理能力创建或删除'), { status: 409, code: 'chief_lifecycle_protected' });
-    }
-    const requestId = requiredText(req.body?.request_id, 'request_id');
-    const removeReason = requiredText(req.body?.remove_reason, '删除理由', 10);
-    const handoffSummary = requiredText(req.body?.handoff_summary, '未完成任务交接', target.agent_status === 'running' ? 10 : 1);
-    const handoffTarget = String(req.body?.handoff_target || chief.session_id).trim();
-    const handoffSession = Sessions.findById(handoffTarget) as any;
-    if (!handoffSession || handoffSession.research_id !== researchId || handoffSession.session_id === target.session_id) {
-      throw Object.assign(new Error('handoff_target 必须是当前 Research 中接手任务的其他 Agent'), { status: 400, code: 'invalid_handoff_target' });
-    }
-    const recruitAction: any = db.prepare(`
-      SELECT * FROM research_team_actions
-      WHERE research_id = ? AND target_session_id = ? AND action_type = 'recruit'
-      ORDER BY created_at DESC LIMIT 1
-    `).get(researchId, target.session_id);
-    let recruitPayload: any = {};
-    try { recruitPayload = JSON.parse(recruitAction?.payload_json || '{}'); } catch {}
-    const payload = {
-      remove_reason: removeReason,
-      handoff_summary: handoffSummary,
-      handoff_target: handoffTarget,
-      was_running: target.agent_status === 'running',
-      fingerprint: teamFingerprint(Object.keys(recruitPayload).length > 0 ? recruitPayload : {
-        purpose: target.description,
-        model: target.model,
-        initial_prompt: target.description,
-        skill_ids: [],
-      }),
-    };
-    const reserved: any = reserveRemoval({
-      researchId,
-      actorSessionId: chief.session_id,
-      targetSessionId: target.session_id,
-      requestId,
-      payload,
-    });
-    if (reserved.existing) {
-      res.json({ ok: reserved.action.status === 'completed', idempotent: true, action: reserved.action });
-      return;
-    }
-    try {
-      const requested = appendBlackboardRecord({
-        researchId,
-        author: 'HR',
-        content: `Research Agent「${target.name}」即将离开团队。\n删除理由: ${removeReason}\n未完成任务与交接: ${handoffSummary}`,
-        metadata: {
-          event: 'agent_removal_requested',
-          session_id: target.session_id,
-          role: 'research_assistant',
-          request_id: requestId,
-          ...payload,
-        },
-      });
-      if ((requested as any).error) throw new Error((requested as any).error);
-      const closed = await terminateBackgroundSession(target, target.session_id);
-      Sessions.permanentDelete(target.session_id);
-      const left = appendBlackboardRecord({
-        researchId,
-        author: 'HR',
-        content: `Research Agent「${target.name}」已离开团队，名额已经释放。\n交接: ${handoffSummary}`,
-        metadata: {
-          event: 'session_left',
-          session_id: target.session_id,
-          role: 'research_assistant',
-          request_id: requestId,
-          remove_reason: removeReason,
-          handoff_summary: handoffSummary,
-          background_was_working: closed.wasWorking,
-        },
-      });
-      if ((left as any).error) throw new Error((left as any).error);
-      const action = updateTeamAction(researchId, requestId, { status: 'completed' });
-      res.json({ ok: true, action, team: teamState(researchId) });
-    } catch (e) {
-      const err = e as any;
-      const action = updateTeamAction(researchId, requestId, { status: 'failed', error: err.message || '删除失败' });
-      res.status(err.status || 500).json({ error: err.message || '删除失败', code: err.code, action });
-    }
-  } catch (e) {
-    const err = e as any;
-    res.status(err.status || 500).json({ error: err.message || '团队删除失败', code: err.code });
-  }
 });
 
 router.patch('/:id', auth, (req: express.Request, res: express.Response) => {
@@ -812,19 +201,6 @@ router.patch('/:id', auth, (req: express.Request, res: express.Response) => {
   if (description !== undefined) Researches.updateDescription(String(req.params.id), description);
   if (status && ['active', 'completed'].includes(status)) Researches.updateStatus(String(req.params.id), status as any);
   if (typeof pinned === 'boolean') Researches.updatePinned(String(req.params.id), pinned);
-  if (req.body?.assistant_limit !== undefined) {
-    try {
-      Researches.updateAssistantLimit(String(req.params.id), normalizeAssistantLimit(req.body.assistant_limit));
-    } catch (e) {
-      const err = e as any;
-      res.status(err.status || 400).json({ error: err.message, code: err.code });
-      return;
-    }
-  }
-  // 组队方式可后置切换: "AI-Leader 自动组队"(chief_led) / "人工自定义组队"(custom).
-  if (req.body?.mode !== undefined) {
-    Researches.updateMode(String(req.params.id), normalizeResearchMode(req.body.mode));
-  }
   if (visibility !== undefined) {
     const nextVisibility = normalizeVisibility(visibility, 'inherit', true);
     Researches.updateVisibility(String(req.params.id), nextVisibility as any);
@@ -876,6 +252,7 @@ researchScoped.post('/', auth, async (req: express.Request, res: express.Respons
     model?: string;
     language?: string;
   };
+  const suppressJoinNotice = req.body?.suppress_join_notice === true || req.body?.suppressJoinNotice === true;
   const continueFromSessionId = typeof req.body?.continue_from_session_id === 'string'
     ? req.body.continue_from_session_id.trim()
     : '';
@@ -883,18 +260,6 @@ researchScoped.post('/', auth, async (req: express.Request, res: express.Respons
   if (!['chief_researcher', 'research_assistant'].includes(role as string)) {
     res.status(400).json({ error: 'Research Session role 非法' });
     return;
-  }
-  if (role === 'research_assistant') {
-    // Research Agent 的正式创建必须经过统一团队链路，以便原子完成
-    // limit 预留、初始 Prompt 启动、HR 通告和团队动作台账。保留
-    // continue_from_session_id 作为旧 Session 转接的兼容路径。
-    if (!continueFromSessionId) {
-      res.status(410).json({
-        error: 'Research Assistant 必须通过 /team/manual-agents 创建并立即启动',
-        code: 'research_team_provision_required',
-      });
-      return;
-    }
   }
   if (role === 'chief_researcher' && Sessions.findChiefForResearch(String(req.params.researchId))) {
     res.status(409).json({ error: '当前 Research 已存在 chief_researcher' });
@@ -985,16 +350,14 @@ researchScoped.post('/', auth, async (req: express.Request, res: express.Respons
   const pendingMentions = SessionPendingMentions.save(sessionId, req.body?.mentions);
 
   const displayRole = role === 'chief_researcher' ? 'chief_researcher' : 'research_assistant';
-  const blackboardResult = appendBlackboardRecord({
-    researchId: String(req.params.researchId),
-    author: 'HR',
-    content: `新的 ${displayRole} 已加入研究环境: session_id=${sessionId}, name=${name}`,
-    metadata: { event: 'session_joined', session_id: sessionId, role: displayRole, name },
-  });
-  if ((blackboardResult as any).error) {
-    try { Sessions.permanentDelete(sessionId); } catch {}
-    res.status(500).json({ error: (blackboardResult as any).error });
-    return;
+  if (!suppressJoinNotice) {
+    const blackboardResult = appendBlackboardRecord({
+      researchId: String(req.params.researchId),
+      author: 'HR',
+      content: `新的 ${displayRole} 已加入研究环境: session_id=${sessionId}, name=${name}`,
+      metadata: { event: 'session_joined', session_id: sessionId, role: displayRole, name },
+    });
+    if ((blackboardResult as any).error) { res.status(500).json({ error: (blackboardResult as any).error }); return; }
   }
   if (sourceSession && transferResult?.paths?.full) {
     try {
@@ -1024,16 +387,12 @@ researchScoped.post('/', auth, async (req: express.Request, res: express.Respons
     } catch (e) {
       console.warn(`[researches] save transfer marker failed (${sessionId}): ${(e as Error).message}`);
     }
-    // 不终止原 agent: 探测其状态供审计/提示, 活着就让它继续跑.
-    const closed = inspectBackgroundSession(sourceSession, sourceSession.session_id);
-    if (!closed.wasAlive) {
-      // 原 agent 本来就不在: 才清理 flag 并落 idle 痕迹 (与旧行为一致).
-      try {
-        const project = Projects.findById(research.project_id) as any;
-        if (project?.bind_path) safeRemoveRunningFlag(path.resolve(project.bind_path), sourceSession.session_id, 'session-transfer');
-      } catch {}
-      try { Sessions.setIdle(sourceSession.session_id, sourceSession.user_id || user.id); } catch {}
-    }
+    const closed = await terminateBackgroundSession(sourceSession, sourceSession.session_id);
+    try {
+      const project = Projects.findById(research.project_id) as any;
+      if (project?.bind_path) safeRemoveRunningFlag(path.resolve(project.bind_path), sourceSession.session_id, 'session-transfer');
+    } catch {}
+    try { Sessions.setIdle(sourceSession.session_id, sourceSession.user_id || user.id); } catch {}
     try {
       Messages.insertSystem(
         sourceSession.session_id,
@@ -1164,26 +523,164 @@ router.post('/:id/complete', auth, (req: express.Request, res: express.Response)
   res.json(shapeResearchForUser(Researches.findById(String(req.params.id)), user));
 });
 
-blackboardRouter.get('/:researchId', researchBlackboardAccess, (req: express.Request, res: express.Response) => {
+/*
+ * 以下三个中间件把 Blackboard 读写分成两条通道:
+ * CLI 通道 (research_blackboard_read/write 脚本) 走 capability token 校验,
+ * Web 通道走用户登录态 + canReadResearch 资源权限校验.
+ */
+function resolveSessionReference(rawRef: any): { session?: any; error?: string; status?: number } {
+  const ref = String(rawRef || '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(ref)) {
+    return { error: 'Session/Agent ID 格式非法', status: 400 };
+  }
+  const exact = Sessions.findById(ref) as any;
+  if (exact) return { session: exact };
+  const matches = db.prepare('SELECT * FROM sessions_v2 WHERE agent_session_id = ? LIMIT 2').all(ref) as any[];
+  if (matches.length > 1) return { error: `Agent ID ${ref} 对应多个 Session，请改用 Mobius Session ID`, status: 400 };
+  if (matches.length === 0) return { error: `未找到 Session/Agent：${ref}`, status: 404 };
+  return { session: matches[0] };
+}
+
+function researchBlackboardCliAccess(action: 'read' | 'write') {
+  return (req: express.Request, res: express.Response, next: express.NextFunction): void => {
+    const researchId = String(req.params.researchId || '').trim();
+    const token = req.header(RESEARCH_BLACKBOARD_CLI_TOKEN_HEADER);
+    const verified = verifyResearchBlackboardCliToken(token, JWT_SECRET, { action, researchId });
+    if (!verified) {
+      res.status(401).json({ error: 'Research Blackboard CLI capability 无效或已过期' });
+      return;
+    }
+    const research = Researches.findById(researchId) as any;
+    if (!research) {
+      res.status(404).json({ error: `Research 不存在：${researchId}` });
+      return;
+    }
+    const senderResolved = resolveSessionReference(verified.sessionRef);
+    if (!senderResolved.session) {
+      res.status(senderResolved.status || 404).json({ error: senderResolved.error });
+      return;
+    }
+    const sender = senderResolved.session;
+    if (sender.deleted_at) {
+      res.status(403).json({ error: `发送人/读取人 Session ${sender.session_id} 已被删除` });
+      return;
+    }
+    if (sender.scope_type !== 'research') {
+      res.status(403).json({ error: `发送人/读取人 ${sender.session_id} 不是 Research Session` });
+      return;
+    }
+    if (sender.research_id !== researchId) {
+      res.status(403).json({ error: `发送人/读取人 ${sender.session_id} 不在 Research ${researchId} 中` });
+      return;
+    }
+    if (action === 'write' && sender.status !== 'active') {
+      res.status(403).json({ error: `发送人 Session ${sender.session_id} 当前状态为 ${sender.status || '未知'}，只有 active Session 可以写入` });
+      return;
+    }
+
+    let receiver: any = null;
+    if (verified.limitedReceiver) {
+      if (!verified.receiverRef) {
+        res.status(400).json({ error: '--limit-receiver 必须且只能指定一个 receiver' });
+        return;
+      }
+      const receiverResolved = resolveSessionReference(verified.receiverRef);
+      if (!receiverResolved.session) {
+        res.status(receiverResolved.status || 404).json({ error: `接收者无效：${receiverResolved.error}` });
+        return;
+      }
+      receiver = receiverResolved.session;
+      if (receiver.session_id === sender.session_id) {
+        res.status(400).json({ error: '发送人和接收者不能是同一个 Session' });
+        return;
+      }
+      if (receiver.deleted_at) {
+        res.status(403).json({ error: `接收者 Session ${receiver.session_id} 已被删除` });
+        return;
+      }
+      if (receiver.scope_type !== 'research') {
+        res.status(403).json({ error: `接收者 ${receiver.session_id} 不是 Research Session` });
+        return;
+      }
+      if (receiver.research_id !== researchId || receiver.research_id !== sender.research_id) {
+        res.status(403).json({ error: `发送人 ${sender.session_id} 和接收者 ${receiver.session_id} 不在同一个 Research ${researchId} 中` });
+        return;
+      }
+      if (receiver.status !== 'active') {
+        res.status(403).json({ error: `接收者 Session ${receiver.session_id} 当前状态为 ${receiver.status || '未知'}，无法接收定向消息` });
+        return;
+      }
+    } else if (verified.receiverRef) {
+      res.status(400).json({ error: '指定 receiver 时必须同时使用 --limit-receiver' });
+      return;
+    }
+    (req as any).researchBlackboardCli = { sender, receiver, research, capability: verified };
+    next();
+  };
+}
+
+function researchBlackboardUserAccess(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  auth(req, res, () => {
+    const research = Researches.findByIdWithProject(String(req.params.researchId));
+    if (!research || !canReadResearch((req as any).user, research)) {
+      res.status(404).json({ error: '未找到' });
+      return;
+    }
+    (req as any).research = research;
+    next();
+  });
+}
+
+blackboardRouter.get('/cli/:researchId', researchBlackboardCliAccess('read'), (req: express.Request, res: express.Response) => {
+  const sender = (req as any).researchBlackboardCli.sender;
+  const result: any = readBlackboardForSession(String(req.params.researchId), sender.session_id);
+  if (result.error) { res.status(404).json({ error: result.error }); return; }
+  res.type('application/x-ndjson; charset=utf-8').send(result.content || '');
+});
+
+blackboardRouter.post('/cli/:researchId', researchBlackboardCliAccess('write'), (req: express.Request, res: express.Response) => {
+  const cli = (req as any).researchBlackboardCli;
+  const normalized: any = normalizeWriteInput({ content: req.body?.content });
+  if (normalized.error) { res.status(400).json({ error: normalized.error }); return; }
+  const content = cli.capability.limitedReceiver
+    ? prefixLimitedReceiverContent(cli.receiver.session_id, normalized.content)
+    : normalized.content;
+  const result: any = appendBlackboardRecord({
+    researchId: String(req.params.researchId),
+    author: `${cli.sender.research_role || 'research_assistant'} (${cli.sender.session_id})`,
+    content,
+    metadata: { session_id: cli.sender.session_id },
+  });
+  if (result.error) { res.status(400).json({ error: result.error }); return; }
+  res.json({ ok: true, record: sanitizedRecord(result.record) });
+});
+
+blackboardRouter.get('/:researchId', researchBlackboardUserAccess, (req: express.Request, res: express.Response) => {
   const result: any = readBlackboard(String(req.params.researchId));
   if (result.error) { res.status(404).type('text/plain').send(result.error); return; }
   res.type('application/x-ndjson; charset=utf-8').send(result.content || '');
 });
 
-blackboardRouter.post('/:researchId', researchBlackboardAccess, async (req: express.Request, res: express.Response) => {
+blackboardRouter.post('/:researchId', researchBlackboardUserAccess, (req: express.Request, res: express.Response) => {
+  const user = (req as any).user;
   const normalized: any = normalizeWriteInput(req.body || {});
   if (normalized.error) { res.status(400).json({ error: normalized.error }); return; }
   const result: any = appendBlackboardRecord({
     researchId: String(req.params.researchId),
-    author: normalized.author,
+    author: `${user?.display_name || user?.id || 'user'}`,
     content: normalized.content,
-    metadata: normalized.metadata,
+    metadata: { ...(normalized.metadata || {}), author_user_id: user?.id || null },
   });
   if (result.error) { res.status(400).json({ error: result.error }); return; }
   res.json({ ok: true, record: result.record });
 });
 
-graphRouter.get('/:researchId', (req: express.Request, res: express.Response) => {
+graphRouter.get('/:researchId', auth, (req: express.Request, res: express.Response) => {
+  const research = Researches.findById(String(req.params.researchId));
+  if (!research || !canReadResearch((req as any).user, research)) {
+    res.status(404).json({ error: '未找到' });
+    return;
+  }
   const result: any = readGraph(String(req.params.researchId));
   if (result.error) { res.status(404).json({ error: result.error }); return; }
   res.json({
@@ -1195,6 +692,13 @@ graphRouter.get('/:researchId', (req: express.Request, res: express.Response) =>
 });
 
 graphRouter.get('/:researchId/image', downloadAuth, (req: express.Request, res: express.Response) => {
+  // 与上面的 graphRouter.get('/:researchId') 同口径: 图片走的是研究项目 bind_path 里的文件,
+  // 不能只凭 token 就放行 —— 否则换个 researchId 就能读别人项目里的图.
+  const research = Researches.findById(String(req.params.researchId));
+  if (!research || !canReadResearch((req as any).user, research)) {
+    res.status(404).json({ error: '未找到' });
+    return;
+  }
   const result: any = resolveGraphImage(String(req.params.researchId), req.query.path);
   if (result.error) { res.status(result.error.includes('不存在') ? 404 : 403).json({ error: result.error }); return; }
   res.sendFile(result.absPath);

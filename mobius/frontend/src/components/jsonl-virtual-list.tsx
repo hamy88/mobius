@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { registerDiagProbe, px } from '../services/scroll-diagnostics'
 
 export type VirtualListBlock = { key: string }
 
@@ -6,7 +7,9 @@ const DEFAULT_MIN_BLOCKS = 80
 const DEFAULT_OVERSCAN_PX = 900
 const DEFAULT_ESTIMATED_HEIGHT = 42
 
-function findScrollParent(node: HTMLElement | null): HTMLElement | null {
+// 从任意节点向上找可滚动祖先 (视图侧判断"当前停在哪个分组"要用同一个容器口径).
+// Walk up to the nearest scrollable ancestor; the view reuses it to detect the visible group.
+export function findScrollParent(node: HTMLElement | null): HTMLElement | null {
   let cur = node?.parentElement || null
   while (cur && cur !== document.body && cur !== document.documentElement) {
     const style = window.getComputedStyle(cur)
@@ -41,7 +44,11 @@ function MeasuredVirtualBlock({
     const node = ref.current
     if (!node) return
     const measure = () => {
-      const height = node.getBoundingClientRect().height
+      // offsetHeight = 纯布局高度, 不含 transform — 入场动画 (card-enter 等若用 scale)
+      // 期间量高不受影响; getBoundingClientRect 会把 transform 算进去, 缩放中的卡会
+      // 量出错误高度, 污染前缀和导致整列错位. (scrollRelativeTop 的定位计算仍用
+      // getBoundingClientRect — 那里要的正是视觉位置.)
+      const height = node.offsetHeight
       if (height > 0) onSize(blockKey, height)
     }
     measure()
@@ -74,6 +81,8 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
   scrollOffset = 0,
   onScrollToKeyDone,
   onScrollToEntryDone,
+  onNavigationCancel,
+  diagLabel,
 }: {
   blocks: TBlock[]
   renderBlock: (block: TBlock) => ReactNode
@@ -89,8 +98,10 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
   onScrollToKeyDone?: () => void
   // 具体条目已实际挂载并完成精确滚动时触发。搜索定位以此为完成点，不能只按轮次到位计时。
   onScrollToEntryDone?: () => void
-  diagLabel?: string
+  // 用户主动滚动、触摸或按下指针时停止自动定位，把视野控制权立即还给用户。
   onNavigationCancel?: () => void
+  // 诊断浮窗里的区块标题 (多份列表共存时用于区分); 不传则不注册探针.
+  diagLabel?: string
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   // scrollToKey 的滚动用 root: 两条渲染路径 (虚拟/非虚拟) 都挂这个 ref, 使跳转逻辑统一.
@@ -105,6 +116,25 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
   onScrollToKeyDoneRef.current = onScrollToKeyDone
   const onScrollToEntryDoneRef = useRef(onScrollToEntryDone)
   onScrollToEntryDoneRef.current = onScrollToEntryDone
+  const onNavigationCancelRef = useRef(onNavigationCancel)
+  onNavigationCancelRef.current = onNavigationCancel
+
+  useEffect(() => {
+    if (!scrollToKey) return
+    const root = scrollRootRef.current
+    if (!root) return
+    const scrollParent = findScrollParent(root)
+    if (!scrollParent) return
+    const cancel = () => onNavigationCancelRef.current?.()
+    scrollParent.addEventListener('wheel', cancel, { passive: true })
+    scrollParent.addEventListener('touchstart', cancel, { passive: true })
+    scrollParent.addEventListener('pointerdown', cancel, { passive: true })
+    return () => {
+      scrollParent.removeEventListener('wheel', cancel)
+      scrollParent.removeEventListener('touchstart', cancel)
+      scrollParent.removeEventListener('pointerdown', cancel)
+    }
+  }, [scrollToKey])
 
   useEffect(() => {
     const root = rootRef.current
@@ -198,6 +228,10 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
     if (!scrollToKey) return
     const root = scrollRootRef.current
     if (!root) return
+    // 精确条目定位 (下方 effect) 已能接管时必须停手: 两者目标不同 (轮次顶部 vs 条目居中), 且本
+    // effect 是 instant, 会把正在进行的 smooth 居中动画一把甩回轮次顶部; 滚动中内容高度持续变化,
+    // 两个 effect 反复互相打断 -> 页面"甩到顶又滑下来"的抽搐. 只在条目尚未挂载时用本 effect 预定位.
+    if (typeof scrollToEntryLineNo === 'number' && root.querySelector(`[data-jsonl-line-no="${scrollToEntryLineNo}"]`)) return
     const scrollParent = findScrollParent(root)
     if (!scrollParent) return
     const sel = `[data-block-key="${scrollToKey.replace(/["\\]/g, '\\$&')}"]`
@@ -228,12 +262,14 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
     const node = root.querySelector<HTMLElement>(`[data-jsonl-line-no="${scrollToEntryLineNo}"]`)
     if (!node) return
     // 这里用浏览器原生的 scrollIntoView，而不是复用 block 顶部的手工坐标：具体卡片可能
-    // 位于嵌套的 Round/Explore 容器内，原生实现会逐层选择正确的可滚动祖先。
+    // 位于嵌套的 Round/Explore 容器内，原生实现会逐层选择正确的可滚动祖先。group 的
+    // 虚拟化预定位仍是 instant，真实卡片挂载后这一段再 smooth 居中，兼顾远距离可靠性和观感。
     let doneTimer: ReturnType<typeof setTimeout> | null = null
     const raf = requestAnimationFrame(() => {
-      node.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' })
-      // 留一帧给浏览器提交滚动位置，再通知上层清 URL 定位参数。
-      doneTimer = setTimeout(() => onScrollToEntryDoneRef.current?.(), 0)
+      node.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+      // 不在动画起步时就清 URL 定位参数；给原生 smooth scroll 留出完成窗口，期间
+      // searchNavigationActive 继续阻止追底。若内容尺寸变化，本 effect 会重跑并重新校准。
+      doneTimer = setTimeout(() => onScrollToEntryDoneRef.current?.(), 500)
     })
     return () => { cancelAnimationFrame(raf); if (doneTimer) clearTimeout(doneTimer) }
   }, [scrollToEntryLineNo, contentVersion, heightVersion, scrollOffset])
@@ -251,6 +287,41 @@ export function VirtualizedBlockList<TBlock extends VirtualListBlock>({
     const tm = setTimeout(() => { onScrollToKeyDoneRef.current?.() }, 3000)
     return () => clearTimeout(tm)
   }, [scrollToKey])
+
+  // 浮窗探针: 列表用的是虚拟化还是全量渲染 —— 两条路径的"内容总高"来源不同, 追底追赶时
+  // 它是估算值还是真实值直接决定落点会不会漂.
+  // Panel probe: which render path is active, since the two derive total height differently.
+  const listDiagRef = useRef({ blocks: 0, total: 0, measured: 0, from: 0, to: 0, virtual: false })
+  listDiagRef.current = {
+    blocks: blocks.length,
+    total: layout.total,
+    measured: heightsRef.current.size,
+    from: visibleRange.start,
+    to: visibleRange.end,
+    virtual: blocks.length > minBlocks,
+  }
+  useEffect(() => {
+    if (!diagLabel) return
+    return registerDiagProbe(() => {
+      const diag = listDiagRef.current
+      const root = scrollRootRef.current
+      return {
+        key: `virtual-list:${diagLabel}`,
+        title: `列表渲染 (${diagLabel})`,
+        subtitle: diag.virtual ? '虚拟化' : '全量渲染',
+        rows: [
+          { label: '渲染路径', value: diag.virtual ? `虚拟化 (> ${minBlocks} 块)` : `全量渲染 (≤ ${minBlocks} 块)` },
+          { label: '块数', value: String(diag.blocks) },
+          { label: '估算总高', value: px(diag.total) },
+          { label: '实际根高', value: root ? px(root.getBoundingClientRect().height) : '—' },
+          { label: '已量高块数', value: `${diag.measured} / ${diag.blocks}` },
+          { label: '可见窗口', value: `${diag.from} ~ ${diag.to}` },
+          { label: 'contentVersion', value: String(contentVersion) },
+          { label: 'heightVersion', value: String(heightVersion) },
+        ],
+      }
+    })
+  }, [diagLabel, minBlocks, contentVersion, heightVersion])
 
   if (blocks.length <= minBlocks) {
     // 兜底 (非虚拟化) 路径: 每个 block 包一层带 data-block-key 的 div, 供 scrollToKey 查询.

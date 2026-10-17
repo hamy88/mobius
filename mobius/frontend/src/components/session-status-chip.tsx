@@ -28,8 +28,9 @@ function SessionStatusChipInner({
   else if (failed) { label = '失败'; tone = 'red' }
   else if (pending) { label = '启动中'; tone = 'amber'; pulse = true }
   else if (working) { label = '执行中'; tone = 'green'; pulse = true }
-  else if (waiting) { label = '待命'; tone = 'sky' }
-  else if (done) { label = '已结束'; tone = 'emerald' }
+  else if (waiting) { label = '待命中'; tone = 'sky' }
+  // 已结束与"空闲"同为灰 (任务收尾后不该再用高饱和的绿抢注意力)
+  else if (done) { label = '已结束'; tone = 'gray' }
 
   const toneMap: Record<Tone, { text: string; hoverBg: string; hoverBorder: string; dot: string }> = {
     gray:    { text: 'text-gray-400',    hoverBg: 'hover:bg-gray-500/10',    hoverBorder: 'hover:border-gray-500/20',    dot: 'bg-gray-400' },
@@ -45,13 +46,13 @@ function SessionStatusChipInner({
     <span
       data-tour="session-status"
       aria-label={`会话状态：${label}`}
-      className={`group h-[22px] rounded-full flex-shrink-0 border inline-flex items-center transition-all duration-200 ${alwaysShowLabel ? 'gap-1.5 px-2 border-[var(--border-color)]' : 'gap-0 px-0 border-transparent hover:gap-1.5 hover:px-2'} ${t.text} ${t.hoverBg} ${t.hoverBorder}`}
+      className={`group h-[22px] rounded-full flex-shrink-0 border border-transparent inline-flex items-center transition-all duration-200 ${alwaysShowLabel ? 'gap-1.5 px-2' : `gap-0 px-0 hover:gap-1.5 hover:px-2 ${t.hoverBorder}`} ${t.text} ${t.hoverBg}`}
     >
       <span className="relative inline-flex w-1.5 h-1.5 flex-shrink-0">
         {pulse && <span className={`absolute inset-0 rounded-full ${t.dot} animate-ping opacity-75`} />}
         <span className={`relative inline-flex rounded-full w-1.5 h-1.5 ${t.dot}`} />
       </span>
-      <span className={`overflow-hidden whitespace-nowrap text-[11px] transition-all duration-200 ${alwaysShowLabel ? 'max-w-16 opacity-100' : 'max-w-0 opacity-0 group-hover:max-w-16 group-hover:opacity-100'} ${pulse ? 'mobius-status-marquee' : ''}`}>
+      <span className={`overflow-hidden whitespace-nowrap text-[length:var(--fs-sm)] transition-all duration-200 ${alwaysShowLabel ? 'max-w-16 opacity-100' : 'max-w-0 opacity-0 group-hover:max-w-16 group-hover:opacity-100'} ${pulse ? 'mobius-status-marquee' : ''}`}>
         {label}
       </span>
     </span>

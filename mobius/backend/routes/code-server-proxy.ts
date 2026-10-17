@@ -19,9 +19,11 @@ import cookie from 'cookie';
 import { JWT_SECRET } from '../config';
 import { Projects } from '../repositories/projects';
 // @ts-ignore — service 仍是 .js
-import { canReadProject } from '../services/access-control';
+import { canReadProject, projectAllowsReaderWrite } from '../services/access-control';
 // @ts-ignore — service 仍是 .js
 import * as pool from '../services/code-server-pool';
+import { proxyTargetHost } from '../services/user-isolation/code-server';
+import { codeServerAllowedFor } from '../services/user-isolation';
 // @ts-ignore — service 仍是 .js
 import { resolveCodeServerWorkspace, validateCodeServerPayload } from '../services/code-server-workspace';
 
@@ -119,13 +121,14 @@ interface WorkspaceResult {
   code?: string;
 }
 
-function pickWorkspace(project: any, rawUrl: string, k: string): WorkspaceResult {
+function pickWorkspace(project: any, rawUrl: string, k: string, user: { id: string; role?: string }): WorkspaceResult {
   const hasFolder = hasQueryParam(rawUrl, 'folder');
+  const isAdmin = user.role === 'admin';
   if (!hasFolder) {
     const existing = liveEntry(k);
     if (existing?.bindPath) return { workspacePath: existing.bindPath, hasFolder };
   }
-  const resolved: any = resolveCodeServerWorkspace(project, queryParam(rawUrl, 'folder'));
+  const resolved: any = resolveCodeServerWorkspace(project, queryParam(rawUrl, 'folder'), String(user.id), isAdmin);
   return { ...resolved, hasFolder };
 }
 
@@ -155,6 +158,7 @@ function checkProjectAccess(user: { id: string; role?: string } | null, projectI
   const p = Projects.findById(projectId);
   if (!p) return { ok: false, status: 404, msg: '项目不存在' };
   if (!canReadProject(user, p)) return { ok: false, status: 404, msg: '项目不存在' };
+  if (!projectAllowsReaderWrite(user, p, 'code_server')) return { ok: false, status: 403, msg: '当前项目角色没有代码工作区权限' };
   if (!p.bind_path) return { ok: false, status: 400, msg: '项目未配置 bind_path' };
   return { ok: true, project: p };
 }
@@ -184,6 +188,12 @@ router.use(async (req: express.Request, res: express.Response, next: express.Nex
     return;
   }
 
+  // landlock 隔离模式下普通用户禁止一切 code-server 访问 (逃逸面, 2026-10-13 用户决策).
+  if (!codeServerAllowedFor(user)) {
+    res.status(403).send('code-server 在 landlock 隔离模式下仅管理员可用');
+    return;
+  }
+
   const acc = checkProjectAccess(user, parsed.projectId);
   if (!acc.ok) {
     res.status(acc.status).send(acc.msg);
@@ -200,7 +210,7 @@ router.use(async (req: express.Request, res: express.Response, next: express.Nex
     return;
   }
 
-  const workspace = pickWorkspace(acc.project, req.originalUrl, parsed.key);
+  const workspace = pickWorkspace(acc.project, req.originalUrl, parsed.key, user);
   if (workspace.error) {
     if (workspace.code === 'BIND_PATH_DENIED') {
       res.status(403).send(workspace.error);
@@ -209,7 +219,7 @@ router.use(async (req: express.Request, res: express.Response, next: express.Nex
     res.status(404).send(workspace.error);
     return;
   }
-  const payloadCheck: any = validateCodeServerPayload(acc.project, queryParam(req.originalUrl, 'payload'), workspace.workspacePath);
+  const payloadCheck: any = validateCodeServerPayload(acc.project, queryParam(req.originalUrl, 'payload'), workspace.workspacePath, String(user.id), user.role === 'admin');
   if (!payloadCheck.ok) {
     res.status(403).send(payloadCheck.error);
     return;
@@ -241,7 +251,7 @@ router.use(async (req: express.Request, res: express.Response, next: express.Nex
       `$1${encodeURIComponent(workspace.workspacePath)}`,
     );
   }
-  proxy.web(req, res, { target: `http://127.0.0.1:${entry.port}` });
+  proxy.web(req, res, { target: `http://${proxyTargetHost(parsed.userId)}:${entry.port}` });
 });
 
 async function handleUpgrade(req: any, socket: any, head: Buffer): Promise<void> {
@@ -253,11 +263,13 @@ async function handleUpgrade(req: any, socket: any, head: Buffer): Promise<void>
   if (!found) { socket.destroy(); return; }
   const user = verifyJwt(found.token);
   if (!user || user.id !== parsed.userId) { socket.destroy(); return; }
+  // 同 HTTP 分支: landlock 模式下普通用户禁止一切 code-server 访问.
+  if (!codeServerAllowedFor(user)) { socket.destroy(); return; }
 
   const acc = checkProjectAccess(user, parsed.projectId);
   if (!acc.ok) { socket.destroy(); return; }
 
-  const workspace = pickWorkspace(acc.project, req.url, parsed.key);
+  const workspace = pickWorkspace(acc.project, req.url, parsed.key, user);
   if (workspace.error) { socket.destroy(); return; }
 
   let entry: { port: number; [k: string]: any };
@@ -271,7 +283,7 @@ async function handleUpgrade(req: any, socket: any, head: Buffer): Promise<void>
   pool.touch(parsed.key);
 
   req.url = parsed.rest + (req.url.includes('?') ? '?' + req.url.split('?').slice(1).join('?') : '');
-  proxy.ws(req, socket, head, { target: `ws://127.0.0.1:${entry.port}` });
+  proxy.ws(req, socket, head, { target: `ws://${proxyTargetHost(parsed.userId)}:${entry.port}` });
 }
 
 const adminRouter = express.Router();

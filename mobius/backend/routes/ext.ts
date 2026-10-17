@@ -32,6 +32,7 @@ import * as buildPipeline from '../services/extension-build-pipeline';
 import { runSessionMessage } from '../services/session-message-runner';
 import { MOBIUS_KIND } from '../services/mobius-kinds';
 import { buildDesignerEyeLoaderInjection } from '../services/designer-eye-loader';
+import { isWithin, joinWithin } from '../services/file-access';
 
 // ===== meta router =====
 const metaRouter = express.Router();
@@ -52,12 +53,9 @@ function safeFileName(name: unknown): string {
   return (base || 'source.bin').slice(0, 180);
 }
 
-function safeResolveUnder(root: string, ...parts: string[]): string | null {
-  const base = path.resolve(root);
-  const abs = path.resolve(base, ...parts);
-  if (abs !== base && !abs.startsWith(base + path.sep)) return null;
-  return abs;
-}
+// 越界判断统一走 file-access.joinWithin (原先此处自带一份实现)
+// Containment goes through file-access.joinWithin instead of a local copy
+const safeResolveUnder = joinWithin;
 
 // 拓展列表 (公开给已登录用户; 拓展项目卡片在前端项目页就要它).
 metaRouter.get('/', auth, (req: express.Request, res: express.Response) => {
@@ -688,7 +686,7 @@ function desktopHostBarInjection(title: string): string {
     bar.innerHTML = [
       '<div class="mobius-desktop-hostbar__title"></div>',
       '<div class="mobius-desktop-hostbar__drag" data-action="drag" aria-hidden="true"></div>',
-      '<mobius-desktop-page-actions back-fallback="/" welcome-path="/welcome" visualization-path="/u/fuqingxu/mobius_overview_cluster"></mobius-desktop-page-actions>',
+      '<mobius-desktop-page-actions back-fallback="/" welcome-path="/welcome" visualization-path="/u/mobius/mobius_overview_cluster"></mobius-desktop-page-actions>',
       '<div class="mobius-desktop-hostbar__controls" aria-label="窗口控制">',
       '  <button type="button" class="mobius-desktop-hostbar__button" data-action="minimize" title="最小化" aria-label="最小化"><svg viewBox="0 0 11 11" aria-hidden="true"><rect y="4.6" width="11" height="1.8" fill="currentColor"/></svg></button>',
       '  <button type="button" class="mobius-desktop-hostbar__button" data-action="maximize" title="最大化" aria-label="最大化"><svg class="mobius-desktop-hostbar__max" viewBox="0 0 11 11" aria-hidden="true"><rect x="0.7" y="0.7" width="9.6" height="9.6" fill="none" stroke="currentColor" stroke-width="1"/></svg><svg class="mobius-desktop-hostbar__max-restore" viewBox="0 0 11 11" aria-hidden="true"><rect x="1" y="3.2" width="6.4" height="6.4" fill="none" stroke="currentColor" stroke-width="1"/><path d="M3.2 3.2 V1 H9.6 V7.4 H7.4" fill="none" stroke="currentColor" stroke-width="1"/></svg></button>',
@@ -885,8 +883,7 @@ tick();
 
 function safeResolveAsset(distDir: string, rel: string): string | null {
   const abs = path.resolve(distDir, rel.replace(/^\/+/, ''));
-  if (abs !== distDir && !abs.startsWith(distDir + path.sep)) return null;
-  return abs;
+  return isWithin(distDir, abs) ? abs : null;
 }
 
 // 单一 handler 处理 /extension/<name> 和 /extension/<name>/<rel>...
@@ -1112,7 +1109,7 @@ unprefixedNextRouter.get('/*', (req: express.Request, res: express.Response) => 
     const distDir = path.join(entry.frontend_dir, 'dist');
     const nextRoot = path.resolve(distDir, '_next');
     const abs = path.resolve(nextRoot, rel);
-    if (abs !== nextRoot && !abs.startsWith(nextRoot + path.sep)) continue;
+    if (!isWithin(nextRoot, abs)) continue;
     if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
       const ext = path.extname(abs).toLowerCase();
       const mime = MIME[ext];

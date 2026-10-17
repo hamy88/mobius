@@ -1,5 +1,7 @@
 const { tmux } = require('./tmux-operation-log')
 
+// Head and tail of a tmux window's text, joined with a newline. The head capture is
+// skipped when the history is too short to reach it (historySize <= 2 * captured lines).
 function take_tmux_window_text(target: string, capture_head_and_tail_line: number = 100) {
   const tailCap = tmux(['capture-pane', '-pt', target, '-p', '-S', `-${capture_head_and_tail_line}`])
   const hs = tmux(['display-message', '-p', '-t', target, '#{history_size}'])

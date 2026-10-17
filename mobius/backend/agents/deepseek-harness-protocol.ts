@@ -5,9 +5,10 @@ class HarnessProtocolError extends Error {
   data: any
 }
 
+// JSON-RPC 2.0 over a child process' stdin/stdout, as the DeepSeek Harness runtime speaks it.
 class HarnessJsonRpcPeer {
-  // constructor 裸赋值属性的字段声明 (TS2339).
-  child: any // ChildProcess-like (spawn 返回值, 测试注入 fake)
+  // Declared up front: TS requires it for properties assigned bare in the constructor (TS2339).
+  child: any // ChildProcess-like: the spawn return value, or a fake injected by tests
   requestTimeoutMs: number
   onNotification: (method: string, params: any) => void
   onProtocolError: (error: Error) => void
@@ -16,6 +17,8 @@ class HarnessJsonRpcPeer {
   closed: boolean
   reader: any // readline.Interface
 
+  // Reads stdout line by line; the child exiting or erroring closes the peer, which fails
+  // every request still in flight.
   constructor(child: any, { requestTimeoutMs = 30000, onNotification = () => {}, onProtocolError = () => {} }: { requestTimeoutMs?: number; onNotification?: (method: string, params: any) => void; onProtocolError?: (error: Error) => void } = {}) {
     this.child = child
     this.requestTimeoutMs = requestTimeoutMs
@@ -30,6 +33,8 @@ class HarnessJsonRpcPeer {
     child.once('error', (error: Error) => this.close(error))
   }
 
+  // One stdout line: a frame carrying an id answers a pending request, one carrying a method
+  // is a notification. A line that is not JSON is reported as a protocol error and dropped.
   _onLine(line: string) {
     if (!line.trim()) return
     let frame
@@ -54,6 +59,8 @@ class HarnessJsonRpcPeer {
     if (typeof frame.method === 'string') this.onNotification(frame.method, frame.params || {})
   }
 
+  // Send a request and resolve on its matching response. Rejects on timeout, on a write
+  // failure, or when the transport is already closed.
   request(method: string, params?: any, timeoutMs: number = this.requestTimeoutMs): Promise<any> {
     if (this.closed || !this.child.stdin?.writable) return Promise.reject(new HarnessProtocolError('runtime transport is closed'))
     const id = String(this.nextId++)
@@ -74,6 +81,7 @@ class HarnessJsonRpcPeer {
     })
   }
 
+  // Fail every in-flight request and stop reading. Safe to call more than once.
   close(reason: Error = new HarnessProtocolError('runtime transport closed')) {
     if (this.closed) return
     this.closed = true

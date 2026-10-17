@@ -16,11 +16,14 @@ import { buildVscodeUrl } from './project-files'
 // =====================================================================
 export type VSCodeOpenContextValue = {
   openLocalPath: (absPath: string) => string | null
+  // 无 code-server 权限 (landlock 隔离下的普通用户) 时: 不跳 VSCode, 改为在原生文件编辑器打开.
+  codeServerAllowed: boolean
+  projectId?: string | null
 }
 
 export const VSCodeOpenContext = createContext<VSCodeOpenContextValue | null>(null)
 
-type ProjectMeta = { bind_path?: string; vscode_web_url?: string; vscode_workspace_path?: string }
+type ProjectMeta = { bind_path?: string; vscode_web_url?: string; vscode_workspace_path?: string; codeServerAllowed: boolean }
 
 function normalizeFsPath(value?: string): string {
   const trimmed = (value || '').trim()
@@ -73,6 +76,7 @@ export function VSCodeOpenProvider({ projectId, children }: { projectId?: string
           bind_path: data?.bind_path || '',
           vscode_web_url: data?.vscode_web_url || '',
           vscode_workspace_path: data?.vscode_workspace_path || data?.bind_path || '',
+          codeServerAllowed: data?.code_server_allowed !== false,
         }
         metaRef.current = meta
         pendingRef.current = null
@@ -103,7 +107,11 @@ export function VSCodeOpenProvider({ projectId, children }: { projectId?: string
   // the very first link click resolves synchronously.
   if (projectId && !metaRef.current && !pendingRef.current) loadMeta()
 
-  const value = useMemo(() => ({ openLocalPath }), [openLocalPath])
+  const allowed = metaRef.current ? metaRef.current.codeServerAllowed : true
+  const value = useMemo(
+    () => ({ openLocalPath, codeServerAllowed: allowed, projectId }),
+    [openLocalPath, projectId, allowed],
+  )
   return <VSCodeOpenContext.Provider value={value}>{children}</VSCodeOpenContext.Provider>
 }
 
@@ -117,30 +125,6 @@ export function isLikelyFilesystemPath(href: string): boolean {
   if (!href || href.startsWith('//')) return false
   if (!href.startsWith('/')) return false
   return FS_PATH_PREFIXES.some(p => href.startsWith(p))
-}
-
-// 打包/二进制产物扩展名: agent 消息里的这类文件链接 ([netwatch.fpk](/data/...))
-// 对用户的价值是"保存到本地"而不是"在线编辑"。统一改写成 GET /api/download
-// (downloadAuth, token 走 query), 浏览器原生触发下载 — 手机浏览器点开 VSCode Web
-// 编辑器对二进制包毫无意义。代码/文本类扩展名不在此列, 保留跳转 VSCode 的行为。
-const DOWNLOADABLE_EXTS = [
-  '.fpk', '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
-  '.apk', '.ipa', '.deb', '.rpm', '.exe', '.msi', '.dmg', '.pkg',
-  '.iso', '.img', '.bin', '.fpk', '.whl', '.jar', '.war',
-  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.epub',
-  '.mp3', '.mp4', '.wav', '.flac', '.mov', '.mkv', '.avi',
-]
-export function isDownloadableFilePath(href: string): boolean {
-  if (!isLikelyFilesystemPath(href)) return false
-  const clean = href.split('?')[0].split('#')[0].toLowerCase()
-  return DOWNLOADABLE_EXTS.some(ext => clean.endsWith(ext))
-}
-
-// 绝对路径文件 → 浏览器可直接下载的 URL (与 FileManager / resolveMediaSrc 同款:
-// /api/download + query token, downloadAuth 只服务用户可读路径)。
-export function fileDownloadUrl(absPath: string): string {
-  const token = typeof window !== 'undefined' ? (localStorage.getItem('cc-token') || '') : ''
-  return `/api/download?path=${encodeURIComponent(absPath)}${token ? `&token=${encodeURIComponent(token)}` : ''}`
 }
 
 // 把一个外链 http(s) / 协议相对 // 媒体 URL 改写成走同源后端代理.

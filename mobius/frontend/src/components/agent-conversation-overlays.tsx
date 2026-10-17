@@ -9,9 +9,9 @@ import { filterDisplayDuplicates } from './viewer/display-dedup'
 import { hideRepeatedEncryptedReasoning, trimBeforeInitialContext } from './viewer/visibility-rules'
 import { pollRecursive } from '../services/polling'
 import { clampOverlayToBounds, resolveOverlayCollisions, type OverlayCollisionItem } from '../services/overlay-collision'
-import { readJsonlCacheFromIdb, readJsonlCacheSync, writeJsonlCache } from '../services/session-jsonl-cache'
+import { getHistoryStore } from '../services/agent-history-store'
 import { preloadSessionInputCache, prependSessionInputCache, readSessionInputCache, refreshSessionInputCache, type SessionInputEntry } from '../services/session-input-cache'
-import { RemoteFileMentionDrawer, type AgentMentionMode, type MentionAgentSession } from './chat'
+import { RemoteFileMentionDrawer, type AgentMentionMode, type MentionAgentSession } from './mention-drawer'
 import type { AnyEntry } from './viewer/types'
 
 type OverlaySession = { id: string; title: string; projectId: string; projectName: string; creatorId?: string; parentId: string; parentKind: 'issue' | 'research'; color: string; x: number; y: number; active: boolean }
@@ -242,6 +242,15 @@ function visibleOverlayEntries(raw: AnyEntry[]): AnyEntry[] {
   return visible.slice(-10).map((item) => item.entry)
 }
 
+// 协商/SSE 重连期间，history store 可能短暂只有组元数据，flattenEntries()
+// 会返回空数组。不要让这个瞬时空快照覆盖浮窗里已经显示的历史消息；
+// 等整组条目重新装载后再用有效数据更新。
+function updateVisibleEntries(setState: (updater: (prev: OverlayState) => OverlayState) => void, visible: AnyEntry[]) {
+  setState((prev) => visible.length > 0 || prev.entries.length === 0
+    ? { ...prev, entries: visible, error: undefined }
+    : prev)
+}
+
 function SessionOverlay({ session, state, compact, setState, onClose, onOpenSession, positionRef, transformRef, register }: { session: OverlaySession; state: OverlayState; compact: boolean; setState: (updater: (prev: OverlayState) => OverlayState) => void; onClose: () => void; onOpenSession: () => void; positionRef: MutableRefObject<Record<string, OverlayPosition>>; transformRef: MutableRefObject<OverlayTransform>; register: (id: string, panel: HTMLDivElement | null, line: SVGLineElement | null) => void }) {
   const [mentionDrawerOpen, setMentionDrawerOpen] = useState(false)
   const [selectedAgentMentions, setSelectedAgentMentions] = useState<Array<{ sessionId: string; name: string; mode: AgentMentionMode }>>([])
@@ -269,13 +278,14 @@ function SessionOverlay({ session, state, compact, setState, onClose, onOpenSess
   useEffect(() => { register(session.id, panelRef.current, lineRef.current); return () => register(session.id, null, null) }, [register, session.id])
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const data: any = await api(`/api/sessions/${encodeURIComponent(session.id)}/jsonl-history?tail_count=80`, signal ? { signal } : undefined)
-      const raw = Array.isArray(data) ? data : (data?.entries || data?.jsonl || [])
+      // 历史存储: 协商 (常态 304) + 已加载组刷新后摊平取尾部. SSE 已接管实时增量, 轮询仅作兜底对账.
+      const store = getHistoryStore(session.id)
+      await store.negotiate()
       if (signal?.aborted) return
       liveDataRef.current = true
+      const raw = store.flattenEntries().slice(-80)
       const visible = visibleOverlayEntries(raw)
-      writeJsonlCache(session.id, raw, Number(data?.total || raw.length), typeof data?.path === 'string' ? data.path : null)
-      setStateRef.current((prev) => ({ ...prev, entries: visible, error: undefined }))
+      updateVisibleEntries(setStateRef.current, visible)
     } catch (e: any) {
       // A timed-out polling request is expected and should not surface as an error or
       // trigger another React render. pollRecursive aborts these requests after 10s.
@@ -285,16 +295,65 @@ function SessionOverlay({ session, state, compact, setState, onClose, onOpenSess
   }, [session.id])
   useEffect(() => {
     liveDataRef.current = false
-    const cached = readJsonlCacheSync(session.id)
-    if (cached?.entries?.length) setStateRef.current((prev) => ({ ...prev, entries: visibleOverlayEntries(cached.entries) }))
-    let cancelled = false
-    void readJsonlCacheFromIdb(session.id).then((cachedIdb) => {
-      if (cancelled || liveDataRef.current || !cachedIdb?.entries?.length) return
-      setStateRef.current((prev) => ({ ...prev, entries: visibleOverlayEntries(cachedIdb.entries) }))
+    // 先渲染本地缓存秒显, 轮询到达后由 ① 协商覆盖.
+    const store = getHistoryStore(session.id)
+    void store.hydrateFromCache().then(() => {
+      if (liveDataRef.current) return
+      const cached = store.flattenEntries().slice(-80)
+      if (cached.length) updateVisibleEntries(setStateRef.current, visibleOverlayEntries(cached))
     })
     const stop = pollRecursive((signal) => load(signal), 10_000)
-    return () => { cancelled = true; stop() }
+    return () => { stop() }
   }, [load, session.id])
+  // SSE 实时增量: 悬浮窗不再只靠 10s 轮询驱动, 而是订阅该会话的 /events 事件流.
+  // group_created / entries / pending_opener 到货即写入 history store, 由 store 订阅
+  // 立即刷新可见条目 (轮询仍保留作断线/兜底对账). 事件早于协商到达时 store 内部先缓冲,
+  // 协商完成后按水位线对账并 emit, 订阅同样会触发刷新.
+  useEffect(() => {
+    const store = getHistoryStore(session.id)
+    const refreshVisible = () => {
+      const raw = store.flattenEntries().slice(-80)
+      updateVisibleEntries(setStateRef.current, visibleOverlayEntries(raw))
+    }
+    const unsubscribe = store.subscribe(refreshVisible)
+
+    const token = localStorage.getItem('cc-token')
+    if (!token) return unsubscribe
+
+    let source: EventSource | null = null
+    let closed = false
+    const connect = () => {
+      if (closed) return
+      if (source) { try { source.close() } catch {} }
+      source = new EventSource(`/api/sessions/${encodeURIComponent(session.id)}/events?token=${encodeURIComponent(token)}`)
+      source.onopen = () => {
+        // 重连 = stateless 对账: 常态 304, 断线差额由水位线整组重拉补齐.
+        void store.negotiate()
+      }
+      const handle = (e: MessageEvent) => {
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.session_id && msg.session_id !== session.id) return
+          if (msg.event === 'group_created' || msg.event === 'entries' || msg.event === 'pending_opener') {
+            store.applySseEvent(msg)
+          }
+        } catch {}
+      }
+      ;['group_created', 'entries', 'pending_opener'].forEach((ev) => source?.addEventListener(ev, handle))
+    }
+    connect()
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!source || source.readyState === EventSource.CLOSED) connect()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      closed = true
+      unsubscribe()
+      document.removeEventListener('visibilitychange', onVisibility)
+      try { source?.close() } catch {}
+    }
+  }, [session.id])
   useLayoutEffect(() => {
     const frame = requestAnimationFrame(() => {
       const element = messagesRef.current

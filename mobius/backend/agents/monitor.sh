@@ -1,16 +1,16 @@
 #!/bin/sh
-# monitor.sh - 循环轮询一个 agent session 的状态 (每 3s 一轮).
+# monitor.sh - poll one agent session's status in a loop, one round every 3s.
 #
-# 用法:
+# Usage:
 #   bash mobius/backend/agents/monitor.sh --session=<sessionId> --type=<claude|codex|deepseek>
 #   bash mobius/backend/agents/monitor.sh --session=b89eb46e --type=claude
-# 每轮打印:
+# Each round prints:
 #   isAlive / isWorking / getRecentError / getHistory / getSessionTitle / realTimeInfo
 #
-# 说明: 直接 require 后端 AgentBackend 单例 (与 server 同一套持久化映射文件),
-# 只读查询, 不创建/终止 session. Ctrl-C 退出.
-# 自动加载仓库根 .env / .env.default (已有环境变量优先),
-# 否则 config.js 回落容器默认 DB_PATH=/data 导致 EACCES.
+# Notes: requires the AgentBackend singleton directly, sharing the server's persisted
+# mapping files. Read-only: never creates or terminates a session. Ctrl-C to exit.
+# Loads the repo-root .env / .env.default first (existing env vars win); without them
+# config.js falls back to the container DB_PATH=/data, which fails with EACCES.
 set -eu
 
 SESSION_ID=""
@@ -32,10 +32,10 @@ if [ -z "$SESSION_ID" ] || [ -z "$AGENT_TYPE" ]; then
   exit 1
 fi
 
-# 脚本在 agents/ 目录下, 保证相对 require 可解析
+# Run from agents/ so the relative requires resolve
 cd "$(dirname "$0")"
 
-# backend services 是 .ts, 与 server 同款 tsx hook 加载
+# Backend services are .ts, loaded through the same tsx hook the server uses
 TSX="$PWD/../../node_modules/.bin/tsx"
 if [ ! -x "$TSX" ]; then
   echo "找不到 tsx: $TSX (需要在 mobius/ 下 npm install)" >&2
@@ -46,8 +46,9 @@ export MONITOR_SESSION_ID="$SESSION_ID"
 export MONITOR_AGENT_TYPE="$AGENT_TYPE"
 
 exec node --require "$PWD/../../node_modules/tsx/dist/cjs/index.cjs" - <<'EOF'
-// 先加载仓库根 .env -> .env.default (与 start_product.py 同序; 已有环境变量优先),
-// 必须在 require('./index') 之前: config.js 在模块加载期就读 process.env.
+// Load the repo-root .env then .env.default, in the same order start_product.py uses
+// (existing env vars win). This must happen before require('./index'): config.js reads
+// process.env while the module is loading.
 ;(() => {
   const fs = require('fs')
   const path = require('path')
@@ -85,7 +86,7 @@ if (!backendName) {
 const backend = get(backendName)
 console.log(`[monitor] backend=${backendName} session=${sessionId} (Ctrl-C 退出)`)
 
-// 单值压成一行可读文本; 超长截断, 避免刷屏.
+// Squash a value into one readable line; truncate long ones rather than flooding the terminal.
 function fmt(value, maxLen = 300) {
   let text
   if (value === null || value === undefined) text = String(value)
@@ -97,7 +98,7 @@ function fmt(value, maxLen = 300) {
   return text.length > maxLen ? text.slice(0, maxLen) + ` …(共${text.length}字符)` : text
 }
 
-// getHistory 可能是几百条 entry, 只打摘要 + 末条预览.
+// A history can hold hundreds of entries, so print a summary plus the last entry.
 function fmtHistory(hist) {
   if (!hist || typeof hist !== 'object') return fmt(hist)
   const entries = Array.isArray(hist.entries) ? hist.entries : []
@@ -108,6 +109,7 @@ function fmtHistory(hist) {
   return `entries=${entries.length} sentinel=${fmt(hist.sentinel, 80)} | ${lastPreview}`
 }
 
+// Run a probe, turning a thrown error into readable text.
 function safe(fn, fallback = '(调用失败)') {
   try { return fn() } catch (e) { return `(调用失败: ${e?.message || e})` }
 }

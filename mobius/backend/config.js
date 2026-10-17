@@ -7,32 +7,14 @@ const DEFAULT_AGENT_BACKEND = 'tmux-codex';
 // caller's/default tmux server. `tmux -L` accepts a socket name, not a path.
 const AGENT_TMUX_SOCKET = String(process.env.MOBIUS_AGENT_TMUX_SOCKET || 'mobius-agent').trim() || 'mobius-agent';
 
-// 工作区根: 每个用户的 work_dir = WORKSPACE_ROOT/<userId>,
-// 新建项目的 bind_path 必须落在该用户 work_dir 之内 (见 routes/projects.js resolveBindPath)。
+// 工作区根, 也是唯一的工作区根: 每个账号的 work_dir = WORKSPACE_ROOT/<userId>,
+// 新建项目的 bind_path 必须落在该用户 work_dir 之内 (见 routes/projects.ts resolveBindPath)。
+// 普通用户只允许在工作区根下创建工作目录 (见 repositories/users.ts assertWorkDirAssignable);
+// 管理员可以显式指定别处 (例如自己的家目录)。
 // 容器默认把持久化工作区放在 /data/workspace; 现有部署通过 .env 显式覆盖旧路径以免迁移。
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || '/data/workspace';
 function workDirFor(userId) {
   return path.join(WORKSPACE_ROOT, String(userId));
-}
-
-// 员工账号默认工作区父目录。容器默认仍在 /data/workspace 下; 当前本机部署
-// 通过 .env 覆盖为 /home, 保留 /home/<userId>/cc-workspace 语义。
-const HOME_WORKSPACE_ROOT = process.env.HOME_WORKSPACE_ROOT || path.join(WORKSPACE_ROOT, 'home');
-function homeWorkDirFor(userId) {
-  return path.join(HOME_WORKSPACE_ROOT, String(userId), 'cc-workspace');
-}
-
-function defaultLocalWorkspaceRoot() {
-  return path.join(WORKSPACE_ROOT, '_employees');
-}
-
-const LOCAL_WORKSPACE_ROOT = process.env.LOCAL_WORKSPACE_ROOT || defaultLocalWorkspaceRoot();
-function fallbackWorkDirFor(userId) {
-  return path.join(LOCAL_WORKSPACE_ROOT, String(userId));
-}
-const LEGACY_LOCAL_WORKSPACE_ROOT = path.join(TEST_ROOT, 'workspace');
-function legacyFallbackWorkDirFor(userId) {
-  return path.join(LEGACY_LOCAL_WORKSPACE_ROOT, String(userId));
 }
 
 const MOBIUS_DATA_PATH = process.env.MOBIUS_DATA_PATH || '/data';
@@ -69,6 +51,13 @@ const BACKEND_WORKER_LOG_DIR = path.join(CORE_DATA_PATH, 'backend_worker_log');
 const TOKEN_PROXY_HOST = process.env.MOBIUS_TOKEN_PROXY_HOST || '127.0.0.1';
 const TOKEN_PROXY_PORT = parseInt(process.env.MOBIUS_TOKEN_PROXY_PORT || '45630', 10);
 const TOKEN_PROXY_BASE_URL = `http://${TOKEN_PROXY_HOST}:${TOKEN_PROXY_PORT}`;
+
+// 用户隔离模式: landlock (默认, 现状) | docker (普通用户执行面进沙箱容器).
+// 真正的消费与校验在 backend/services/user-isolation/config.ts; 这里读取仅作
+// 第三道闸登记与 CJS 侧导出. USER_ISOLATION_DOCKER_IMAGE 在 docker 模式下必填,
+// 留空 = 启动自检 fail-closed (禁止普通用户, admin 不受影响).
+const USER_ISOLATION_METHOD = process.env.USER_ISOLATION_METHOD || 'landlock';
+const USER_ISOLATION_DOCKER_IMAGE = process.env.USER_ISOLATION_DOCKER_IMAGE || '';
 
 function parseMobiusSshPort(raw) {
   const text = String(raw || '').trim();
@@ -117,6 +106,31 @@ function modelKeyFor(modelOrKey) {
 function backendNameForModel(modelOrKey) {
   const key = modelKeyFor(modelOrKey);
   return key ? MODEL_OPTIONS[key].backend : DEFAULT_AGENT_BACKEND;
+}
+
+const FORGOTTEN_FLAG_GUIDANCE =
+  'It seems that the running flag is still present, did you encounter any problems? ' +
+  '(1) If you cannot solve the problem, please run `declare_job_failed <session_or_agent_id> "failure reason"` to write `failed.flag` and remove `running.flag`. ' +
+  '(2) If you have already finished the job and forgot about the flag, run `declare_job_done <session_or_agent_id>`. ' +
+  '(3) If you are waiting for some callback or schedule, just state what you are waiting for and keep waiting.';
+const DEFAULT_FORGOTTEN_FLAG_MESSAGE =
+  `[A message that comes from the system, not the user]: ${FORGOTTEN_FLAG_GUIDANCE}`;
+const LEGACY_FORGOTTEN_FLAG_GUIDANCE =
+  'It seems that the running flag is still present; did you encounter any problems? ' +
+  '(1) If you cannot solve the problem, please delete `running.flag` and add a `failed.flag`. ' +
+  '(2) If you have already finished the job and forgot about the flag, delete it. ' +
+  '(3) If you are waiting for some callback or schedule, just state what you are waiting for and keep waiting.';
+const LEGACY_FORGOTTEN_FLAG_MESSAGES = Object.freeze([
+  LEGACY_FORGOTTEN_FLAG_GUIDANCE,
+  `[A message that comes from the system, not the user]: ${LEGACY_FORGOTTEN_FLAG_GUIDANCE}`,
+  LEGACY_FORGOTTEN_FLAG_GUIDANCE.replace('present;', 'present,'),
+  `[A message that comes from the system, not the user]: ${LEGACY_FORGOTTEN_FLAG_GUIDANCE.replace('present;', 'present,')}`,
+]);
+
+function normalizeForgottenFlagMessage(value) {
+  const message = String(value ?? '');
+  const legacy = LEGACY_FORGOTTEN_FLAG_MESSAGES.find((candidate) => message.startsWith(candidate));
+  return legacy ? DEFAULT_FORGOTTEN_FLAG_MESSAGE + message.slice(legacy.length) : message;
 }
 
 module.exports = {
@@ -172,12 +186,6 @@ module.exports = {
 
   WORKSPACE_ROOT,
   workDirFor,
-  HOME_WORKSPACE_ROOT,
-  homeWorkDirFor,
-  LOCAL_WORKSPACE_ROOT,
-  fallbackWorkDirFor,
-  LEGACY_LOCAL_WORKSPACE_ROOT,
-  legacyFallbackWorkDirFor,
 
   // 拓展系统: APP_DIR = TEST_ROOT (mobius 源码所在仓库根). 特殊拓展项目的 bind_path
   // 锁死指向这里, 不启用 worktree / research. 拓展代码扫描 mobius/extension/*/,
@@ -199,16 +207,17 @@ module.exports = {
   EXT_PUSH_ENABLED: process.env.MOBIUS_EXT_PUSH_ENABLED !== '0',
   // 负责推送的扩展 name (其 handler 实现 notify_user). 默认 momo-mobile.
   EXT_PUSH_EXTENSION_NAME: process.env.MOBIUS_EXT_PUSH_EXTENSION_NAME || 'momo-mobile',
+  // 桌面端/移动端 Release 同步器: 从该 GitHub 仓库拉取最新 Release 资产并落到 /mobile-builds/.
+  // 三道闸: boot_utils.RUNTIME_SETTINGS + ecosystem.config.js envKeys + 这里.
+  MOBIUS_MOBILE_SYNC_REPO: String(process.env.MOBIUS_MOBILE_SYNC_REPO || '').trim(),
+  GITHUB_TOKEN_DESKTOP: String(process.env.GITHUB_TOKEN_DESKTOP || '').trim(),
 
   // forgotten-flag-scanner 检测到 "agent 停工但 running.flag 未删" 时, 自动发给
   // 该 session 的默认提醒文案 (单一真相源). 项目可在设置里用 forgotten_flag_message
   // 覆盖; 前端把本文案预填进输入框, 清空保存 → 存 NULL → scanner 仍回退到这里.
-  DEFAULT_FORGOTTEN_FLAG_MESSAGE:
-    '[A message that comes from the system, not the user]: ' +
-    'It seems that the running flag is still present, did you encounter any problems? ' +
-    '(1) If you cannot solve the problem, please delete `running.flag` and add a `failed.flag`. ' +
-    '(2) If you have already finished the job and forgot about the flag, delete it. ' +
-    '(3) If you are waiting for some callback or schedule, just state what you are waiting for and keep waiting.',
+  DEFAULT_FORGOTTEN_FLAG_MESSAGE,
+  LEGACY_FORGOTTEN_FLAG_MESSAGES,
+  normalizeForgottenFlagMessage,
   DEFAULT_FORGOTTEN_FLAG_ISSUE_INTERVAL_MINUTES: 10,
   DEFAULT_FORGOTTEN_FLAG_RESEARCH_INTERVAL_MINUTES: 30,
   DEFAULT_FORGOTTEN_FLAG_ISSUE_BACKOFF: 2,
@@ -227,6 +236,10 @@ module.exports = {
   TOKEN_PROXY_HOST,
   TOKEN_PROXY_PORT,
   TOKEN_PROXY_BASE_URL,
+
+  // 用户隔离模式 (消费见 backend/services/user-isolation/).
+  USER_ISOLATION_METHOD,
+  USER_ISOLATION_DOCKER_IMAGE,
 
   TEST_ROOT,
 };

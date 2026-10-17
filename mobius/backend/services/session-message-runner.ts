@@ -13,13 +13,14 @@ import { Messages } from '../repositories/messages';
 import { buildSessionContext, wrapUserMessage } from './session-context';
 import modelRegistry from './model-registry';
 import agents from '../agents';
+import { sessionPromptKind } from './mobius-kinds';
+import { buildMobiusPromptRecord } from './mobius-agent-history';
 import { resolveSessionWorkspace } from './workspace';
 import { appendSessionInput } from './session-inputs';
 import { syncSkillsToWorkspace } from './session-skills-sync';
 import { formatBackendSendFailure } from './session-errors';
 import { transferReferencePrompt } from './session-transfer';
 import { canOperateSession } from './access-control';
-import { detectAndEncrypt } from './secret-guard';
 import {
   normalizeAgentMentions,
   sessionMentionMetadata,
@@ -36,7 +37,8 @@ import {
   safeWriteFailedFlag,
 } from '../utils/session-flags';
 import { db } from '../../db';
-import { aimuxRemoteNameFromMeta } from './pc-client-context';
+import { aimuxRemoteNameFromMeta, aimuxGuiAuthorizedFromMeta } from './pc-client-context';
+import { assertUserIsolationAvailable, sandboxPolicyFor } from './user-isolation';
 
 function httpError(message: string, status: number = 500, category: string = ''): Error {
   const err = new Error(message) as Error & { status?: number; category?: string };
@@ -70,10 +72,6 @@ function readPendingTransferPaths(sessionId: any): { full: string | null; user_m
 function findSessionOperable(id: any, user: any): any {
   const session = Sessions.findById(id);
   return session && canOperateSession(user, session) ? session : null;
-}
-
-function mobiusPromptKind(content: any): string {
-  return String(content || '').trim().startsWith('/compact') ? 'compact' : 'user_input';
 }
 
 // 首轮专属的 prompt 拼装: memory/skill/项目上下文 + 转移文件引用, 把原文变成发给 agent 的完整初始 prompt.
@@ -123,6 +121,7 @@ async function runSessionMessage({
   attachments = [],
   mentions = [],
   source = 'service.session.messages',
+  kind = '',
   logger = console,
   urgent = false,
 }: {
@@ -135,9 +134,13 @@ async function runSessionMessage({
   attachments?: any[];
   mentions?: any[];
   source?: string;
+  // 卡片 kind 覆盖. 留空 = 按会话页正文推导 (user / user-sp-command) —— 这两个都开新轮,
+  // 所以**非会话页的调用方必须显式传自己的 kind**, 否则会被当成用户提问而开轮.
+  // Kind override. Empty means "this is a session prompt" (user / user-sp-command), and both
+  // open a round — so any non-session caller MUST pass its own kind.
+  kind?: string;
   logger?: any;
   urgent?: boolean;
-  kind?: string;
 } = {}): Promise<any> {
 
   // 例 1：普通打字（最常见，两者相同）
@@ -150,18 +153,12 @@ async function runSessionMessage({
   //        content    = "[附件]\n- [文件] /data/report.pdf\n\n分析这个文件"   ← 拼上了附件块
 
   const normalizedSessionId = String(sessionId || '').trim();
-  // ── 隐秘数据自动加密 ──
-  // 用户消息里夹带的密码/API key/token 等, 在进入任何落库/落盘/下发路径之前
-  // 就替换为 <MOBIUS-ENC:v1:...> AES-256-GCM 占位符: DB(messages_v2)、jsonl
-  // 输入卡、下发 prompt 均只见密文。fail-open: 加密异常不阻塞消息发送。
-  const guardContent = detectAndEncrypt(typeof content === 'string' ? content : '');
-  const normalizedContent = guardContent.text;
+  const normalizedContent = typeof content === 'string' ? content : '';
   const normalizedRequestId = typeof requestId === 'string' ? requestId : null;
-  const normalizedInputText = hasInputText
-    ? detectAndEncrypt(String(inputText || '')).text
-    : '';
+  const normalizedInputText = hasInputText ? String(inputText || '') : '';
 
   if (!user?.id) throw httpError('用户不可用', 401);
+  try { assertUserIsolationAvailable(user); } catch (e) { throw httpError((e as Error).message, (e as any).status || 503, 'sandbox'); }
 
   const sess = findSessionOperable(normalizedSessionId, user);
   if (!sess) throw httpError(`session ${normalizedSessionId} 不存在或不属于你`, 404);
@@ -174,11 +171,13 @@ async function runSessionMessage({
   }
   const workDir = workspace.workDir;
   const flagRoot = workspace.projectRoot || workspace.workDir;
-  const normalizedAttachments = normalizeSessionAttachments(
-    attachments,
-    user,
-    [workspace.projectRoot, workspace.workDir],
-  );
+  // 隔离分派: landlock 生成策略文件; docker 模式返回 null (容器即边界, spawn 层 ensureSandbox)
+  const sandboxPolicy = sandboxPolicyFor(user, {
+    userId: user.id,
+    projectId: sess.project_id || null,
+    workDir: workspace.workDir,
+  });
+  const normalizedAttachments = normalizeSessionAttachments(attachments, user, sess.project_id);
   const normalizedMentions: NormalizedAgentMention[] = normalizeAgentMentions(mentions, normalizedContent);
   const mentionMetadata = sessionMentionMetadata(user, normalizedSessionId, normalizedMentions);
   if (!normalizedContent.trim() && normalizedAttachments.length === 0) {
@@ -247,23 +246,23 @@ async function runSessionMessage({
   });
 
   try {
-    // mobius 侧 prompt 提交记录: 随 dispatchOpts 下发, agent 后端 harnessWriteMobiusCoreEntry 把它同步写进 <uuid>.mobius.jsonl 文件
-    const mobiusPromptRecord = {
-      source,                                              // 谁发的 (默认 service.session.messages=会话页; 小莫提问=assistant.question; 生命周期催促=assistant.lifecycle-callback)
-      kind: mobiusPromptKind(displayContent),
-      content: displayContent,                             // 成品: 正式提交、展示/落库、写成 .mobius.jsonl 输入卡的文本 (可含前端加的标题头等加工)
+    // mobius 侧 prompt 提交记录: 随 dispatchOpts 下发, agent 后端 harnessWriteMobiusCoreEntry 把它写进 agent-history-store 库 (开新轮)
+    const mobiusPromptRecord = buildMobiusPromptRecord({
+      source,                                              // 谁发的 (默认 service.session.messages=会话页)
+      kind: kind || sessionPromptKind(displayContent),     // 决定开不开新轮: 会话页提问, /compact 单列
+      content: displayContent,                             // 成品: 正式提交、展示/落库、写进输入卡的文本 (可含前端加的标题头等加工)
       inputText: hasInputText ? normalizedInputText : null, // 原料: 用户在输入框亲手敲的原文, 供前端 ↑"回放输入"召回; 多数路径与 content 相同或为 null
       finalPrompt: finalContent !== displayContent ? finalContent : null, // 拼装后的完整下发 prompt (首轮上下文包装等已并入); 与 content 相同时不重复存
       requestId: normalizedRequestId,
       turnNumber: turnNum,
-      userId: user?.id || null,
+      userId: user?.id,                                    // kind 由构造器按正文推导 (/compact → compact)
       attachments: normalizedAttachments,
       mentions: normalizedMentions,
-      timestamp: new Date().toISOString(),
-    };
+    });
 
     const dispatchOpts = {
       sessionId: normalizedSessionId,
+      userId: user.id,
       prompt: finalContent,
       cwd: workDir,
       flagRoot,
@@ -272,6 +271,8 @@ async function runSessionMessage({
       agentSessionId: sess.agent_session_id || undefined,
       mobiusPromptRecord,
       aimuxRemoteName: aimuxRemoteNameFromMeta(sess?.pc_client_metadata),
+      aimuxGuiAuthorized: aimuxGuiAuthorizedFromMeta(sess?.pc_client_metadata),
+      sandboxPolicy,
     };
     // 汇合点: 首轮和普通输入最终都从这里把 finalContent 发给 agent 后端, 之后不再有区别.
     if (urgent) {

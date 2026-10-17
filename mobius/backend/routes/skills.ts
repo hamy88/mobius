@@ -14,6 +14,7 @@ import path from 'path';
 // @ts-ignore — multer 无 @types
 import multer from 'multer';
 import { auth } from '../middleware/auth';
+import { canImportLocalPath, normalizeImportSourcePath } from '../services/context-import-path';
 import { Skills } from '../repositories/skills';
 import { Projects } from '../repositories/projects';
 import { UPLOAD_DIR, HIDDEN_FOLDER_NAME } from '../config';
@@ -314,7 +315,16 @@ router.post('/import-local', auth, (req: express.Request, res: express.Response)
     res.status(400).json({ error: '请输入 skill 的服务器绝对路径' });
     return;
   }
-  const result = Skills.importLocal({ userId: user.id, sourcePath });
+  if (!canImportLocalPath(user, sourcePath)) {
+    res.status(403).json({ error: '普通用户只能从自己的工作区、可写项目或上传临时目录导入 skill' });
+    return;
+  }
+  const normalizedSourcePath = normalizeImportSourcePath(sourcePath);
+  if (!normalizedSourcePath) {
+    res.status(400).json({ error: '导入路径不存在或无法解析' });
+    return;
+  }
+  const result = Skills.importLocal({ userId: user.id, sourcePath: normalizedSourcePath });
   if (!result.ok) {
     res.status(400).json({ error: result.error });
     return;
@@ -530,6 +540,28 @@ router.post('/import-file', auth, (req: express.Request, res: express.Response) 
   handleSkillFileImport(req, res);
 });
 
+// 编辑用户级 Skill 的 SKILL.md 正文 (主 Markdown).
+router.patch('/:id/body', auth, (req: express.Request, res: express.Response) => {
+  const user = (req as any).user;
+  const sk = Skills.findById(req.params.id);
+  if (!sk || sk.scope !== 'user' || !canManageContextItem(user, 'skill', sk)) {
+    res.status(403).json({ error: '无权编辑此 Skill' });
+    return;
+  }
+  const body = (req.body || {}) as { body?: string; content?: string };
+  const content = typeof body.body === 'string' ? body.body : body.content;
+  if (typeof content !== 'string') {
+    res.status(400).json({ error: '缺少正文内容' });
+    return;
+  }
+  const result = Skills.updateBody(sk.id, content);
+  if (!result.ok) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json(shapeSkill(result.skill, user));
+});
+
 router.delete('/:id', auth, (req: express.Request, res: express.Response) => {
   const user = (req as any).user;
   const sk = Skills.findById(req.params.id);
@@ -713,8 +745,17 @@ projectScoped.post('/import-local', auth, (req: express.Request, res: express.Re
     res.status(400).json({ error: '请输入 skill 的服务器绝对路径' });
     return;
   }
+  if (!canImportLocalPath(user, sourcePath, String(req.params.projectId))) {
+    res.status(403).json({ error: '普通用户只能从自己的工作区、当前可写项目或上传临时目录导入 skill' });
+    return;
+  }
+  const normalizedSourcePath = normalizeImportSourcePath(sourcePath);
+  if (!normalizedSourcePath) {
+    res.status(400).json({ error: '导入路径不存在或无法解析' });
+    return;
+  }
   const result = Skills.importLocal({
-    userId: user.id, projectId: req.params.projectId, sourcePath,
+    userId: user.id, projectId: req.params.projectId, sourcePath: normalizedSourcePath,
   });
   if (!result.ok) {
     res.status(400).json({ error: result.error });
@@ -749,6 +790,34 @@ projectScoped.post('/copy', auth, (req: express.Request, res: express.Response) 
   const result = Skills.copyToScope({
     sourceId, targetUserId: user.id, targetProjectId: req.params.projectId,
   });
+  if (!result.ok) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json(shapeSkill(result.skill, user));
+});
+
+// 编辑项目级 Skill 的 SKILL.md 正文 (主 Markdown).
+projectScoped.patch('/:id/body', auth, (req: express.Request, res: express.Response) => {
+  const user = (req as any).user;
+  const acc = ensureProjectAccess(req, res);
+  if (!acc) return;
+  const sk = Skills.findById(req.params.id);
+  if (!sk || sk.scope !== 'project' || sk.owner_id !== req.params.projectId) {
+    res.status(404).json({ error: '未找到' });
+    return;
+  }
+  if (!canManageContextItem(user, 'skill', sk)) {
+    res.status(403).json({ error: '无权编辑此项目级 Skill' });
+    return;
+  }
+  const body = (req.body || {}) as { body?: string; content?: string };
+  const content = typeof body.body === 'string' ? body.body : body.content;
+  if (typeof content !== 'string') {
+    res.status(400).json({ error: '缺少正文内容' });
+    return;
+  }
+  const result = Skills.updateBody(sk.id, content);
   if (!result.ok) {
     res.status(400).json({ error: result.error });
     return;

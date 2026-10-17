@@ -6,11 +6,6 @@ import { MoveScopeModal } from './modals'
 import { CopyFromCatalogModal } from './copy-catalog'
 import { HelpHint } from './project-page/help-hint'
 import { SkillMarketLink } from './skill-market-link'
-import {
-  CONTEXT_SETUP_DEMO_TOUR_EVENT,
-  patchContextSetupDemoState,
-  readContextSetupDemoState,
-} from '../services/context-setup-demo'
 
 // =====================================================================
 // normalizeGithubSkillInput — 把用户从网站/文档直接复制的"安装命令"或"仓库 URL"
@@ -147,7 +142,6 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
       })
       const imported = Array.isArray(r?.skills) ? r.skills : []
       const skipped = Array.isArray(r?.skipped) ? r.skipped : []
-      markContextSetupSkillImported(r)
       refresh()
       if (skipped.length > 0) {
         setImportInfo(
@@ -197,23 +191,11 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
       } else {
         closeAdd(); refresh()
       }
-      markContextSetupSkillImported({ skills: imported, skipped })
     } catch (e: any) {
       setErr(e?.message || '导入失败')
     } finally {
       setSubmitting(false)
     }
-  }
-
-  const markContextSetupSkillImported = (result: any) => {
-    const state = readContextSetupDemoState()
-    if (!state?.active || state.projectId !== projectId) return
-    const imported = Array.isArray(result?.skills) ? result.skills : []
-    const skipped = Array.isArray(result?.skipped) ? result.skipped : []
-    const hasExpectedSkill = [...imported, ...skipped].some((item: any) => item?.name === state.skillName)
-    if (!hasExpectedSkill) return
-    patchContextSetupDemoState({ skillImportedAt: Date.now() })
-    window.dispatchEvent(new CustomEvent(CONTEXT_SETUP_DEMO_TOUR_EVENT, { detail: { force: true } }))
   }
 
   const uploadSkillFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -237,7 +219,6 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
         (skipped.length ? `；跳过 ${skipped.length} 个: ${skipped.map((s: any) => `${s.name} (${s.reason})`).join('; ')}` : '') +
         '。也可以从 GitHub 包安装、用本地绝对路径导入，或复制已有 Skill。'
       )
-      markContextSetupSkillImported(r)
       refresh()
     } catch (e: any) {
       setFileImportInfo(e?.message || '上传导入失败')
@@ -270,7 +251,7 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
     <div data-tour={managerTour} className="bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl p-4">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-1.5 min-w-0">
-          <h3 className="text-[13px] font-semibold whitespace-nowrap flex-shrink-0" style={{ color: 'var(--text-primary)' }}>{title}</h3>
+          <h3 className="text-[length:var(--fs-lg)] font-semibold whitespace-nowrap flex-shrink-0" style={{ color: 'var(--text-primary)' }}>{title}</h3>
           <HelpHint text={desc} />
         </div>
         <div className="flex min-w-0 flex-wrap justify-end gap-1">
@@ -285,27 +266,27 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
             onClick={() => skillFileInputRef.current?.click()}
             disabled={fileImporting || (scope === 'project' && !projectId)}
             data-tour={scope === 'user' ? 'user-skill-upload-file' : 'project-skill-upload-file'}
-            className="text-[10.5px] px-1.5 py-1 rounded bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 border border-sky-500/20 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+            className="text-[length:var(--fs-xs)] px-1.5 py-1 rounded bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 border border-sky-500/20 transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
             title="上传本地 .md 或 skill 压缩包并导入为 Skill, 上限 1GB">
             <Upload className="w-3 h-3" strokeWidth={1.8} />
             {fileImporting ? '上传中...' : '上传文件'}
           </button>
           <button onClick={() => setCopyOpen(true)}
             data-tour={copyTour}
-            className="text-[10.5px] px-1.5 py-1 rounded bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 border border-violet-500/20 transition-colors whitespace-nowrap"
+            className="text-[length:var(--fs-xs)] px-1.5 py-1 rounded bg-violet-500/15 text-violet-400 hover:bg-violet-500/25 border border-violet-500/20 transition-colors whitespace-nowrap"
             title="浏览其他用户/项目的 skill 并复制到这里">
             复制
           </button>
           <button onClick={() => setAdding(true)}
             data-tour={addTour}
-            className="text-[10.5px] px-1.5 py-1 rounded bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/20 transition-colors whitespace-nowrap">
+            className="text-[length:var(--fs-xs)] px-1.5 py-1 rounded bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/20 transition-colors whitespace-nowrap">
             添加
           </button>
         </div>
       </div>
-      {/* <p className="text-[12px] mb-4" style={{ color: 'var(--text-muted)' }}>{desc}</p> */}
+      {/* <p className="text-[length:var(--fs-md)] mb-4" style={{ color: 'var(--text-muted)' }}>{desc}</p> */}
       {fileImportInfo && (
-        <pre className="text-[11px] text-amber-400 mb-3 whitespace-pre-wrap break-all max-h-24 overflow-auto">{fileImportInfo}</pre>
+        <pre className="text-[length:var(--fs-sm)] text-amber-400 mb-3 whitespace-pre-wrap break-all max-h-24 overflow-auto">{fileImportInfo}</pre>
       )}
 
       {adding && (
@@ -314,7 +295,7 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
             {([['manual', '直接编辑/粘贴'], ['github', 'Github 包'], ['local', '本地绝对路径']] as const).map(([m, label]) => (
               <button key={m} onClick={() => { setAddMode(m); setErr(''); setImportInfo('') }} disabled={submitting}
                 data-tour={m === 'manual' ? 'skill-add-manual-tab' : m === 'github' ? 'skill-add-github-tab' : 'skill-add-local-tab'}
-                className="text-[11px] px-2.5 py-1 rounded border transition-colors disabled:opacity-40"
+                className="text-[length:var(--fs-sm)] px-2.5 py-1 rounded border transition-colors disabled:opacity-40"
                 style={addMode === m
                   ? { background: 'var(--accent, #3b82f6)', color: '#fff', borderColor: 'transparent' }
                   : { color: 'var(--text-muted)', borderColor: 'var(--input-border)' }}>
@@ -327,7 +308,7 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
           {addMode === 'manual' ? (
             <>
               <div>
-                <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-muted)' }}>
+                <label className="text-[length:var(--fs-sm)] mb-1 block" style={{ color: 'var(--text-muted)' }}>
                   Skill 名称 (必填, 用于列表和目录名)
                 </label>
                 <input autoFocus value={manualName}
@@ -335,11 +316,11 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
                   data-tour="skill-add-manual-name-input"
                   placeholder="例: playwright-debugging"
                   disabled={submitting}
-                  className="w-full px-2.5 py-1.5 rounded text-[12px] font-mono mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
+                  className="w-full px-2.5 py-1.5 rounded text-[length:var(--fs-md)] font-mono mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
                   style={{ background: 'var(--bg-primary)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} />
               </div>
               <div>
-                <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-muted)' }}>
+                <label className="text-[length:var(--fs-sm)] mb-1 block" style={{ color: 'var(--text-muted)' }}>
                   简短说明 (选填)
                 </label>
                 <input value={manualDescription}
@@ -347,11 +328,11 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
                   data-tour="skill-add-manual-description-input"
                   placeholder="例: 调试前端页面时使用 Playwright 截图和控制台日志"
                   disabled={submitting}
-                  className="w-full px-2.5 py-1.5 rounded text-[12px] mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
+                  className="w-full px-2.5 py-1.5 rounded text-[length:var(--fs-md)] mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
                   style={{ background: 'var(--bg-primary)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} />
               </div>
               <div>
-                <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-muted)' }}>
+                <label className="text-[length:var(--fs-sm)] mb-1 block" style={{ color: 'var(--text-muted)' }}>
                   Skill 内容 (Markdown，可直接粘贴完整 SKILL.md；没有 frontmatter 时会自动补上名称和说明)
                 </label>
                 <textarea value={manualBody}
@@ -360,13 +341,13 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
                   placeholder={'写清这个 Skill 适合什么时候使用、执行步骤、注意事项。也可以直接粘贴已有 SKILL.md 内容。'}
                   disabled={submitting}
                   rows={12}
-                  className="w-full px-2.5 py-2 rounded text-[12px] font-mono leading-relaxed mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40 resize-y"
+                  className="w-full px-2.5 py-2 rounded text-[length:var(--fs-md)] font-mono leading-relaxed mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40 resize-y"
                   style={{ background: 'var(--bg-primary)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} />
               </div>
             </>
           ) : addMode === 'github' ? (
             <>
-              <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-muted)' }}>
+              <label className="text-[length:var(--fs-sm)] mb-1 block" style={{ color: 'var(--text-muted)' }}>
                 Skill 包标识 (将作为 <code>npx --yes skills add &lt;package&gt;</code> 参数; 格式 <code>owner/repo</code> 或 <code>owner/repo@skill-name</code>)
               </label>
               <input autoFocus value={skillName}
@@ -386,15 +367,15 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
                 data-tour="skill-add-package-input"
                 placeholder="可直接粘贴安装命令或 GitHub URL (自动提取); 例: owner/repo 或 owner/repo@skill-name"
                 disabled={submitting}
-                className="w-full px-2.5 py-1.5 rounded text-[12px] font-mono mb-1 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
+                className="w-full px-2.5 py-1.5 rounded text-[length:var(--fs-md)] font-mono mb-1 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
                 style={{ background: 'var(--bg-primary)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} />
-              <div className="text-[10px] mb-2 leading-snug" style={{ color: 'var(--text-muted)' }}>
+              <div className="text-[length:var(--fs-xs)] mb-2 leading-snug" style={{ color: 'var(--text-muted)' }}>
                 后端执行 <code className="font-mono">npx skills add</code> 从 GitHub 拉取 (耗时较长, 最长 120s). 若本机无法直连 GitHub 会失败, 可改用「直接编辑/粘贴」或「上传文件」.
               </div>
             </>
           ) : (
             <>
-              <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-muted)' }}>
+              <label className="text-[length:var(--fs-sm)] mb-1 block" style={{ color: 'var(--text-muted)' }}>
                 服务器本地绝对路径 — 可指向 <code>含 SKILL.md 的目录</code> / <code>.md 文件</code> / <code>skill 压缩包</code> / <code>含多个 skill 子目录的父目录</code> (批量导入)。压缩包或目录上限 1GB; 复制为快照, 与源解耦。
               </label>
               <input autoFocus value={localPath}
@@ -403,41 +384,41 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
                 data-tour="skill-add-local-input"
                 placeholder="例: /home/alice/my-skills/awesome-skill"
                 disabled={submitting}
-                className="w-full px-2.5 py-1.5 rounded text-[12px] font-mono mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
+                className="w-full px-2.5 py-1.5 rounded text-[length:var(--fs-md)] font-mono mb-2 focus:outline-none focus:border-blue-500/30 disabled:opacity-40"
                 style={{ background: 'var(--bg-primary)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} />
             </>
           )}
 
-          {err && <pre className="text-[11px] text-red-400 mb-2 whitespace-pre-wrap break-all max-h-40 overflow-auto">{err}</pre>}
-          {importInfo && <pre className="text-[11px] text-amber-400 mb-2 whitespace-pre-wrap break-all max-h-40 overflow-auto">{importInfo}</pre>}
+          {err && <pre className="text-[length:var(--fs-sm)] text-red-400 mb-2 whitespace-pre-wrap break-all max-h-40 overflow-auto">{err}</pre>}
+          {importInfo && <pre className="text-[length:var(--fs-sm)] text-amber-400 mb-2 whitespace-pre-wrap break-all max-h-40 overflow-auto">{importInfo}</pre>}
           <div className="flex gap-2">
             {addMode === 'manual' ? (
               <button onClick={submitManualSkill} disabled={submitting || !manualName.trim() || !manualBody.trim()}
-                className="h-7 px-3 text-[11px] rounded btn-primary transition-colors disabled:opacity-40">
+                className="h-7 px-3 text-[length:var(--fs-sm)] rounded btn-primary transition-colors disabled:opacity-40">
                 {submitting ? '创建中...' : '创建 Skill'}
               </button>
             ) : addMode === 'github' ? (
               <button onClick={submitInstall} disabled={submitting || !skillName.trim()}
-                className="h-7 px-3 text-[11px] rounded btn-primary transition-colors disabled:opacity-40">
+                className="h-7 px-3 text-[length:var(--fs-sm)] rounded btn-primary transition-colors disabled:opacity-40">
                 {submitting ? '安装中... (npx 可能耗时)' : '安装'}
               </button>
             ) : (
               <button onClick={submitImportLocal} disabled={submitting || !localPath.trim()}
-                className="h-7 px-3 text-[11px] rounded btn-primary transition-colors disabled:opacity-40">
+                className="h-7 px-3 text-[length:var(--fs-sm)] rounded btn-primary transition-colors disabled:opacity-40">
                 {submitting ? '导入中...' : '导入'}
               </button>
             )}
             <button onClick={closeAdd} disabled={submitting}
-              className="h-7 px-3 text-[11px] rounded border disabled:opacity-40"
+              className="h-7 px-3 text-[length:var(--fs-sm)] rounded border disabled:opacity-40"
               style={{ color: 'var(--text-muted)', borderColor: 'var(--input-border)' }}>取消</button>
           </div>
         </div>
       )}
 
       {loading ? (
-        <div className="text-[12px] py-4 text-center" style={{ color: 'var(--text-muted)' }}>加载中...</div>
+        <div className="text-[length:var(--fs-md)] py-4 text-center" style={{ color: 'var(--text-muted)' }}>加载中...</div>
       ) : skills.length === 0 ? (
-        <div className="text-[12px] py-4 text-center" style={{ color: 'var(--text-muted)' }}>暂无 skill, 点击右上角添加</div>
+        <div className="text-[length:var(--fs-md)] py-4 text-center" style={{ color: 'var(--text-muted)' }}>暂无 skill, 点击右上角添加</div>
       ) : (
         <div className="space-y-2">
           {skills.map((sk: any) => (
@@ -445,18 +426,18 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-[180px] flex-[1_1_180px]">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-1">
-                    <span className="min-w-32 max-w-full flex-[1_1_8rem] text-[13px] font-medium leading-5 break-words truncate" style={{ color: 'var(--text-primary)' }}>{sk.name}</span>
+                    <span className="min-w-32 max-w-full flex-[1_1_8rem] text-[length:var(--fs-lg)] font-medium leading-5 break-words truncate" style={{ color: 'var(--text-primary)' }}>{sk.name}</span>
                     {typeof sk.body_length === 'number' && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap" style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)' }}>
+                      <span className="text-[length:var(--fs-xs)] px-1.5 py-0.5 rounded whitespace-nowrap" style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)' }}>
                         {sk.body_length} 字符
                       </span>
                     )}
-                    <span className="text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap" style={{ color: '#60a5fa', background: 'rgba(96,165,250,0.08)' }}>
+                    <span className="text-[length:var(--fs-xs)] px-1.5 py-0.5 rounded whitespace-nowrap" style={{ color: '#60a5fa', background: 'rgba(96,165,250,0.08)' }}>
                       {visibilityLabel(sk.visibility, sk.scope)}
                     </span>
                   </div>
                   {sk.description && (
-                    <p className="text-[11px] line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{sk.description}</p>
+                    <p className="text-[length:var(--fs-sm)] line-clamp-2" style={{ color: 'var(--text-secondary)' }}>{sk.description}</p>
                   )}
                 </div>
                 <div className="ml-auto flex flex-[0_1_auto] flex-wrap items-center justify-end gap-1">
@@ -488,7 +469,7 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
         </div>
       )}
 
-      {viewing && <SkillBodyViewer baseUrl={baseUrl} skillId={viewing.id} title={viewing.name} onClose={() => setViewing(null)} />}
+      {viewing && <SkillBodyViewer baseUrl={baseUrl} skillId={viewing.id} title={viewing.name} canEdit={!!viewing.can_manage} onClose={() => setViewing(null)} />}
 
       {accessing && (
         <ContextAccessModal
@@ -530,16 +511,36 @@ export function SkillsManager({ scope, projectId }: { scope: 'user' | 'project';
   )
 }
 
-// 单条 skill 详情查看 (带 body)
-function SkillBodyViewer({ baseUrl, skillId, title, onClose }: { baseUrl: string; skillId: string; title: string; onClose: () => void }) {
+// 单条 skill 详情查看 / 编辑 (带 body)
+function SkillBodyViewer({ baseUrl, skillId, title, onClose, canEdit }: { baseUrl: string; skillId: string; title: string; onClose: () => void; canEdit?: boolean }) {
   const [body, setBody] = useState('')
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState('')
   useEffect(() => {
     api(`${baseUrl}/${skillId}`)
       .then((d: any) => { setBody(d?.body || ''); setLoading(false) })
       .catch(e => { setErr(e?.message || '加载失败'); setLoading(false) })
   }, [baseUrl, skillId])
+
+  const startEdit = () => { setDraft(body); setSaveErr(''); setEditing(true) }
+  const cancelEdit = () => { setEditing(false); setSaveErr('') }
+  const saveEdit = async () => {
+    setSaving(true); setSaveErr('')
+    try {
+      const d: any = await api(`${baseUrl}/${skillId}/body`, { method: 'PATCH', body: JSON.stringify({ body: draft }) })
+      setBody(d?.body ?? draft)
+      setEditing(false)
+    } catch (e: any) {
+      setSaveErr(e?.message || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
@@ -547,15 +548,42 @@ function SkillBodyViewer({ baseUrl, skillId, title, onClose }: { baseUrl: string
         onClick={e => e.stopPropagation()}
         style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
         <div className="flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: 'var(--border-color)' }}>
-          <span className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>{title} · SKILL.md</span>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--bg-hover)] transition-colors" style={{ color: 'var(--text-muted)' }}>
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-          </button>
+          <span className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>{title} · SKILL.md</span>
+          <div className="flex items-center gap-2">
+            {canEdit && !editing && !loading && !err && (
+              <button onClick={startEdit}
+                className="h-7 px-3 text-[length:var(--fs-sm)] rounded border transition-colors hover:bg-[var(--bg-hover)]"
+                style={{ color: 'var(--text-primary)', borderColor: 'var(--input-border)' }}>
+                编辑
+              </button>
+            )}
+            <button onClick={onClose} className="p-1 rounded hover:bg-[var(--bg-hover)] transition-colors" style={{ color: 'var(--text-muted)' }}>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-auto p-5">
-          {loading ? <div className="text-[12px]" style={{ color: 'var(--text-muted)' }}>加载中...</div>
-            : err ? <div className="text-[12px] text-red-400">{err}</div>
-            : <pre className="text-[12px] leading-relaxed whitespace-pre-wrap font-mono p-4 rounded-xl border"
+          {loading ? <div className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>加载中...</div>
+            : err ? <div className="text-[length:var(--fs-md)] text-red-400">{err}</div>
+            : editing ? (
+              <>
+                <textarea autoFocus value={draft} onChange={e => { setDraft(e.target.value); setSaveErr('') }} disabled={saving}
+                  rows={22}
+                  className="w-full px-3 py-2 rounded-xl border text-[length:var(--fs-md)] leading-relaxed font-mono focus:outline-none focus:border-blue-500/30 resize-y"
+                  style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }} />
+                {saveErr && <div className="text-[length:var(--fs-sm)] text-red-400 mt-2 whitespace-pre-wrap break-all">{saveErr}</div>}
+                <div className="flex gap-2 mt-3">
+                  <button onClick={saveEdit} disabled={saving}
+                    className="h-7 px-3 text-[length:var(--fs-sm)] rounded btn-primary transition-colors disabled:opacity-40">
+                    {saving ? '保存中...' : '保存'}
+                  </button>
+                  <button onClick={cancelEdit} disabled={saving}
+                    className="h-7 px-3 text-[length:var(--fs-sm)] rounded border disabled:opacity-40"
+                    style={{ color: 'var(--text-muted)', borderColor: 'var(--input-border)' }}>取消</button>
+                </div>
+              </>
+            )
+            : <pre className="text-[length:var(--fs-md)] leading-relaxed whitespace-pre-wrap font-mono p-4 rounded-xl border"
                 style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }}>{body}</pre>}
         </div>
       </div>
@@ -594,11 +622,11 @@ export function IssueSkillSelector({ issueId, onChange }: { issueId: string; onC
   }
 
   if (loading || !data) {
-    return <div className="text-[11px] py-2" style={{ color: 'var(--text-muted)' }}>加载 skill...</div>
+    return <div className="text-[length:var(--fs-sm)] py-2" style={{ color: 'var(--text-muted)' }}>加载 skill...</div>
   }
   if (data.available.length === 0) {
     return (
-      <div className="text-[11px] py-2" style={{ color: 'var(--text-muted)' }}>
+      <div className="text-[length:var(--fs-sm)] py-2" style={{ color: 'var(--text-muted)' }}>
         暂无可用 skill. 在「用户中心」或项目设置中添加.
       </div>
     )
@@ -629,18 +657,18 @@ export function IssueSkillSelector({ issueId, onChange }: { issueId: string; onC
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[13px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+        <span className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-muted)' }}>
           Skill ({data.effective.length}/{data.available.length} 启用)
         </span>
         {(data.selected.length > 0 || data.excluded.length > 0) && (
           <button onClick={clearAll} disabled={saving}
-            className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-[var(--bg-hover)] transition-colors"
+            className="text-[length:var(--fs-xs)] px-1.5 py-0.5 rounded border hover:bg-[var(--bg-hover)] transition-colors"
             style={{ color: 'var(--text-muted)', borderColor: 'var(--input-border)' }}>
             重置
           </button>
         )}
       </div>
-      <p className="text-[10px] mb-2" style={{ color: 'var(--text-muted)' }}>
+      <p className="text-[length:var(--fs-xs)] mb-2" style={{ color: 'var(--text-muted)' }}>
         {usingWhitelist ? '白名单模式: 只有勾选的 skill 会注入' : '默认模式: 全部启用, 标记为排除的不注入'}
       </p>
       <div className="space-y-1">
@@ -658,16 +686,16 @@ export function IssueSkillSelector({ issueId, onChange }: { issueId: string; onC
               <div className="flex items-center justify-between gap-2">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[13px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>{sk.name}</span>
-                    <span className="text-[9px] px-1 py-0.5 rounded flex-shrink-0" style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)' }}>
+                    <span className="text-[length:var(--fs-lg)] font-medium truncate" style={{ color: 'var(--text-primary)' }}>{sk.name}</span>
+                    <span className="text-[length:var(--fs-2xs)] px-1 py-0.5 rounded flex-shrink-0" style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)' }}>
                       {sk.scope === 'project' ? '项目' : '用户'}
                     </span>
                   </div>
                   {sk.description && (
-                    <p className="text-[10px] line-clamp-1 mt-0.5" style={{ color: 'var(--text-muted)' }}>{sk.description}</p>
+                    <p className="text-[length:var(--fs-xs)] line-clamp-1 mt-0.5" style={{ color: 'var(--text-muted)' }}>{sk.description}</p>
                   )}
                 </div>
-                <span className="text-[10px] flex-shrink-0" style={{ color: colors.text }}>{colors.label}</span>
+                <span className="text-[length:var(--fs-xs)] flex-shrink-0" style={{ color: colors.text }}>{colors.label}</span>
               </div>
             </button>
           )

@@ -4,6 +4,12 @@ export type ContextLanguage = 'zh' | 'en';
 export interface PcClientMetadata {
   work_mode?: PcWorkMode;
   aimux_id?: string;
+  /**
+   * 首次切换设备时记录的"初始设备"锚点 (会话创建时绑定的那台)。仅由
+   * PATCH /:id/aimux-device 在第一次切换时惰性写入, 之后保持不变, 供前端
+   * 展示"当前/初始"两种设备、支持随时撤回、并据此把图标染黄。
+   */
+  initial_aimux_id?: string;
   local_path?: string;
   /**
    * Client-type marker, only present on PC task-mode sessions.
@@ -39,6 +45,20 @@ export function parsePcClientMetadata(raw: unknown): PcClientMetadata | null {
     try { parsed = JSON.parse(parsed); } catch { return null; }
   }
   return parsed && typeof parsed === 'object' ? parsed as PcClientMetadata : null;
+}
+
+/**
+ * A continued session inherits the source session's current PC/aimux binding,
+ * but starts a fresh device-switch history. The inherited current aimux_id is
+ * therefore the new session's implicit initial device; the first later switch
+ * persists it as initial_aimux_id through PATCH /:id/aimux-device.
+ */
+export function pcClientMetadataForContinuation(raw: unknown): PcClientMetadata | null {
+  const source = parsePcClientMetadata(raw);
+  if (!source) return null;
+  const inherited = { ...source };
+  delete inherited.initial_aimux_id;
+  return inherited;
 }
 
 /**
@@ -149,6 +169,7 @@ function tuiBasePrompt(aimuxId: string, remotePath: string, language: ContextLan
       `When I say 'local', I also mean ${aimuxId}. ` +
       `Only when I say 'mobius center/hub' do I mean the machine you are currently on. ` +
       `You operate this remote computer through the remote_* MCP tools (remote_exec_command, remote_write_stdin, remote_apply_patch, remote_view_image, remote_ping); ` +
+      `call remote_ping before writing any command — it reports that machine's OS, architecture, shell syntax, and working directory; ` +
       `these tools act directly on ${aimuxId} — the computer whose hostname is encoded in that identifier. ` +
       `In your text answer, do not mention 'aimux' or reveal that you are working remotely (although in fact you are working remotely).`
     : `你在远程机器 ${aimuxId}${remotePath} 上工作。` +
@@ -156,12 +177,13 @@ function tuiBasePrompt(aimuxId: string, remotePath: string, language: ContextLan
       `当我说“本地(local)”时，我指的是 ${aimuxId}。` +
       `只有当我说“中枢(mobius center/hub)”时，才指现在你所处的机器。` +
       `你优先使用已注册的 MCP 工具（remote_exec_command、remote_write_stdin、remote_apply_patch、remote_view_image、remote_ping）操作这台远程计算机；` +
+      `写命令之前先调用 remote_ping，它会告诉你对面机器的操作系统、架构、shell 语法和工作路径；` +
       `这些工具直接作用于 ${aimuxId} —— 该标识符编码了其主机名的那台计算机。` +
       `在你的文本回答中，不要提及“aimux”，也不要暴露你在远程工作（尽管实际上你在远程工作）。`;
 }
 
-/** Closing half of the 'dual' instruction, identical for both clients. */
-function dualModeTail(aimuxId: string, remotePath: string, language: ContextLanguage): string {
+/** Closing half of the desktop 'dual' instruction (TUI dual omits it). */
+function dualModeTailForDesktop(aimuxId: string, remotePath: string, language: ContextLanguage): string {
   return language === 'en'
     ? `When you need to modify code, first modify the local code, then sync all the code to ${aimuxId}, unless the user objects. ` +
       `When the user asks you to run code, follow the same rule. ` +
@@ -176,48 +198,47 @@ function dualModeTail(aimuxId: string, remotePath: string, language: ContextLang
  */
 const MODE_PROMPTS: Record<ClientKind, Record<PcWorkMode, Record<ContextLanguage, ModePrompt>>> = {
   tui: {
+    // Terminal命令行客户端，中枢模式
     hub: {
-      en: (id) => `Do not use the remote_* tools to operate the following remote machine: ${id}. Work in the Mobius Hub (that is, locally).`,
-      zh: (id) => `不要使用 remote_* 工具操作以下远程机器： ${id}，在mobius中枢（即本地）工作`,
+      en: (id) => `Do not use aimux to connect to the following remote machine (the machine the current user is on): ${id}`,
+      zh: (id) => `不要使用aimux连接到以下远程机器（当前用户所在机器）： ${id}`,
     },
+    // Terminal命令行客户端，客户端模式
     pc: {
       en: (id, rp) =>
-        `Carry out all work on the following remote machine via the remote_* tools: ${id}${rp}. ` +
-        `When you need to modify documents, first sync the project to the Mobius Hub (that is, locally), ` +
-        `then immediately sync every change back to the path specified by ${id}, unless the user objects. ` +
-        `If the user objects, read or modify files directly through the remote_* tools.`,
-      zh: (id, rp) =>
-        `通过 remote_* 工具在以下远程机器上执行所有工作：${id}${rp}。` +
-        `当你需要修改文档时，先将项目同步到mobius中枢（即本地），每次修改后都立即同步回到 ${id} 指定路径，除非用户反对你这样做。` +
-        `如果用户反对，直接通过 remote_* 工具读取或修改文件。`,
+        `Use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on) and carry out all work, ` +
+        `and try to avoid modifying the Mobius hub code: ${id}${rp}`,
+      zh: (id, rp) => `使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）执行所有工作，尽量不修改Mobius中枢的代码： ${id}${rp}`,
     },
+    // Terminal命令行客户端，智能双侧模式
     dual: {
-      en: (id, rp) =>
-        `You are authorized to operate the following remote machine via the remote_* tools: ${id}. ` +
-        dualModeTail(id, rp, 'en'),
-      zh: (id, rp) =>
-        `你现在被授权通过 remote_* 工具操作以下远程机器： ${id}，` +
-        dualModeTail(id, rp, 'zh'),
+      en: (id) =>
+        `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. `,
+      zh: (id) =>
+        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，`,
     },
   },
   desktop: {
+    // Electron桌面端，中枢模式
     hub: {
-      en: (id) => `Do not use aimux to connect to the following remote machine: ${id}`,
-      zh: (id) => `不要使用aimux连接到以下远程机器： ${id}`,
+      en: (id) => `Do not use aimux to connect to the following remote machine (the machine the current user is on): ${id}`,
+      zh: (id) => `不要使用aimux连接到以下远程机器（当前用户所在机器）： ${id}`,
     },
+    // Electron桌面端，客户端模式
     pc: {
       en: (id, rp) =>
-        `Use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine and carry out all work, ` +
-        `and try to avoid modifying local code: ${id}${rp}`,
-      zh: (id, rp) => `使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器执行所有工作，尽量不修改本地的代码： ${id}${rp}`,
+        `Use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on) and carry out all work, ` +
+        `and try to avoid modifying the Mobius hub code: ${id}${rp}`,
+      zh: (id, rp) => `使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）执行所有工作，尽量不修改Mobius中枢的代码： ${id}${rp}`,
     },
+    // Electron桌面端，智能双侧模式
     dual: {
       en: (id, rp) =>
-        `You are authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine: ${id}. ` +
-        dualModeTail(id, rp, 'en'),
+        `You are now authorized to use the registered remote_* MCP tools (backed by aimux) to connect to the following remote machine (the machine the current user is on): ${id}. ` +
+        dualModeTailForDesktop(id, rp, 'en'),
       zh: (id, rp) =>
-        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器： ${id}，` +
-        dualModeTail(id, rp, 'zh'),
+        `你现在被授权使用已注册的 remote_* MCP 工具（由 aimux 提供）连接到以下远程机器（当前用户所在机器）： ${id}，` +
+        dualModeTailForDesktop(id, rp, 'zh'),
     },
   },
 };
@@ -243,7 +264,7 @@ function pcTaskModePromptFor(
 /** GUI (computer-use) authorization sentence, appended when the session opted in. */
 function guiAuthorizationTail(aimuxId: string, language: ContextLanguage): string {
   return language === 'en'
-    ? `This session is authorized to drive the graphical interface of ${aimuxId} with the registered remote_gui_* MCP tools (list windows, screenshot + outline, semantic press/setText, read text, wait, focus). ` +
+    ? `This session is authorized to drive the graphical interface of ${aimuxId} with the registered remote_gui_* MCP tools (list windows, screenshot + outline, semantic press/setText, read text, wait, focus, record a window to MP4). ` +
       `GUI actions default to the ax_only policy — they go through the accessibility tree and never inject real mouse/keyboard input. ` +
       `Prefer remote_gui_* over remote_exec_command whenever the task is a desktop UI operation.`
     : `本会话已授权你使用已注册的 remote_gui_* MCP（GUI/计算机操作）工具操作 ${aimuxId} 的图形界面（枚举窗口、截图+元素大纲、语义点击/输入、读文本、等待、切前台）。` +

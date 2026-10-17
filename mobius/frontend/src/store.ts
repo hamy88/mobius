@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { type ThemeName, nextThemeName, normalizeTheme } from './theme'
+import { applyBrandNameOverride } from './services/brand-overrides'
 
 const BACKGROUND_FLOW_STORAGE_KEY = 'cc-background-flow'
 const ASSISTANT_BUBBLE_STORAGE_KEY = 'mobius:ui:assistant-bubble'
@@ -103,7 +104,7 @@ declare global {
 
 // 仅用于全局 Window.openAdminOverlay 的入参类型 — 与 panels.tsx 的 AdminPanelTab 保持一致.
 // 不在此文件 import panels 是为了避免 store ↔ panels 形成循环依赖.
-type AdminPanelTab = 'users' | 'runtime' | 'redaction' | 'settings' | 'assistant' | 'models' | 'extensions' | 'migration'
+type AdminPanelTab = 'users' | 'project-permissions' | 'runtime' | 'others' | 'settings' | 'assistant' | 'models' | 'migration'
 
 const DEFAULT_BRANDING: Branding = {
   hideLogo: false,
@@ -113,7 +114,7 @@ const DEFAULT_BRANDING: Branding = {
   appDir: '',
 }
 
-function loadInitialBranding(): Branding {
+function loadRawBranding(): Branding {
   const injected = typeof window !== 'undefined' ? window.__BRANDING__ : undefined
   if (!injected) return DEFAULT_BRANDING
   return {
@@ -125,13 +126,25 @@ function loadInitialBranding(): Branding {
   }
 }
 
+// 服务端下发的品牌配置启动时定型, 运行期不变; 作为叠加浏览器本地「自定义系统名称」的基底.
+const RAW_BRANDING: Branding = loadRawBranding()
+
+// 用户实际看到的品牌配置 = 服务端配置 + 本地自定义覆盖.
+// 统一在这里叠加, 组件读 store 的 branding 即可, 不必各自判断有没有本地覆盖.
+export function resolveBranding(): Branding {
+  return applyBrandNameOverride(RAW_BRANDING)
+}
+
+// 服务端下发的系统名称 (未经浏览器本地覆盖的原始值), 供设置面板展示"默认名"。
+export const SERVER_BRAND_NAME = { zh: RAW_BRANDING.systemNameZh, en: RAW_BRANDING.systemNameEn }
+
 // 隐藏工作缓存目录名 (.imac / .mobius): 由 index.html 同步注入 window.__BRANDING__, 启动时定型,
 // 运行期不再变化, 故作为模块级常量导出; 组件拼 <bindPath>/<HIDDEN_FOLDER_NAME>/... 路径时直接 import 使用.
-export const HIDDEN_FOLDER_NAME = loadInitialBranding().hiddenFolderName
+export const HIDDEN_FOLDER_NAME = RAW_BRANDING.hiddenFolderName
 
 // 仓库根绝对路径 (APP_DIR): 同样由 index.html 同步注入, 启动时定型. 用于给 agent 展示 skill 绝对路径等,
 // 避免前端硬编码部署路径. 空字符串表示后端未下发 (旧版), 调用方需自行回退.
-export const APP_DIR = loadInitialBranding().appDir
+export const APP_DIR = RAW_BRANDING.appDir
 
 interface User {
   id: string
@@ -274,7 +287,7 @@ interface Session {
   created_at: string
   last_active: string
   // PC client 创建标记 (仅桌面端建 session 时附带); 后端返回为 JSON 字符串, null = web 端建。
-  pc_client_metadata?: { work_mode?: string; aimux_id?: string; local_path?: string; is_tui?: boolean; add_remote_aimux_mcp?: boolean } | string | null
+  pc_client_metadata?: { work_mode?: string; aimux_id?: string; initial_aimux_id?: string; local_path?: string; is_tui?: boolean; add_remote_aimux_mcp?: boolean } | string | null
   // joined fields
   issue_title?: string
   project_name?: string
@@ -366,7 +379,7 @@ interface AppState {
   hideOthersProjects: boolean
   // 用户隔离 v3: 当前用户已 mute 的项目 ID 集合
   mutedProjectIds: string[]
-  // Branding: logo/系统名/Tab 标题. 来自 .env, 前端只读不可改.
+  // Branding: logo/系统名/Tab 标题. 基底来自 .env, 其中系统名可被浏览器本地覆盖 (自定义系统名称).
   branding: Branding
   // 移动端侧栏抽屉开关 (TopNav 汉堡按钮触发, ResizablePanel 抽屉态读取)
   mobileNavOpen: boolean
@@ -375,6 +388,10 @@ interface AppState {
   mobileNavBreakpoint: number
   // 工作区布局模式 (session | editor-chat | code-conversation). 按会话独立保存.
   workspaceLayoutMode: WorkspaceLayoutMode
+  // 常规模式下右侧「原生文件编辑器」栏的开合. 顶栏布局入口与 display-files 卡片共用它,
+  // 保证「文件编辑」只有这一个面板 (与简易模式的 easyFilesOpen 相互独立).
+  // Whether the standard-mode right-side file editor pane is open; shared by the top-bar entry and display-files cards.
+  fileEditorOpen: boolean
   // Actions
   setAuth: (token: string, user: User) => void
   logout: () => void
@@ -384,10 +401,17 @@ interface AppState {
   setMutedProjectIds: (ids: string[]) => void
   setMobileNavOpen: (open: boolean) => void
   setMobileNavBreakpoint: (px: number) => void
+  // 浏览器本地「自定义系统名称」变更后重算 branding (服务端基底 + 本地覆盖).
+  refreshBranding: () => void
   setWorkspaceLayoutMode: (mode: WorkspaceLayoutMode) => void
   toggleWorkspaceLayoutMode: () => void
   // 切换到某会话时调用: 恢复该会话保存的布局, 未保存过则回落默认 (不写回).
   applySessionWorkspaceLayout: (sessionId: string | null | undefined) => void
+  // 开合常规模式右侧文件编辑栏 (顶栏「原生文件编辑器」入口与 display-files 卡片共用).
+  setFileEditorOpen: (open: boolean) => void
+  // 激活「原生文件编辑器」: 退出继承的 code-server 全页布局, 并打开右侧文件编辑栏.
+  // 供无 code-server 权限的普通用户 (landlock 隔离) 的「代码 / 在 VSCode 中打开」入口复用.
+  openNativeFileEditor: () => void
   setIssues: (issues: Issue[]) => void
   setIssuesMap: (projectId: string, issues: Issue[]) => void
   setCurrentIssue: (issue: Issue | null) => void
@@ -445,17 +469,26 @@ export const useStore = create<AppState>((set) => ({
   assistantBubbleEnabled: loadAssistantBubbleEnabled(),
   hideOthersProjects: false,
   mutedProjectIds: [],
-  branding: loadInitialBranding(),
+  branding: resolveBranding(),
   mobileNavOpen: false,
   mobileNavBreakpoint: 900,
   // 启动默认值; 进入会话后由 applySessionWorkspaceLayout 按会话校正.
   workspaceLayoutMode: WORKSPACE_LAYOUT_DEFAULT,
+  fileEditorOpen: false,
   setAuth: (token, user) => {
     localStorage.setItem('cc-token', token)
     set({ token, user, authChecking: false })
   },
   logout: () => {
     localStorage.removeItem('cc-token')
+    // 「上次选择」这类按人记的本地 UI 状态必须跟着账号走: 简易模式把
+    // 「上次选的项目/任务」写在 mobius:easy-mode:* 下, 只清 cc-token 的话换账号后
+    // 旧选择还在, 会拿着上一个账号的项目 id 去建会话 (后端按成员关系判 403).
+    try {
+      Object.keys(localStorage)
+        .filter(key => key.startsWith('mobius:easy-mode:'))
+        .forEach(key => localStorage.removeItem(key))
+    } catch {}
     set({ token: null, user: null, authChecking: false, projects: [], currentProject: null, issues: [], issuesMap: {}, currentIssue: null, researches: [], researchesMap: {}, currentResearch: null, sessions: [], sessionsMap: {}, currentSession: null, turns: [], tasks: [], currentTask: null, messages: [] })
   },
   setProjects: (projects) => set({ projects }),
@@ -464,6 +497,7 @@ export const useStore = create<AppState>((set) => ({
   setMutedProjectIds: (ids) => set({ mutedProjectIds: Array.isArray(ids) ? ids : [] }),
   setMobileNavOpen: (open) => set({ mobileNavOpen: !!open }),
   setMobileNavBreakpoint: (px) => set({ mobileNavBreakpoint: Number.isFinite(px) && px > 0 ? Math.round(px) : 900 }),
+  refreshBranding: () => set({ branding: resolveBranding() }),
   setWorkspaceLayoutMode: (mode) => {
     const next = normalizeLayoutMode(mode)
     // 写回当前会话的布局记忆 (无当前会话则不持久化, 仅改内存态).
@@ -479,6 +513,13 @@ export const useStore = create<AppState>((set) => ({
   applySessionWorkspaceLayout: (sessionId) => {
     const next = loadSessionLayoutMode(sessionId)
     set((s) => (s.workspaceLayoutMode === next ? s : { workspaceLayoutMode: next }))
+  },
+  setFileEditorOpen: (open) => set({ fileEditorOpen: !!open }),
+  openNativeFileEditor: () => {
+    // 'editor-chat' 是 code-server 全页布局 (普通用户无权限); 切到 session 再开右侧文件编辑栏.
+    const s = useStore.getState()
+    if (s.workspaceLayoutMode !== 'session') s.setWorkspaceLayoutMode('session')
+    s.setFileEditorOpen(true)
   },
   setIssues: (issues) => set({ issues }),
   setIssuesMap: (projectId, issues) => set((s) => ({ issuesMap: { ...s.issuesMap, [projectId]: issues } })),
@@ -535,6 +576,39 @@ export const useStore = create<AppState>((set) => ({
 
 // API helper
 const API = ''
+export class ApiError extends Error {
+  status: number
+  path: string
+  code?: string
+  constructor(message: string, status: number, path: string, code?: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.path = path
+    this.code = code
+  }
+}
+
+export function friendlyApiError(error: unknown, fallback = '操作失败'): string {
+  const value = error as Partial<ApiError> & { message?: unknown }
+  const status = Number(value?.status || 0)
+  const message = typeof value?.message === 'string' ? value.message.trim() : ''
+  const lower = message.toLowerCase()
+  if (status === 401 || /^(unauthorized|no token|invalid token|user not found)$/i.test(message)) return '登录状态已失效，请重新登录。'
+  if (status === 410 || /group|群组/.test(lower)) return '群组权限模型已移除，请使用项目成员角色管理权限。'
+  if (status === 503 && /sandbox|agent_sandbox_unavailable/.test(lower)) return '当前服务器未启用安全沙盒，普通用户暂时不能登录或使用 Agent。'
+  if (/拓展项目中的普通用户只能是 viewer 或 none/.test(message)) return '拓展项目中的普通用户不能设置为项目开发者，只能设置为项目访客或不显示。'
+  if (/当前项目角色没有文件写入权限/.test(message)) return '你当前是只读角色，无法修改项目文件。'
+  if (/无权在此项目创建 Issue/.test(message)) return '你当前的项目角色无法创建任务，请联系项目所有者申请项目开发者权限。'
+  if (status === 403 || /^(admin only|access denied|forbidden)$/i.test(message)) {
+    if (/admin only/i.test(message)) return '你没有访问管理员功能的权限。只有系统管理员可以使用此功能。'
+    if (/无权.*成员|需要项目管理权限|项目所有者|owner\/admin|修改项目设置/.test(message)) return '只有项目所有者可以管理项目成员和项目设置。'
+    return message && !/access denied|forbidden/i.test(message) ? `你当前没有执行此操作的权限：${message}` : '你当前没有执行此操作的权限。请检查项目角色或联系项目所有者。'
+  }
+  if (status === 404 && !message || message === 'Not found') return '资源不存在，或你没有访问权限。'
+  return message || fallback
+}
+
 export async function api(path: string, options?: RequestInit) {
   const token = localStorage.getItem('cc-token')
   const isFormData = options?.body instanceof FormData
@@ -551,8 +625,8 @@ export async function api(path: string, options?: RequestInit) {
   if (res.status === 401 && path !== '/api/auth/login') {
     localStorage.removeItem('cc-token')
     window.location.href = '/'
-    throw new Error(data?.error || 'Unauthorized')
+    throw new ApiError(data?.error || 'Unauthorized', res.status, path, data?.code)
   }
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+  if (!res.ok) throw new ApiError(data?.error || `HTTP ${res.status}`, res.status, path, data?.code)
   return data
 }

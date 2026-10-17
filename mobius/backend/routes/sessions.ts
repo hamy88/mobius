@@ -2,7 +2,7 @@ import express from 'express';
 import { v4 as uuid } from 'uuid';
 import path from 'path';
 import fs from 'fs';
-import { auth, authOrQuery } from '../middleware/auth';
+import { auth, authOrQuery, downloadAuth } from '../middleware/auth';
 import { Sessions } from '../repositories/sessions';
 import { Conversations } from '../repositories/conversations';
 import { isAssistantSession } from '../services/assistant-session';
@@ -14,6 +14,8 @@ import { SessionPendingMentions } from '../repositories/session-pending-mentions
 import { bridge } from '../bridge/instance';
 // @ts-ignore — service 仍是 .js
 import { buildSessionContext, buildSessionSelectionSnapshot, regenerateSessionSelectionSnapshot } from '../services/session-context';
+// @ts-ignore — service 仍是 .js
+import { parsePcClientMetadata, pcClientMetadataForContinuation } from '../services/pc-client-context';
 // @ts-ignore — repository 仍是 .js
 import { audit } from '../repositories/audit';
 // @ts-ignore — service 仍是 .js
@@ -23,7 +25,6 @@ import { useProxyForSession, withSessionProxyState } from '../services/session-p
 // @ts-ignore — service 仍是 .js
 import * as agents from '../agents';
 import { computeSessionRuntimeStatus, syncAgentStatusIfChanged } from '../utils/session-runtime-status';
-import { sanitizeEntrySecrets } from '../services/secret-guard';
 // @ts-ignore — repository 仍是 .js
 import { Projects } from '../repositories/projects';
 // @ts-ignore — repository 仍是 .js (通过 skills-fs / memories-fs 兼容层)
@@ -32,22 +33,23 @@ import { Skills } from '../repositories/skills';
 import { Memories } from '../repositories/memories';
 // @ts-ignore — service 仍是 .js
 import { syncSkillsToWorkspace } from '../services/session-skills-sync';
+// @ts-ignore — service 仍是 .js (合成记忆「本任务知识」的同一解析入口)
+import { readIssueKnowledgeShape, ISSUE_KNOWLEDGE_ID_PREFIX } from '../services/project-knowledge';
 // @ts-ignore — service 仍是 .js
 import { recordAdminAuditIfCrossUser } from '../services/admin-audit';
 // @ts-ignore — service 仍是 .js
 import { gitTopLevel, isGitRepoRoot, resolveSessionWorkspace } from '../services/workspace';
 // @ts-ignore — service 仍是 .js
 import {
-  countMergedJsonl,
-  readMergedJsonlSlice,
-  readMobiusSpine,
-  readPrimaryTsSlice,
-  appendMobiusErrorEntry,
-  readLastMobiusEntryType,
-  DEFAULT_HISTORY_TAIL,
-  MOBIUS_HISTORY_TAIL,
-  MAX_HISTORY_FETCH,
-} from '../services/mobius-jsonl';
+  syncSession as syncHistoryStore,
+  getGroups as getHistoryGroups,
+  getGroupEntries as getHistoryGroupEntries,
+  getPendingOpeners as getHistoryPendingOpeners,
+  writeMobiusErrorEntry,
+  deleteSessionData as deleteHistoryData,
+  subscribeSessionEvents,
+  sessionIdOfJsonlPath,
+} from '../services/mobius-agent-history';
 // @ts-ignore — service 仍是 .js
 import { readSessionInputs } from '../services/session-inputs';
 // @ts-ignore — service 仍是 .js
@@ -81,6 +83,7 @@ import {
   canReadIssue,
   canReadResearch,
   canReadSession,
+  canReadContextItem,
 } from '../services/access-control';
 // flag 路径约定单一来源 (与 backend / scanner 一致): <仓库根>/.imac/flags/<sid>/{running,failed}.flag
 // readJobFlagState / safeRemoveRunningFlag 均来自 utils/session-flags (已 TS 化).
@@ -302,6 +305,21 @@ export function backendForSession(session: AnySession | null | undefined): AnyBa
   return agents.get(modelRegistry.backendNameForSessionModel(session?.model));
 }
 
+// 出队事件检测器 (透传给 history-store 的 sync): 按 backend 取 containDequeueEvent,
+// 拿不到则恒 true (立即出队, 与基类占位一致).
+function containDequeueEventOf(backend: AnyBackend, sessionId?: string): (entry: any, pendingInputs?: string[]) => boolean {
+  return typeof backend?.containDequeueEvent === 'function'
+    ? (entry: any, pendingInputs: string[] = []) => {
+      const inputs = pendingInputs.length || !sessionId
+        ? pendingInputs
+        : (backend.getPendingRequests?.(sessionId) || [])
+            .map((item: any) => typeof item === 'string' ? item : item?.content)
+            .filter((item: any): item is string => typeof item === 'string')
+      return backend.containDequeueEvent(entry, inputs)
+    }
+    : () => true;
+}
+
 function isTurnCompleteEntry(entry: any): boolean {
   const sr = entry?.message?.stop_reason;
   if (entry?.type === 'assistant' && sr && sr !== 'tool_use') return true;
@@ -428,70 +446,6 @@ function writeSseComment(res: express.Response | null, text: string): boolean {
   return res.write(`: ${text}\n\n`);
 }
 
-interface JsonlHistory {
-  entries?: any[];
-  total?: number;
-  totalApproximate?: boolean;
-  truncated?: boolean;
-  sentinel?: any;
-}
-
-async function sendSseJsonlHistory(
-  res: express.Response,
-  sessionId: string,
-  hist: JsonlHistory,
-): Promise<boolean> {
-  const entries = Array.isArray(hist?.entries) ? hist.entries! : [];
-  const baseMeta = {
-    event: 'jsonl_history',
-    session_id: sessionId,
-    total: hist?.total ?? entries.length,
-    total_approximate: !!hist?.totalApproximate,
-    truncated: !!hist?.truncated,
-  };
-
-  if (entries.length === 0) {
-    return writeSse(res, 'jsonl_history', { ...baseMeta, reset: true, done: true, chunk_index: 0, entries: [] });
-  }
-
-  const maxEntries = 250;
-  const maxBytes = 512 * 1024;
-  let chunkIndex = 0;
-  let chunkBytes = 0;
-  let chunk: any[] = [];
-
-  const flush = async (done: boolean): Promise<boolean> => {
-    if (!chunk.length && !done) return true;
-    const payload = {
-      ...baseMeta,
-      reset: chunkIndex === 0,
-      done: !!done,
-      chunk_index: chunkIndex,
-      count: chunk.length,
-      entries: chunk,
-    };
-    chunkIndex += 1;
-    chunkBytes = 0;
-    chunk = [];
-    return writeSse(res, 'jsonl_history', payload);
-  };
-
-  for (const entry of entries) {
-    // 出口消毒: Bash 命令/工具参数中的明文密码 → 加密占位符 (前端渲染 🔒)
-    try { sanitizeEntrySecrets(entry); } catch { /* 消毒失败不阻塞历史回灌 */ }    let encoded: string;
-    try { encoded = JSON.stringify(entry); } catch { continue; }
-    const entryBytes = Buffer.byteLength(encoded);
-    if (chunk.length > 0 && (chunk.length >= maxEntries || chunkBytes + entryBytes > maxBytes)) {
-      const ok = await flush(false);
-      if (!ok) return false;
-    }
-    chunk.push(entry);
-    chunkBytes += entryBytes + 1;
-  }
-
-  return flush(true);
-}
-
 
 router.patch('/:id', auth, (req: express.Request, res: express.Response) => {
   const id = String(req.params.id);
@@ -535,6 +489,30 @@ router.patch('/:id/model', auth, async (req: express.Request, res: express.Respo
   Sessions.updateModel(id, resolved.sessionModelValue);
   auditSessionAccess(user, 'change_session_model', Sessions.findById(id) as any);
   res.json({ ok: true, model: resolved.sessionModelValue, label: resolved.label || resolved.sessionModelValue });
+});
+
+// 切换会话绑定的 aimux 协作设备 (RemoteAimuxMcpIndicator 点击切换).
+// 覆盖 pc_client_metadata.aimux_id, 保留 work_mode/is_tui/add_remote_aimux_mcp/local_path 等其余字段.
+// 首次切换时把"切换前"的设备惰性记为 initial_aimux_id, 之后保持不变 (可撤回的锚点).
+// 权限同 PATCH /:id (findSessionOperable = owner/admin/project-owner); 前端只从 /aimux_bridge/api/remotes
+// 的 live 列表里挑可选项, 故这里只做非空校验, 不再重复查 bridge.
+router.patch('/:id/aimux-device', auth, (req: express.Request, res: express.Response) => {
+  const id = String(req.params.id);
+  const user = userOf(req);
+  const session = findSessionOperable(id, user);
+  if (!session) { res.status(404).json({ error: '未找到或无权修改' }); return; }
+  const newAimuxId = String(req.body?.aimux_id || '').trim();
+  if (!newAimuxId) { res.status(400).json({ error: 'aimux_id 不能为空' }); return; }
+  const meta = parsePcClientMetadata(session.pc_client_metadata) ?? {};
+  const previousAimuxId = typeof meta.aimux_id === 'string' ? meta.aimux_id.trim() : '';
+  // 已有 initial 锚点则保持不变; 否则用"切换前"的设备做锚点 (第一次切换).
+  const initialAimuxId = (typeof meta.initial_aimux_id === 'string' && meta.initial_aimux_id.trim())
+    ? meta.initial_aimux_id.trim()
+    : previousAimuxId;
+  const updated = { ...meta, aimux_id: newAimuxId, initial_aimux_id: initialAimuxId };
+  Sessions.updatePcClientMetadata(id, updated);
+  auditSessionAccess(user, 'switch_session_aimux_device', session);
+  res.json({ ok: true, pc_client_metadata: updated, previous_aimux_id: previousAimuxId, initial_aimux_id: initialAimuxId });
 });
 
 interface BackgroundCloseResult {
@@ -627,24 +605,19 @@ function researchSessionLeftContent(session: AnySession): string {
   return `Research Agent「${session.name || session.session_id}」已离开团队。session_id=${session.session_id}, role=${role}`;
 }
 
-function appendResearchSessionLeftNotice(session: AnySession, userId: string, handoffInput?: any): any {
+function appendResearchSessionLeftNotice(session: AnySession, userId: string): any {
   if (session.scope_type !== 'research' || !session.research_id) return null;
   const role = session.research_role === 'chief_researcher' ? 'chief_researcher' : 'research_assistant';
-  const removeReason = String(handoffInput?.remove_reason || '用户手工移除').trim();
-  const handoffSummary = String(handoffInput?.handoff_summary || session.description || '未提供明确交接内容，请 Chief 检查该 Agent 最近任务').trim();
   return appendBlackboardRecord({
     researchId: session.research_id,
     author: 'HR',
-    content: `${researchSessionLeftContent(session)}\n删除理由: ${removeReason}\n未完成任务与交接: ${handoffSummary}`,
+    content: researchSessionLeftContent(session),
     metadata: {
       event: 'session_left',
       session_id: session.session_id,
       role,
       name: session.name || '',
       deleted_by: userId || null,
-      remove_reason: removeReason,
-      handoff_summary: handoffSummary,
-      handoff_auto_derived: !handoffInput?.handoff_summary,
     },
   });
 }
@@ -655,16 +628,12 @@ router.delete('/:id', auth, async (req: express.Request, res: express.Response) 
   const user = userOf(req);
   const session = findSessionOperable(id, user);
   if (!session) { res.status(404).json({ error: '未找到' }); return; }
-  if (session.scope_type === 'research' && session.research_role === 'chief_researcher') {
-    res.status(409).json({ error: 'Chief 不能作为普通 Research Agent 单独删除；请通过 Research 生命周期管理', code: 'chief_lifecycle_protected' });
-    return;
-  }
   auditSessionAccess(user, 'delete_session', session);
 
   const sid = id;
   let noticeResult: any = null;
   if (session.scope_type === 'research' && shouldNotifyResearchPeers(req)) {
-    noticeResult = appendResearchSessionLeftNotice(session, user.id, req.body);
+    noticeResult = appendResearchSessionLeftNotice(session, user.id);
     if (noticeResult?.error) { res.status(500).json({ error: noticeResult.error }); return; }
   }
 
@@ -680,6 +649,7 @@ router.delete('/:id', auth, async (req: express.Request, res: express.Response) 
     }));
 
   Sessions.permanentDelete(sid);
+  try { deleteHistoryData(sid); } catch {}
   // 仅分身(web: 前缀)清理群成员; 主小莫(assistant-question: 前缀)不清理——交给方案A(@ 时回退到当前主小莫)。
   if (!isAssistantSession(session)) {
     try { Conversations.removeAgentMembers(sid); } catch {}
@@ -702,14 +672,10 @@ router.delete('/:id/permanent', auth, async (req: express.Request, res: express.
   const user = userOf(req);
   const session = findSessionOperable(id, user);
   if (!session) { res.status(404).json({ error: '未找到' }); return; }
-  if (session.scope_type === 'research' && session.research_role === 'chief_researcher') {
-    res.status(409).json({ error: 'Chief 不能作为普通 Research Agent 单独删除；请通过 Research 生命周期管理', code: 'chief_lifecycle_protected' });
-    return;
-  }
   auditSessionAccess(user, 'delete_session_permanent', session);
   let noticeResult: any = null;
   if (session.scope_type === 'research' && shouldNotifyResearchPeers(req)) {
-    noticeResult = appendResearchSessionLeftNotice(session, user.id, req.body);
+    noticeResult = appendResearchSessionLeftNotice(session, user.id);
     if (noticeResult?.error) { res.status(500).json({ error: noticeResult.error }); return; }
   }
   const closed = await closeBackgroundForDelete(session, id, '永久删除');
@@ -721,6 +687,7 @@ router.delete('/:id/permanent', auth, async (req: express.Request, res: express.
       terminated: closed.terminated,
     }));
   Sessions.permanentDelete(id);
+  try { deleteHistoryData(id); } catch {}
   if (!isAssistantSession(session)) {
     try { Conversations.removeAgentMembers(id); } catch {}
   }
@@ -815,6 +782,25 @@ router.post('/:id/stop', auth, async (req: express.Request, res: express.Respons
   res.json({ ok, task_id: sessionId });
 });
 
+// 打断当前 turn 并让 agent 出队下一条排队指令 (排队卡片闪电按钮). 不追加新 prompt.
+router.post('/:id/pause-to-dequeue', auth, async (req: express.Request, res: express.Response) => {
+  const id = String(req.params.id);
+  const user = userOf(req);
+  const session = findSessionOperable(id, user);
+  if (!session) { res.status(404).json({ error: '未找到' }); return; }
+  auditSessionAccess(user, 'pause_to_dequeue', session);
+
+  const backend = backendForSession(session);
+  try {
+    await backend.pauseCurrentToDequeueQuery(id);
+  } catch (e) {
+    console.warn('[sessions/pause-to-dequeue] failed:', (e as Error).message);
+    res.status(500).json({ error: '打断出队失败' });
+    return;
+  }
+  res.json({ ok: true, task_id: id });
+});
+
 router.get('/:id/events', authOrQuery, async (req: express.Request, res: express.Response) => {
   const sessionId = String(req.params.id);
   const user = userOf(req);
@@ -888,66 +874,94 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
       return;
     }
 
-    // count-then-tail: 先发 cheap total (不 parse, 只数 \n), 让前端立刻显示 "N entries / X 轮".
-    // 然后只回灌末尾 DEFAULT_HISTORY_TAIL 条; 用户点 "展开全部" 时再走 REST 补齐.
-    // 默认 full=0; ?full=1 走旧路径 (一次性回灌全部, 最多 maxLines).
-    const fullHistory = String(req.query.full || '') === '1';
-    let metaTotal = 0;
-    let metaApproximate = false;
-    if (!fullHistory) {
-      try {
-        const histPath = typeof backend._resolveJsonlPath === 'function'
-          ? backend._resolveJsonlPath(sessionId)
-          : null;
-        if (histPath) {
-          const counted = countMergedJsonl(histPath);
-          metaTotal = counted.total;
-          metaApproximate = counted.totalApproximate;
-          const metaSent = await writeSse(res, 'jsonl_meta', {
-            event: 'jsonl_meta',
-            session_id: sessionId,
-            total: metaTotal,
-            total_approximate: metaApproximate,
-            tail_count: DEFAULT_HISTORY_TAIL,
-            // 特殊规则: .mobius.jsonl 轨尾部阈值 (不受 tail_count 限制)
-            mobius_tail_count: MOBIUS_HISTORY_TAIL,
-            jsonl_path: counted?.paths?.primary || histPath || null,
-          });
-          if (!metaSent || closed) { endStream(); return; }
+    // ── 历史存储 (agent-history-store): 订阅即补齐, 事件 = 落库结果的投影 ──
+    // 协议 ③: 前端另行 GET ① 拿组元数据、按需 GET ② 拿组条目; SSE 只推增量事件
+    // (group_created / entries). agent 原生 raw 流仅当低延迟触发器: 一条新行 →
+    // 触发一次 store 增量 sync (首条立即, 后续 300ms 合批), sync 提交后由 store 广播.
+    //
+    // 新会话陷阱: jsonl 路径要等首条消息 dispatch 绑定 runtime 后才查得到 (codex 的
+    // rollout 绑定就在 dispatch 里; claude-code 是竞态), 而 SSE 打开常更早. 若只在
+    // 连接时解析一次, 开局的 null 会把整段订阅块跳过, 这条连接就永远收不到事件.
+    // 对策: 订阅无条件挂; 路径每次要用时现问, 晚绑定也能自然追上.
+    // resolvePrimary = 现问一次"这个会话的 jsonl 在哪". 适配器内部三级查表:
+    // 内存 runtime Map → 运行时登记 (hub-runtime) → 历史存档 (hub-archive);
+    // 新会话三者皆空 → null; typeof 防御个别后端未实现该方法.
+    const resolvePrimary = () => (typeof backend._resolveJsonlPath === 'function'
+      ? backend._resolveJsonlPath(sessionId)
+      : null);
+    {
+      // 开门补齐: 连接建立时把库读到文件末尾; 新会话路径未绑定 → 跳过不报错, 后续 runSync 追上.
+      const initialPath = resolvePrimary();
+      let storeSyncError = '';
+      if (initialPath) {
+        try {
+          const synced = syncHistoryStore(sessionId, initialPath, containDequeueEventOf(backend, sessionId));
+          // 结构化失败 (书签错乱等): 取返回里的 error 文案.
+          if (!synced.ok) storeSyncError = synced.error || 'history store sync failed';
+        } catch (e) {
+          // 抛异常 (非结构化失败): 同样按失败处理.
+          storeSyncError = (e as Error).message || String(e);
         }
-      } catch (e) {
-        console.warn(`[sessions/events] jsonl_meta count failed (${sessionId}): ${(e as Error).message}`);
+      }
+      // 开门补齐失败 → 告知前端并收线不订阅; error 标记粘性, 重连也一样.
+      if (storeSyncError) {
+        const sent = await writeSse(res, 'server_error', {
+          event: 'error',
+          message: storeSyncError,
+          category: 'history_store',
+        });
+        // 帧没写出去 = 连接已断 → 收线终止.
+        if (!sent || closed) { endStream(); return; }
+      } else {
+        // 事件源 1 — store 广播: 开组/新条目落库即发, 原样转发.
+        const unsubStore = subscribeSessionEvents(sessionId, (ev) => {
+          writeSse(res, ev.type, { event: ev.type, session_id: sessionId, ...ev.payload })
+            .catch(() => cleanup());
+        });
+        let syncTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastSyncAt = 0;
+        const runSync = () => {
+          lastSyncAt = Date.now();
+          // 每次现问路径: 未绑定 → 安静跳过等下一趟; 绑定后开始真正同步.
+          const primaryPath = resolvePrimary();
+          if (!primaryPath) return;
+          // 异常吞掉: 结构化 error 机制兜底.
+          try { syncHistoryStore(sessionId, primaryPath, containDequeueEventOf(backend, sessionId)); } catch {}
+        };
+        // 300ms 合批: agent 高频写文件时, 一条 raw 行最多引起一次 sync.
+        const scheduleSync = () => {
+          const since = Date.now() - lastSyncAt;
+          // 距上次 sync 已 ≥300ms → 立即跑.
+          if (since >= 300) { runSync(); return; }
+          // 否则定时到 300ms 点跑; 已挂定时器不重复挂 (后续行蹭这班车).
+          if (!syncTimer) {
+            syncTimer = setTimeout(() => { syncTimer = null; runSync(); }, 300 - since);
+          }
+        };
+        // 事件源 2 — agent 原生 raw 流: 只当低延迟触发器, 不转发内容本身.
+        const unsubRaw = backend.getAgentRawThoughtStream(
+          sessionId,
+          (entry: any) => {
+            scheduleSync();
+            // 本轮结束标记: 补发 typing=false 撤"工作中"提示, 并给会话留痕.
+            if (isTurnCompleteEntry(entry)) {
+              writeSse(res, 'typing', { event: 'typing', active: false }).catch(() => cleanup());
+              try {
+                // agent_status 现由 agent-status-syncer 统一管; turn 完成只刷新 last_agent_event 留痕.
+                db.prepare('UPDATE sessions_v2 SET last_agent_event=strftime(\'%Y-%m-%dT%H:%M:%fZ\',\'now\') WHERE session_id=?')
+                  .run(sessionId);
+              } catch {}
+            }
+          },
+        );
+        // 连接收线: 摘两个订阅 + 清未触发的定时器.
+        unsub = () => {
+          try { unsubStore(); } catch {}
+          if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+          try { unsubRaw(); } catch {}
+        };
       }
     }
-
-    const histOpts = fullHistory ? {} : { tailCount: DEFAULT_HISTORY_TAIL };
-    const hist = backend.getHistory(sessionId, histOpts) as JsonlHistory;
-    // 把 cheap total 覆盖回 hist.total, 让 sendSseJsonlHistory 的 baseMeta.total 跟 jsonl_meta 一致.
-    if (!fullHistory && metaTotal > 0) {
-      hist.total = metaTotal;
-      hist.totalApproximate = metaApproximate;
-      hist.truncated = metaTotal > (hist.entries?.length || 0);
-    }
-    const jsonlHistorySent = await sendSseJsonlHistory(res,sessionId, hist);
-    if (!jsonlHistorySent || closed) { endStream(); return; }
-
-    unsub = backend.getAgentRawThoughtStream(
-      sessionId,
-      (entry: any) => {
-        // 实时流出口消毒: agent 生成命令中的明文密码 → 加密占位符 (前端渲染 🔒)
-        try { sanitizeEntrySecrets(entry); } catch { /* 消毒失败原样发送 */ }
-        writeSse(res, 'jsonl_entry', { event: 'jsonl_entry', session_id: sessionId, entry }).catch(() => cleanup());
-        if (isTurnCompleteEntry(entry)) {
-          writeSse(res, 'typing', { event: 'typing', active: false }).catch(() => cleanup());
-          try {
-            // agent_status 现由 agent-status-syncer 统一管; turn 完成只刷新 last_agent_event 留痕.
-            db.prepare('UPDATE sessions_v2 SET last_agent_event=strftime(\'%Y-%m-%dT%H:%M:%fZ\',\'now\') WHERE session_id=?')
-              .run(sessionId);
-          } catch {}
-        }
-      },
-      { fromSentinel: hist.sentinel },
-    );
   } catch (e) {
     console.warn(`[sessions/events] stream failed (${sessionId}): ${(e as Error).message}`);
     try { await writeSse(res, 'server_error', { event: 'error', message: (e as Error).message || String(e) }); } catch {}
@@ -955,104 +969,150 @@ router.get('/:id/events', authOrQuery, async (req: express.Request, res: express
   }
 });
 
-// jsonl-history REST — "展开全部" 时按需补齐. SSE 默认只回灌末尾 DEFAULT_HISTORY_TAIL,
-// 前端要看完整历史时调用这个端点拉指定窗口 [from, from+limit).
-// track=mobius  → 伴生轨全量骨架 (超长会话"加载全部"只拉它, 主轨明细等展开轮次再取).
-// track=primary → 主轨时间戳切片 [from_ts 含, to_ts 排), 字节二分定界, from_byte 游标续拉.
-router.get('/:id/jsonl-history', auth, (req: express.Request, res: express.Response) => {
+// ── 历史存储协议 ① ② (agent-history-store.db) ────────────────────────────
+// ① 全部轮元数据一次给全; If-None-Match == session_version 时 304 零载荷.
+router.get('/:id/groups', auth, (req: express.Request, res: express.Response) => {
   const id = String(req.params.id);
   const user = userOf(req);
   const session = findSessionReadable(id, user);
   if (!session) { res.status(404).json({ error: '未找到' }); return; }
-  auditSessionAccess(user, 'read_session_jsonl_history', session);
+  auditSessionAccess(user, 'read_session_groups', session);
 
   const backend = backendForSession(session);
-  const histPath = typeof backend._resolveJsonlPath === 'function'
+  const primaryPath = typeof backend._resolveJsonlPath === 'function'
     ? backend._resolveJsonlPath(id)
     : null;
-  if (!histPath) {
-    res.json({ entries: [], total: 0, from: 0, returned: 0, has_more: false });
-    return;
-  }
-
-  const track = String(req.query.track || '');
-  if (track === 'mobius') {
-    try {
-      const spine = readMobiusSpine(histPath);
-      res.json({
-        session_id: id,
-        track: 'mobius',
-        entries: spine.entries,
-        total: spine.total,
-        returned: spine.entries.length,
-        truncated: spine.truncated,
-      });
-    } catch (e) {
-      res.status(500).json({ error: `mobius spine 读取失败: ${(e as Error).message}` });
-    }
-    return;
-  }
-  if (track === 'primary') {
-    try {
-      const slice = readPrimaryTsSlice(histPath, {
-        fromTs: req.query.from_ts,
-        toTs: req.query.to_ts,
-        fromByte: req.query.from_byte,
-        limit: req.query.limit,
-      });
-      if (slice.error) { res.status(400).json({ error: slice.error }); return; }
-      res.json({ session_id: id, track: 'primary', ...slice });
-    } catch (e) {
-      res.status(500).json({ error: `primary slice 读取失败: ${(e as Error).message}` });
-    }
-    return;
-  }
-
-  const fromIndex = Math.max(0, Math.floor(Number(req.query.from) || 0));
-  const requestedLimit = Math.floor(Number(req.query.limit) || DEFAULT_HISTORY_TAIL);
-  const limit = Math.max(0, Math.min(MAX_HISTORY_FETCH, requestedLimit));
-  // Overlay/preview callers only need the newest records.  Using getHistory(tailCount)
-  // avoids readMergedJsonlSlice's intentionally-expensive full-file parse.
-  const requestedTail = Math.floor(Number(req.query.tail_count) || 0);
-  const tailCount = Math.max(0, Math.min(MAX_HISTORY_FETCH, requestedTail));
-
   try {
-    if (tailCount > 0) {
-      const history = backend.getHistory(id, { tailCount });
-      const entries = Array.isArray(history?.entries) ? history.entries : [];
-      res.json({
-        session_id: id,
-        entries,
-        total: Number(history?.total || entries.length),
-        from: Math.max(0, Number(history?.total || entries.length) - entries.length),
-        returned: entries.length,
-        has_more: Boolean(history?.truncated),
-        path: history?.paths?.primary || histPath,
-      });
+    const synced = syncHistoryStore(id, primaryPath, containDequeueEventOf(backend, id));
+    if (!synced.ok) {
+      res.status(502).json({ error: synced.error || 'history store sync failed' });
       return;
     }
-    const slice = readMergedJsonlSlice(histPath, { fromIndex, limit });
-    if (slice.exceeded) {
-      res.status(413).json({
-        error: 'jsonl 文件超过安全上限, 无法整文件解析. 请联系管理员或缩小窗口.',
-        total: slice.total,
-      });
+    const withEssential = req.query.with_essential === '1' || req.query.with_essential === 'true';
+    const { session_version, groups } = getHistoryGroups(id, withEssential);
+    const etag = String(session_version);
+    const inm = String(req.headers['if-none-match'] || '').replace(/^W\//, '').replace(/^"|"$/g, '');
+    if (inm && inm === etag) {
+      res.set('ETag', etag);
+      res.status(304).end();
       return;
     }
-    res.json({
-      session_id: id,
-      entries: slice.entries,
-      total: slice.total,
-      from: slice.from,
-      returned: slice.returned,
-      has_more: slice.from + slice.returned < slice.total,
-    });
-    return;
+    res.set('ETag', etag);
+    res.json({ session_id: id, session_version, jsonl_path: primaryPath || null, groups, pending: getHistoryPendingOpeners(id) });
   } catch (e) {
-    console.warn(`[sessions/jsonl-history] failed (${id}): ${(e as Error).message}`);
+    console.warn(`[sessions/groups] failed (${id}): ${(e as Error).message}`);
     res.status(500).json({ error: (e as Error).message || String(e) });
+  }
+});
+
+// ② 某轮全部条目: 全量、无分页、不可变. :gid = 组序号 (0 = pre 组).
+router.get('/:id/groups/:gid/entries', auth, (req: express.Request, res: express.Response) => {
+  const id = String(req.params.id);
+  const user = userOf(req);
+  const session = findSessionReadable(id, user);
+  if (!session) { res.status(404).json({ error: '未找到' }); return; }
+  auditSessionAccess(user, 'read_session_group_entries', session);
+
+  const gid = Number(req.params.gid);
+  if (!Number.isInteger(gid) || gid < 0) {
+    res.status(400).json({ error: '无效的组序号' });
     return;
   }
+  const backend = backendForSession(session);
+  const primaryPath = typeof backend._resolveJsonlPath === 'function'
+    ? backend._resolveJsonlPath(id)
+    : null;
+  try {
+    const synced = syncHistoryStore(id, primaryPath, containDequeueEventOf(backend, id));
+    if (!synced.ok) {
+      res.status(502).json({ error: synced.error || 'history store sync failed' });
+      return;
+    }
+    const result = getHistoryGroupEntries(id, gid);
+    if (!result) { res.status(404).json({ error: `组 ${gid} 不存在` }); return; }
+    res.json({ session_id: id, ...result });
+  } catch (e) {
+    console.warn(`[sessions/group-entries] failed (${id}/${gid}): ${(e as Error).message}`);
+    res.status(500).json({ error: (e as Error).message || String(e) });
+  }
+});
+
+// ── <persisted-output> 落盘 tool result 的图片取回 ────────────────────────
+// CC 把超大 tool result 落盘成 <jsonl目录>/tool-results/<call_id>.json, jsonl 里只剩
+// 2KB 预览存根. MCP 图像工具 (如 analyze_image) 的返回整张是大图时, 前端图像卡片来此
+// 按需取图: ?meta=1 只回图片元信息 (张数/mime/体积), 默认回第 index 张的字节流
+// (<img> 直连, token 走 query 与 /api/download 同款).
+// 权限三重校验: 文件名必须 = <call_id>.json、父目录必须叫 tool-results、其上级
+// <session>/<session>.jsonl 必须已登记为某会话主 jsonl 且该会话当前用户可读.
+
+// 从落盘 JSON 里抽出全部图片. 形态与前端 claudeToolResultImageOutput 对齐:
+// [{type:'text', text:'{"detail":…,"image_url":"data:image/…;base64,…"}'}] (字符串化信封)
+// 或原生 [{type:'image', source:{type:'base64', media_type, data}}].
+function persistedToolResultImages(parsed: any): Array<{ mime: string; b64: string }> {
+  const out: Array<{ mime: string; b64: string }> = [];
+  const blocks = Array.isArray(parsed) ? parsed : [parsed];
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object') continue;
+    const source = block?.source;
+    if (block?.type === 'image' && source?.type === 'base64' && typeof source?.data === 'string' && source.data) {
+      out.push({
+        mime: typeof source?.media_type === 'string' && source.media_type ? source.media_type : 'image/png',
+        b64: source.data,
+      });
+      continue;
+    }
+    if (typeof block?.text !== 'string') continue;
+    let inner: any;
+    try { inner = JSON.parse(block.text); } catch { continue; }
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) continue;
+    const ref = inner.image_url;
+    const url = typeof ref === 'string' ? ref : typeof ref?.url === 'string' ? ref.url : '';
+    const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)\s*$/.exec(url);
+    if (m) out.push({ mime: m[1], b64: m[2] });
+  }
+  return out;
+}
+
+const TOOL_RESULT_CALL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const TOOL_RESULT_MEDIA_LIMIT_BYTES = 32 * 1024 * 1024;
+
+router.get('/tool-result-media', downloadAuth, (req: express.Request, res: express.Response) => {
+  const user = userOf(req);
+  const callId = String(req.query.call_id || '');
+  if (!TOOL_RESULT_CALL_ID_RE.test(callId)) { res.status(400).json({ error: '无效 call_id' }); return; }
+  const absPath = path.resolve(String(req.query.path || ''));
+  // ✨ 三重校验: 文件名=call_id.json → 父目录=tool-results → jsonl 归属可读会话
+  // Triple check: filename = call_id.json, parent dir named tool-results, jsonl maps to a readable session
+  if (path.basename(absPath) !== `${callId}.json` || path.basename(path.dirname(absPath)) !== 'tool-results') {
+    res.status(400).json({ error: '路径与 call_id 不匹配' });
+    return;
+  }
+  // jsonl 是 session 目录的兄弟文件: <projects>/<cc-session-id>/<cc-session-id>.jsonl
+  const sessionDir = path.dirname(path.dirname(absPath));
+  const sid = sessionIdOfJsonlPath(path.join(path.dirname(sessionDir), `${path.basename(sessionDir)}.jsonl`));
+  if (!sid) { res.status(404).json({ error: '落盘文件未归属任何会话' }); return; }
+  const session = findSessionReadable(sid, user);
+  if (!session) { res.status(403).json({ error: '无权访问该会话' }); return; }
+
+  let stat: fs.Stats;
+  try { stat = fs.statSync(absPath); } catch { res.status(404).json({ error: '文件不存在' }); return; }
+  if (stat.size > TOOL_RESULT_MEDIA_LIMIT_BYTES) { res.status(413).json({ error: '文件过大' }); return; }
+  let parsed: any;
+  try { parsed = JSON.parse(fs.readFileSync(absPath, 'utf8')); } catch { res.status(422).json({ error: '文件不是有效 JSON' }); return; }
+  const images = persistedToolResultImages(parsed);
+  if (images.length === 0) { res.status(404).json({ error: '文件里没有图片' }); return; }
+  if (req.query.meta !== undefined) {
+    res.json({ count: images.length, images: images.map(im => ({ mime: im.mime, bytes: Math.floor(im.b64.length * 0.75) })) });
+    return;
+  }
+  const index = Number(req.query.index ?? 0) || 0;
+  const image = images[index];
+  if (!image) { res.status(400).json({ error: `图片序号越界 (0..${images.length - 1})` }); return; }
+  const buf = Buffer.from(image.b64, 'base64');
+  res.setHeader('Content-Type', image.mime);
+  res.setHeader('Content-Length', String(buf.length));
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.end(buf);
 });
 
 router.get('/:id/time-consume-waterfall', auth, (req: express.Request, res: express.Response) => {
@@ -1441,8 +1501,8 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
     ? String((backend as any).realTimeInfo(id) || '')
     : '';
 
-  // 错误扫描: agent 进程在, 且 .mobius.jsonl 末条不是 error (去重) 时, 调
-  // backend.getRecentError 扫 TUI 屏幕. 命中则追加一条 type:'error' 到 .mobius.jsonl,
+  // 错误扫描: agent 进程在, 且历史存储末条不是 error (去重) 时, 调
+  // backend.getRecentError 扫 TUI 屏幕. 命中则往 agent-history-store 落一条 type:'error',
   // 前端经 SSE 自然收到并以红色卡片渲染. tmux-claude-code 的 getRecentError 恒 null, 整段自动跳过.
   //
   // 不再 gate on !working: codex 撞致命上游错误 (403 余额不足 / image generation is banned /
@@ -1450,22 +1510,23 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
   // isWorking 据 rollout 尾部的 task_started/message 一直判 working=true — 旧逻辑下 "!working" 门
   // 永不打开, 错误永远扫不到, 前端看不到红色卡片. getRecentError 的 ■(U+25A0)+红色 ANSI 双匹配仅
   // 命中 codex 的 ErrorEvent (警告用黄/系统消息用灰, 不会误中), 故 working 中扫也安全; 去重
-  // (.mobius.jsonl 末条非 error) 保证同一屏错误不会因 2s 轮询反复落条刷屏.
+  // (库内末条非 error) 保证同一屏错误不会因 2s 轮询反复落条刷屏.
   // 注意: 只放宽本处 error_scan 的门, 不动 isWorking 本身 — cleaner/forgotten-flag-scanner 等仍依赖
   // 它原语义判断 "是否在干活", 改 isWorking 会误杀卡在错误上的 session.
   if (alive) {
     try {
       const jsonlPath = backend._lookupPersistedJsonlPath(id);
-      if (jsonlPath && readLastMobiusEntryType(jsonlPath) !== 'error') {
+      if (jsonlPath) {
         const err = backend.getRecentError(id);
         if (err) {
           const p = backend._lookupPersistedEntry(id) || {};
-          appendMobiusErrorEntry({
-            jsonlPath,
+          writeMobiusErrorEntry({
             sessionId: id,
             agentSessionId: p.agentSessionId || null,
             cwd: p.cwd || null,
             backendName: backend.name,
+            primaryPath: jsonlPath,
+            containDequeueEvent: containDequeueEventOf(backend, id),
             error: err,
           });
           console.log(`[sessions/status] error_scan hit sid=${id} backend=${backend.name} msg="${String(err.message).slice(0, 120)}"`);
@@ -1475,6 +1536,12 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
       console.warn(`[sessions/status] error_scan failed sid=${id}: ${(e as Error).message}`);
     }
   }
+
+  // aimux 设备绑定 (TUI 客户端据此判断"智能体是否已离开本设备"): 从 pc_client_metadata
+  // 解析出当前 aimux_id 与初始 initial_aimux_id, 供 /status 轮询消费.
+  const pcMeta = parsePcClientMetadata(session.pc_client_metadata);
+  const aimuxId = typeof pcMeta?.aimux_id === 'string' ? pcMeta.aimux_id.trim() : null;
+  const initialAimuxId = typeof pcMeta?.initial_aimux_id === 'string' ? pcMeta.initial_aimux_id.trim() : null;
 
   res.json({
     session_id: id,
@@ -1490,6 +1557,8 @@ router.get('/:id/status', auth, (req: express.Request, res: express.Response) =>
     agent_session_id: session.agent_session_id || null,
     worktree_ignored: worktreeIgnored,
     real_time_info: realTimeInfo,
+    aimux_id: aimuxId,
+    initial_aimux_id: initialAimuxId,
     // 会话当前 model 是否仍可用 (管理员可能已删除该模型配置).
     // false 时前端进入只读状态, 显示"更换模型并继续"入口, 禁止发送.
     model_available: !!modelRegistry.resolveSessionModel(session.model),
@@ -1632,6 +1701,41 @@ function stripBodies(snapshot: any) {
   };
 }
 
+// 面板可点击列表 (all_skills / all_memories) 的可用性过滤:
+//   这两个列表是会话创建时冻结的快照, 而「强调 / 追加」按 id 实时重解析 — skill/memory 被
+//   改名或删除后, 快照里的旧 id 就成了"点了必报错"的死行 (用户报的 "skill 不存在或无权访问"
+//   正是它: 内置 skill 目录改名后, 老会话快照仍指向旧 dirName). 这里用与 emphasize 完全同源的
+//   解析口径把不可解析的行剔掉, 让列表与点击行为一致. 已注入清单 (skills / memories) 保持快照
+//   原样, 那是历史展示, 不可点击.
+function pruneUnresolvableContextItems(snapshot: any, user: AnyUser, session: AnySession) {
+  const src = snapshot && typeof snapshot === 'object' ? { ...snapshot } : {};
+  const issue = session?.issue_id ? (Issues.findById(session.issue_id) as any) : null;
+  const project = issue?.project_id ? (Projects.findById(issue.project_id) as any) : null;
+  const issueKnowledgeLive = !!(issue && project && readIssueKnowledgeShape(project, issue));
+  const skillAlive = (s: any) => {
+    try {
+      const live = s?.id ? (Skills.findById(s.id) as any) : null;
+      return !!live && canReadContextItem(user, 'skill', live);
+    } catch { return false; }
+  };
+  const memoryAlive = (m: any) => {
+    const id = String(m?.id || '');
+    if (!id) return false;
+    // 合成记忆「本任务知识」不入记忆库, 按文件在不在判.
+    if (id.startsWith(ISSUE_KNOWLEDGE_ID_PREFIX)) return issueKnowledgeLive && !!issue && canReadIssue(user, issue);
+    try {
+      const live = Memories.findById(id) as any;
+      return !!live && canReadContextItem(user, 'memory', live);
+    } catch { return false; }
+  };
+  if (Array.isArray(src.all_skills)) src.all_skills = src.all_skills.filter(skillAlive);
+  if (Array.isArray(src.all_memories)) src.all_memories = src.all_memories.filter(memoryAlive);
+  // 无 all_* 的老快照, 前端回落把 skills / memories 当可点击列表用 → 同样过滤.
+  if (!Array.isArray(src.all_skills) && Array.isArray(src.skills)) src.skills = src.skills.filter(skillAlive);
+  if (!Array.isArray(src.all_memories) && Array.isArray(src.memories)) src.memories = src.memories.filter(memoryAlive);
+  return src;
+}
+
 // 在已存在的会话内新装/新加 skill|memory 后, 用当前 live 数据 + 该会话现存的勾选状态
 // 重建并持久化 selection snapshot. 会话快照在创建时一次性冻结, 不刷新则新装的条目
 // 既不进入会话面板列表、也不会在后续对话回合被注入.
@@ -1649,7 +1753,7 @@ router.post('/:id/refresh-selection-snapshot', auth, (req: express.Request, res:
   Sessions.updateSelectionSnapshot(id, JSON.stringify(snapshot));
   const reread = Sessions.getSelectionSnapshot(id) as any;
   res.json({
-    snapshot: stripBodies(snapshot),
+    snapshot: stripBodies(pruneUnresolvableContextItems(snapshot, user, session)),
     snapshot_at: reread?.session_selection_snapshot_at || null,
     source: 'refreshed',
     legacy: false,
@@ -1667,7 +1771,7 @@ router.get('/:id/selection-snapshot', auth, (req: express.Request, res: express.
   if (stored?.session_selection_snapshot) {
     try {
       res.json({
-        snapshot: stripBodies(JSON.parse(stored.session_selection_snapshot)),
+        snapshot: stripBodies(pruneUnresolvableContextItems(JSON.parse(stored.session_selection_snapshot), user, session)),
         snapshot_at: stored.session_selection_snapshot_at || null,
         source: 'created',
         legacy: false,
@@ -1683,11 +1787,11 @@ router.get('/:id/selection-snapshot', auth, (req: express.Request, res: express.
     try {
       const sources = JSON.parse(snap.context_snapshot_sources);
       res.json({
-        snapshot: stripBodies({
+        snapshot: stripBodies(pruneUnresolvableContextItems({
           skills: sources?.skills || [],
           memories: sources?.memories || [],
           totals: { skills: (sources?.skills || []).length, memories: (sources?.memories || []).length },
-        }),
+        }, user, session)),
         snapshot_at: snap.context_snapshot_at || null,
         source: 'context',
         legacy: true,
@@ -1820,16 +1924,37 @@ router.post('/:id/emphasize', auth, async (req: express.Request, res: express.Re
   let relPath: string | null = null;
   if (kind === 'skill') {
     const skill = Skills.findById(id) as any;
-    if (!skill) { res.status(400).json({ error: 'skill 不存在' }); return; }
+    if (!skill) { res.status(404).json({ error: 'skill 已被删除或重命名，请刷新会话面板' }); return; }
+    if (!canReadContextItem(user, 'skill', skill)) { res.status(403).json({ error: 'skill 不存在或无权访问' }); return; }
     const syncResults = syncSkillsToWorkspace(workDir as string, [{ id: skill.id }]);
     const hit = syncResults.find((r: any) => r.id === skill.id && r.ok);
     if (!hit) { res.status(500).json({ error: '复制 skill 到 session 工作目录失败' }); return; }
     relPath = hit.relPath;
     messageContent = `用户要求你重视 ${relPath} 文件中的 skill`;
   } else {
+    // 记忆库条目 (user: / project: 前缀) 走库解析.
     const memory = Memories.findById(id) as any;
-    if (!memory) { res.status(400).json({ error: 'memory 不存在' }); return; }
-    const memoryBody = typeof memory.body === 'string' ? memory.body : '';
+    let memoryBody: string | null = memory && canReadContextItem(user, 'memory', memory)
+      ? (typeof memory.body === 'string' ? memory.body : '')
+      : null;
+    if (memory && memoryBody === null) { res.status(403).json({ error: 'memory 不存在或无权访问' }); return; }
+    if (memoryBody === null) {
+      // 合成记忆「本任务知识」(scope='issue', id=issue-knowledge:<issueId>): 它不入记忆库,
+      // 由 gatherIssueSources 按 session 的 project+issue 即时读文件拼装, 因此
+      // Memories.findById 永远找不到 — 这里必须用同一条路径重读, 否则面板上每一项点
+      // 「强调」都会 404.
+      if (!id.startsWith(ISSUE_KNOWLEDGE_ID_PREFIX)) {
+        res.status(404).json({ error: 'memory 已被删除或重命名，请刷新会话面板' });
+        return;
+      }
+      const issue = session.issue_id ? (Issues.findById(session.issue_id) as any) : null;
+      if (!issue) { res.status(404).json({ error: 'memory 已被删除或重命名，请刷新会话面板' }); return; }
+      if (!canReadIssue(user, issue)) { res.status(403).json({ error: 'memory 不存在或无权访问' }); return; }
+      const project = issue.project_id ? (Projects.findById(issue.project_id) as any) : null;
+      const shape = project ? readIssueKnowledgeShape(project, issue) : null;
+      if (!shape) { res.status(404).json({ error: '本任务知识文件不存在，请刷新会话面板' }); return; }
+      memoryBody = typeof shape.body === 'string' ? shape.body : '';
+    }
     messageContent = `用户要求你重视一下记忆：\n\n${memoryBody}`;
   }
 
@@ -1892,6 +2017,10 @@ issueScoped.get('/', auth, (req: express.Request, res: express.Response) => {
     }
     return { ...withSessionProxyState(s), job_accomplished, job_failed };
   });
+  // agent_status 走 session-status-refresher 每 2s 刷新的快查字段, 本路径只读不算 —
+  // 探测是 spawnSync, 放在读路径上会把请求排到探测后面.
+  // agent_status comes from the fast field refreshed every 2s by session-status-refresher;
+  // this path only reads it — probing is spawnSync and would queue the request behind it.
   res.json(enriched);
 });
 
@@ -1941,10 +2070,7 @@ issueScoped.post('/', auth, async (req: express.Request, res: express.Response) 
   const sanitizeIds = (arr: any): string[] => Array.isArray(arr) ? arr.filter((x: any) => typeof x === 'string' && x.length > 0) : [];
   const excludedSkillIds = sanitizeIds(excluded_skill_ids);
   const excludedMemoryIds = sanitizeIds(excluded_memory_ids);
-  const pcClientMetadata = req.body?.pc_client_metadata;
-  const selectionSnapshot = buildSessionSelectionSnapshot(user, issueId, excludedSkillIds, excludedMemoryIds, {
-    pc_client_metadata: pcClientMetadata,
-  });
+  let pcClientMetadata = req.body?.pc_client_metadata;
   const continueFromSessionId = typeof req.body?.continue_from_session_id === 'string'
     ? req.body.continue_from_session_id.trim()
     : '';
@@ -1974,7 +2100,13 @@ issueScoped.post('/', auth, async (req: express.Request, res: express.Response) 
       res.status(500).json({ error: (e as Error).message || '创建 Session 转接文档失败' });
       return;
     }
+    // 继承旧会话当前的 AIMUX 连接，但不继承它的设备切换历史。
+    pcClientMetadata = pcClientMetadataForContinuation(sourceSession.pc_client_metadata);
   }
+
+  const selectionSnapshot = buildSessionSelectionSnapshot(user, issueId, excludedSkillIds, excludedMemoryIds, {
+    pc_client_metadata: pcClientMetadata,
+  });
 
   Sessions.insert({
     session_id: sessionId,

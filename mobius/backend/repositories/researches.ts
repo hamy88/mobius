@@ -3,7 +3,6 @@ import type { ResearchRow } from '../types/rows';
 
 type ResearchVisibility = 'inherit' | 'private' | 'team' | 'public' | 'allowlist';
 type ResearchStatus = 'active' | 'completed';
-type ResearchMode = 'custom' | 'chief_led';
 
 interface ResearchWithProjectRow extends ResearchRow {
   project_name?: string;
@@ -25,8 +24,6 @@ interface InsertArgs {
   title: string;
   description?: string | null;
   created_by: string;
-  mode?: 'custom' | 'chief_led';
-  assistant_limit?: number;
   visibility?: ResearchVisibility;
 }
 
@@ -62,23 +59,24 @@ const Researches = {
     `).all(...params) as ResearchListRow[];
   },
 
-  searchMetadata: (rawQuery: string, limit: number = 1001): ResearchRow[] => {
+  searchMetadata: (rawQuery: string, limit: number = 1001, projectId?: string): ResearchRow[] => {
     const query = String(rawQuery || '').trim().toLowerCase();
     if (!query) return [];
+    const project = String(projectId || '').trim();
     return db.prepare(`
       SELECT r.*
       FROM researches r
-      WHERE instr(lower(COALESCE(r.title, '')), ?) > 0
-         OR instr(lower(COALESCE(r.description, '')), ?) > 0
+      WHERE ${project ? 'r.project_id = ? AND ' : ''}(instr(lower(COALESCE(r.title, '')), ?) > 0
+         OR instr(lower(COALESCE(r.description, '')), ?) > 0)
       ORDER BY r.last_active DESC
       LIMIT ?
-    `).all(query, query, Math.max(1, Math.min(Number(limit) || 1001, 5001))) as ResearchRow[];
+    `).all(...(project ? [project, query, query, Math.max(1, Math.min(Number(limit) || 1001, 5001))] : [query, query, Math.max(1, Math.min(Number(limit) || 1001, 5001))])) as ResearchRow[];
   },
 
-  insert: ({ id, project_id, title, description, created_by, mode, assistant_limit, visibility }: InsertArgs) =>
+  insert: ({ id, project_id, title, description, created_by, visibility }: InsertArgs) =>
     db.prepare(
-      'INSERT INTO researches (id, project_id, title, description, created_by, status, mode, assistant_limit, visibility) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, project_id, title, description || '', created_by, 'active', mode || 'custom', assistant_limit || 3, visibility || 'inherit'),
+      'INSERT INTO researches (id, project_id, title, description, created_by, status, visibility) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, project_id, title, description || '', created_by, 'active', visibility || 'inherit'),
 
   updateTitle: (id: string, title: string) =>
     db.prepare('UPDATE researches SET title = ? WHERE id = ?').run(title, id),
@@ -88,10 +86,6 @@ const Researches = {
     db.prepare('UPDATE researches SET status = ? WHERE id = ?').run(status, id),
   updatePinned: (id: string, pinned: boolean) =>
     db.prepare('UPDATE researches SET pinned = ? WHERE id = ?').run(pinned ? 1 : 0, id),
-  updateAssistantLimit: (id: string, limit: number) =>
-    db.prepare('UPDATE researches SET assistant_limit = ? WHERE id = ?').run(limit, id),
-  updateMode: (id: string, mode: ResearchMode) =>
-    db.prepare('UPDATE researches SET mode = ? WHERE id = ?').run(mode, id),
   updateVisibility: (id: string, visibility: ResearchVisibility) =>
     db.prepare('UPDATE researches SET visibility = ? WHERE id = ?').run(visibility, id),
 

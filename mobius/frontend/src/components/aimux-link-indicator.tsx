@@ -7,8 +7,8 @@
 // 兜底 getBootData().aimuxIdentifier; 可操作路径取自 getProjectLocalPath(projectId))。
 // 当前选中模式按 session 记到 localStorage, 下次打开菜单时高亮回显。
 // aimux 状态经 preload 暴露的 getAimuxStatus()/onAimuxStatus() 取得, 无需改桌面端。
-import { memo, useCallback, useEffect, useRef, useState, type SVGProps } from 'react'
-import { Server, Laptop, ArrowLeftRight, Check } from 'lucide-react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject, type SVGProps } from 'react'
+import { Server, Laptop, ArrowLeftRight, Check, Undo2 } from 'lucide-react'
 import { api } from '../store'
 import { pollRecursive } from '../services/polling'
 
@@ -17,6 +17,7 @@ type AimuxState = 'stopped' | 'starting' | 'connected' | 'failed'
 interface PcClientMeta {
   work_mode?: string
   aimux_id?: string
+  initial_aimux_id?: string
   local_path?: string
   is_tui?: boolean
   add_remote_aimux_mcp?: boolean
@@ -105,6 +106,14 @@ function remoteAimuxMcpId(session: unknown): string {
   return typeof meta.aimux_id === 'string' ? meta.aimux_id.trim() : ''
 }
 
+/** 初始设备: 优先读 initial_aimux_id (首次切换时锚定), 未切换过则回退到当前 aimux_id。 */
+function initialAimuxMcpId(session: unknown): string {
+  const meta = parsePcMeta((session as { pc_client_metadata?: unknown })?.pc_client_metadata)
+  if (meta?.add_remote_aimux_mcp !== true) return ''
+  if (typeof meta.initial_aimux_id === 'string' && meta.initial_aimux_id.trim()) return meta.initial_aimux_id.trim()
+  return typeof meta.aimux_id === 'string' ? meta.aimux_id.trim() : ''
+}
+
 /** AIMUX 协作链路标志，同时用于状态提示和声明可合作计算机入口。 */
 export function RemoteAimuxMcpIcon({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
@@ -125,10 +134,93 @@ export function RemoteAimuxMcpIcon({ className, ...props }: SVGProps<SVGSVGEleme
   )
 }
 
-function RemoteAimuxMcpIndicatorInner({ session }: { session: unknown }) {
-  const aimuxId = remoteAimuxMcpId(session)
-  const [connected, setConnected] = useState(false)
+interface RemoteDevice {
+  name: string
+  status: string
+  platform?: string
+  default_profile?: string
+  last_seen?: string
+}
 
+/** 设备连接状态 → 菜单文案. null = 仍在轮询中. */
+function connText(c: boolean | null): string {
+  return c === null ? '…' : c ? '已连接' : '断开'
+}
+
+/**
+ * 下拉菜单锚点: 默认右对齐触发器 (菜单向左展开)。但触发器紧跟在会话标题后面, 距聊天面板
+ * 左缘往往不足一个菜单宽度 —— 菜单会伸出面板, 被 .chat-major-panel 的 overflow:hidden 裁掉
+ * (看起来像被左侧栏遮挡)。故打开时量一次可用空间: 左侧放不下就翻到触发器右侧展开,
+ * 两侧都放不下 (面板比菜单还窄) 才把菜单夹回面板内。
+ * 返回菜单的内联定位样式; 未测量前保持原来的右对齐, useLayoutEffect 在绘制前完成测量, 不会闪。
+ */
+function useMenuAnchor(
+  open: boolean,
+  wrapRef: RefObject<HTMLElement>,
+  menuRef: RefObject<HTMLElement>,
+): CSSProperties {
+  const [position, setPosition] = useState<{ left: number } | null>(null)
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPosition(null)
+      return
+    }
+    const wrap = wrapRef.current
+    const menu = menuRef.current
+    if (!wrap || !menu) return
+    // 裁剪边界 = 聊天面板; 面板缺失时退化为视口 (本控件恒在会话头部内, 正常拿得到)。
+    const panel = wrap.closest('.chat-major-panel')
+    const bounds = panel
+      ? panel.getBoundingClientRect()
+      : { left: 0, right: window.innerWidth }
+    const box = wrap.getBoundingClientRect()
+    const width = menu.offsetWidth
+    const margin = 8 // 与面板边缘留白, 避免贴边/压住圆角
+
+    const rightAligned = box.width - width // 相对触发器左缘: 菜单右缘贴触发器右缘
+    const fitsLeft = box.left + rightAligned >= bounds.left + margin
+    const fitsRight = box.left + width <= bounds.right - margin
+    if (fitsLeft) {
+      setPosition({ left: rightAligned })
+    } else if (fitsRight) {
+      setPosition({ left: 0 })
+    } else {
+      const low = bounds.left + margin - box.left
+      const high = bounds.right - margin - width - box.left
+      setPosition({ left: Math.min(Math.max(rightAligned, low), Math.max(low, high)) })
+    }
+  }, [open, wrapRef, menuRef])
+
+  return position ? { left: position.left } : { right: 0 }
+}
+
+function RemoteAimuxMcpIndicatorInner({
+  session,
+  sessionId,
+  onSwitchDevice,
+}: {
+  session: unknown
+  sessionId?: string
+  onSwitchDevice?: (newId: string, oldId: string) => Promise<void>
+}) {
+  const aimuxId = remoteAimuxMcpId(session)
+  const initialId = initialAimuxMcpId(session)
+  // 当前设备与初始设备不一致 = 已经切换过 (锚点保留原设备).
+  const switched = !!aimuxId && !!initialId && initialId !== aimuxId
+
+  const [connected, setConnected] = useState(false)
+  const [initialConnected, setInitialConnected] = useState<boolean | null>(null)
+  const [remotes, setRemotes] = useState<RemoteDevice[]>([])
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const wrapRef = useRef<HTMLSpanElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuStyle = useMenuAnchor(menuOpen, wrapRef, menuRef)
+
+  const canSwitch = !!sessionId && !!onSwitchDevice
+
+  // 当前设备连接状态轮询
   useEffect(() => {
     if (!aimuxId) {
       setConnected(false)
@@ -149,22 +241,190 @@ function RemoteAimuxMcpIndicatorInner({ session }: { session: unknown }) {
     }
   }, [aimuxId])
 
+  // 初始设备连接状态轮询 (仅当已切换时; 初始设备可能已离线, 独立于 remotes 列表)
+  useEffect(() => {
+    if (!switched || !initialId) {
+      setInitialConnected(null)
+      return
+    }
+    let alive = true
+    const stop = pollRecursive(async (signal) => {
+      try {
+        const data = await api(`/aimux_bridge/api/remotes/${encodeURIComponent(initialId)}/connection`, { signal })
+        if (alive) setInitialConnected(data?.identifier === initialId && data?.event_stream_connected === true)
+      } catch (error) {
+        if (alive && (error as Error)?.name !== 'AbortError') setInitialConnected(false)
+      }
+    }, 5_000, 4_000)
+    return () => {
+      alive = false
+      stop()
+    }
+  }, [switched, initialId])
+
+  // 切换 session 时收起菜单
+  useEffect(() => { setMenuOpen(false) }, [sessionId])
+
+  // 点外部 / Esc 关菜单
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
+
+  const toggleMenu = () => {
+    if (!canSwitch) return
+    setMenuOpen((v) => {
+      const next = !v
+      if (next) {
+        api('/aimux_bridge/api/remotes')
+          .then((data: any) => setRemotes(Array.isArray(data?.remotes) ? data.remotes : []))
+          .catch(() => setRemotes([]))
+      }
+      return next
+    })
+  }
+
+  const chooseDevice = async (name: string) => {
+    setMenuOpen(false)
+    if (!canSwitch || name === aimuxId) return
+    setSwitching(true)
+    try {
+      await onSwitchDevice!(name, aimuxId)
+    } catch (e) {
+      console.warn('[RemoteAimuxMcpIndicator] 切换设备失败:', (e as Error)?.message)
+    } finally {
+      setSwitching(false)
+    }
+  }
+
   if (!aimuxId) return null
 
   const status = connected ? '正常' : '断开'
   const disconnectedMessage = '虽然现在与目标机器连接断开，但依然可依托中枢继续执行任务。'
   const label = `当前会话与设备${aimuxId}建立了协作链接，请保持桌面客户端或者终端客户端二者之一处于开启状态。当前链接状态：${status}。${connected ? '' : disconnectedMessage}`
+  const title = canSwitch ? `${label}（点击切换协作设备）` : label
+  // 颜色: 断开恒红; 已切换恒黄 (连不上仍红, 故红优先); 未切换且连接绿.
+  const tone = !connected ? 'red' : switched ? 'amber' : 'green'
+  const colorClass = tone === 'green' ? 'text-green-400' : tone === 'amber' ? 'text-amber-400' : 'text-red-400'
+
+  // 其他可切换设备 (排除当前与初始; 初始有独立撤回行)
+  const otherRemotes = remotes.filter((r) => r.name !== aimuxId && r.name !== initialId)
 
   return (
-    <span
-      role="img"
-      aria-label={label}
-      title={label}
-      data-testid="remote-aimux-mcp-indicator"
-      data-connection-status={connected ? 'connected' : 'disconnected'}
-      className={`group inline-flex min-h-5 flex-shrink-0 items-center gap-1 transition-colors ${connected ? 'text-green-400' : 'text-red-400'}`}
-    >
-      <RemoteAimuxMcpIcon className="h-4 w-4 flex-shrink-0" />
+    <span className="group relative inline-flex items-center gap-1.5" ref={wrapRef}>
+      <span
+        role={canSwitch ? 'button' : 'img'}
+        tabIndex={canSwitch ? 0 : undefined}
+        aria-label={label}
+        aria-haspopup={canSwitch ? 'menu' : undefined}
+        aria-expanded={canSwitch ? menuOpen : undefined}
+        title={title}
+        data-testid="remote-aimux-mcp-indicator"
+        data-connection-status={connected ? 'connected' : 'disconnected'}
+        data-device-switched={switched ? 'true' : 'false'}
+        onClick={toggleMenu}
+        onKeyDown={(e: React.KeyboardEvent) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            toggleMenu()
+          }
+        }}
+        className={`relative inline-flex min-h-5 flex-shrink-0 items-center gap-1 transition-colors ${colorClass} ${canSwitch ? 'cursor-pointer' : ''}`}
+      >
+        <RemoteAimuxMcpIcon className="h-4 w-4 flex-shrink-0" />
+        {switching && (
+          <span className="aimux-switch-progress absolute -bottom-1 left-0 h-0.5 w-full rounded-full">
+            <span className="aimux-switch-progress__bar" />
+          </span>
+        )}
+      </span>
+
+      {canSwitch && menuOpen && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="切换 aimux 协作设备"
+          style={menuStyle}
+          className="aimux-mode-menu absolute top-full z-50 mt-1.5 min-w-[288px] origin-top-right"
+        >
+          <div className="aimux-mode-menu__header">
+            <span className={`aimux-mode-menu__dot aimux-mode-menu__dot--${tone}`} />
+            <span className="truncate">切换 aimux 协作设备</span>
+          </div>
+          <div className="aimux-mode-menu__list">
+            {/* 当前设备 (只读) */}
+            <div className="aimux-mode-menu__current" aria-current="true">
+              <span className="aimux-mode-menu__icon">
+                <Laptop className="w-3.5 h-3.5" strokeWidth={1.75} />
+              </span>
+              <span className="aimux-mode-menu__text">
+                <span className="aimux-mode-menu__label" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>当前设备 · {connText(connected)}</span>
+                <span className="aimux-mode-menu__desc" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{aimuxId}</span>
+              </span>
+              <Check className="aimux-mode-menu__check w-3.5 h-3.5" strokeWidth={2} />
+            </div>
+
+            {/* 撤回初始设备: 已切换时恒显示, 无论初始设备是否在线 */}
+            {switched && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => chooseDevice(initialId)}
+                className="aimux-mode-menu__item aimux-mode-menu__item--revert"
+              >
+                <span className="aimux-mode-menu__icon">
+                  <Undo2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                </span>
+                <span className="aimux-mode-menu__text">
+                  <span className="aimux-mode-menu__label">撤回初始设备</span>
+                  <span className="aimux-mode-menu__desc" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{initialId} · {connText(initialConnected)}</span>
+                </span>
+              </button>
+            )}
+
+            {otherRemotes.length > 0 && <div className="aimux-mode-menu__divider" />}
+
+            {otherRemotes.length === 0 ? (
+              <div className="aimux-mode-menu__empty">
+                {switched ? '暂无其他可用设备' : '暂无可用的 aimux 设备'}
+              </div>
+            ) : (
+              otherRemotes.map((r) => {
+                const isConnected = r.status === 'connected'
+                return (
+                  <button
+                    key={r.name}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={false}
+                    onClick={() => chooseDevice(r.name)}
+                    className="aimux-mode-menu__item"
+                  >
+                    <span className="aimux-mode-menu__icon">
+                      <Laptop className="w-3.5 h-3.5" strokeWidth={1.75} />
+                    </span>
+                    <span className="aimux-mode-menu__text">
+                      <span className="aimux-mode-menu__label" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{r.name}</span>
+                      <span className="aimux-mode-menu__desc">
+                        {isConnected ? '已连接' : r.status || '断开'} · {r.platform || '未知平台'}
+                      </span>
+                    </span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </div>
+      )}
     </span>
   )
 }
@@ -219,6 +479,8 @@ function AimuxLinkIndicatorInner({
   const [activeMode, setActiveMode] = useState<AimuxMode | null>(() => readMode(sessionId || ''))
   const [firing, setFiring] = useState(false)
   const wrapRef = useRef<HTMLSpanElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuStyle = useMenuAnchor(menuOpen, wrapRef, menuRef)
 
   // 切换 session 时按新 sessionId 重读本地记录
   useEffect(() => { setActiveMode(readMode(sessionId || '')) }, [sessionId])
@@ -320,9 +582,11 @@ function AimuxLinkIndicatorInner({
 
       {hasMenu && menuOpen && (
         <div
+          ref={menuRef}
           role="menu"
           aria-label="aimux 工作模式"
-          className="aimux-mode-menu absolute right-0 top-full z-50 mt-1.5 min-w-[224px] origin-top-right"
+          style={menuStyle}
+          className="aimux-mode-menu absolute top-full z-50 mt-1.5 min-w-[224px] origin-top-right"
         >
           <div className="aimux-mode-menu__header" title={label}>
             <span className={`aimux-mode-menu__dot aimux-mode-menu__dot--${tone}`} />

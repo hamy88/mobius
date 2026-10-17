@@ -11,7 +11,7 @@
  *  - 超大卡片保护: entry + 工具结果渲染字符总量超 10 万时截断后再渲染, 避免前端卡顿崩溃.
  */
 import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState } from 'react'
-import { Code2, ListChecks, AlignLeft, Braces, BookOpen, Image as ImageIcon, Check, Loader2, X } from 'lucide-react'
+import { Code2, ListChecks, AlignLeft, Braces, BookOpen, Image as ImageIcon, Check, Loader2, X, CircleDot } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { BLACKBOARD_MARKER } from '../jsonl-round-helpers'
 import {
@@ -27,6 +27,7 @@ import {
   THREAD_SETTINGS_APPLIED_THEME,
   ASSISTANT_END_TURN_THEME,
   THINKING_ONLY_THEME,
+  REASONING_THEME,
   COMPACT_DONE_THEME,
   GOAL_SET_THEME,
   LOCAL_COMMAND_THEME,
@@ -35,8 +36,10 @@ import {
   PLAN_THEME,
   MCP_RESULT_THEME,
   INITIAL_THEME,
+  IMAGES_THEME,
 } from './themes'
 import { formatTs } from './utils'
+import { consumeFreshEntry } from '../../services/agent-history-store'
 import {
   extractCodeEdit,
   extractWriteToolCall,
@@ -46,8 +49,10 @@ import {
   isStartPyToolUse,
   functionOutputImageUrls,
   functionOutputTextBody,
+  claudeToolResultImageOutput,
   isFunctionCallOutputPayload,
   extractPlanCard,
+  extractTaskToolCalls,
   extractMcpToolResult,
   isAimuxCommandToolUse,
   isAimuxRemoteApplyPatchToolUse,
@@ -58,15 +63,18 @@ import {
   isThreadSettingsAppliedEvent,
   isAssistantEndTurnEntry,
   isThinkingOnlyAssistantEntry,
+  isReasoningEntry,
   isAssistantResponseGoldKeyword,
   isCompactDoneEntry,
   isGoalSetEntry,
   isLocalCommandEntry,
+  assistantEntryText,
   jsonEntryTourTarget,
 } from './entry-classify'
+import { isRoundOpenerEntry } from './utils'
 import { buildHeaderSummary, resolveTaskHeaderSummary } from './header-summary'
-import { deriveToolCallStatus, TOOL_STATUS_META } from './tool-status'
-import type { ResolvedCallMap, ToolStatus } from './tool-status'
+import { TOOL_STATUS_META } from './tool-status'
+import type { ToolStatus } from './tool-status'
 import { estimateRenderChars, estimateToolResultsChars, clampNodeForRender, clampToolResults } from './oversized'
 import { KeyNode } from './KeyNode'
 import { JsonEntryCodeDiff } from './CodeDiff'
@@ -77,9 +85,11 @@ import { JsonEntryLocalCommandBlock } from './LocalCommandBlock'
 import { JsonEntryPlanCard } from './PlanCard'
 import { JsonEntryInitialCard } from './InitialCard'
 import { extractInitialContext } from './initial-context'
-import { ImageOutputPanel } from './ImageOutput'
+import { ImageOutputPanel, PersistedImageOutputPanel } from './ImageOutput'
 import { CompactPlainTextFallback } from './text-preview'
 import { JsonlCopyButton } from './JsonlCopyButton'
+import { RemoteAimuxMcpIcon } from '../aimux-link-indicator'
+import { isCardModeAvailable, pickCardMode, resolveDesiredOpen, type CardModeAvailability } from './card-mode'
 import type { AnyEntry, CardMode, BashToolResult, PlanUpdate } from './types'
 
 const CompactMarkdown = lazy(() => import('../jsonl-compact-markdown'))
@@ -88,6 +98,50 @@ const CompactMarkdown = lazy(() => import('../jsonl-compact-markdown'))
 // 避免 DOM 节点爆炸导致前端卡顿崩溃 (用户反馈: 某条 jsonl 卡片字符数过大时页面卡死).
 // 阈值 100,000 字符 (约 100KB) — 经验上单卡渲染到这个量级以上就明显卡顿.
 const MAX_CARD_RENDER_CHARS = 100_000
+
+const EASY_MICRO_TITLES: Record<string, string> = {
+  思考: '思考推理',
+  命令: '执行命令',
+  读取: '读取文件',
+  编辑: '修改文件',
+  协作编辑: '协作修改',
+  协作执行: '协作执行',
+  计划: '规划步骤',
+  返回: '工具返回',
+  部署: '部署操作',
+  本地: '本地操作',
+  压缩: '压缩上下文',
+  配置: '配置更新',
+  黑板: '黑板更新',
+  初始: '初始化',
+}
+
+/*
+ * Classify cards for easy mode's flat-text and micro-step presentation.
+ */
+export function isEasyFlatEntry(entry: AnyEntry): boolean {
+  if (!entry || typeof entry !== 'object') return false
+  const canCode = !!extractCodeEdit(entry)
+    || !!extractWriteToolCall(entry)
+    || extractBashCalls(entry).length > 0
+    || extractReadCalls(entry).length > 0
+  if (canCode) return false
+  // 仅思考卡即使携带 end_turn 也仍是微缩步骤，不应被当作最终平铺回答打断步骤串
+  // Thinking-only cards remain micro steps even with end_turn and must not split the run
+  if (isThinkingOnlyAssistantEntry(entry)) return false
+  if (entry.type === 'error' || isAssistantEndTurnEntry(entry)) return true
+  if (entry.type === 'response_item' && isFunctionCallOutputPayload(entry.payload)) {
+    if (functionOutputImageUrls(entry.payload?.output).length > 0) return true
+  }
+  // Claude tool_result 内嵌图片 (MCP 图像信封): 简易模式平铺成图像卡, 不进微缩步骤串
+  // Claude tool_result embedded images flatten into an image card instead of a micro step
+  if (claudeToolResultImageOutput(entry)) return true
+  return assistantEntryText(entry).trim().length > 0
+}
+
+export function isEasyMicroEntry(entry: AnyEntry): boolean {
+  return !isRoundOpenerEntry(entry) && !isEasyFlatEntry(entry)
+}
 
 /**
  * 各卡片视图模式对应的图标 (模式切换按钮的文字 → 图标).
@@ -129,79 +183,58 @@ function ToolStatusIcon({ status }: { status: ToolStatus }) {
 }
 
 /**
- * 单卡 open 的"系统期望值" — 所有展开/折叠条件合并到此一处判定, 优先级 (高 → 低):
- *   ① 字段模式       始终默认折叠 — 字段树不能被任何自动展开信号掀开.
- *   ② forceOpen       搜索命中        — 用户显式查看, 压过 parentOrderedCollapse.
- *   ③ parentOrderedCollapse    forgotten-flag  — 默认折叠; 压过本地展开条件.
- *   ④ 本地展开条件     patch_apply / 计划(canPlan) / 纯文本卡(可精简·可图片·error 类型, 且非代码卡).
- *   ⑤ toolError       工具失败        — "折叠不藏错误"; 被 ①抑制.
- *   ⑥ 兜底            折叠.
- * 这是"系统期望"的单向判定; 实际 open 还受用户手动 onToggle 锁定 (见下方 userToggledRef).
- * 自动信号只"掀开"(ratchet, 不自动折回) — 字段模式保持折叠, 其它折叠仅来自初值 ③ 或用户手动.
- */
-function resolveDesiredOpen(opts: {
-  mode: CardMode
-  forceOpen: boolean
-  parentOrderedCollapse: boolean
-  isPatchApply: boolean
-  canPlan: boolean
-  canInitial: boolean
-  canCode: boolean
-  canCompact: boolean
-  canImage: boolean
-  isErrorType: boolean
-  toolError: boolean
-}): boolean {
-  if (opts.mode === 'field') return false       // 字段模式永远不自动展开, 压过其它规则
-  if (opts.forceOpen) return true       // ① 搜索命中
-  if (opts.parentOrderedCollapse) return false   // ② forgotten-flag
-  // ③ 本地展开条件: patch_apply / 计划 / 初始 / 纯文本卡(可精简·可图片·error 类型, 且非代码卡)
-  if (opts.isPatchApply || opts.canPlan || opts.canInitial || (!opts.canCode && (opts.canCompact || opts.canImage || opts.isErrorType))) return true
-  if (opts.toolError) return true       // ④ 工具失败
-  return false                          // ⑤ 兜底折叠
-}
-
-/**
  * 单条 entry 卡片. type 决定颜色, 摘要行展示关键内容 (供快速扫).
  */
-function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCollapse = false, showMeta = true, dense = false, bashResults = [], readResults = [], resolvedMap, taskPlan }: {
+function JsonEntryCardInner({ entry, lineNo, forceOpen = false, searchHighlighted = false, parentOrderedCollapse = false, showMeta = true, dense = false, easyMode = false, easyOpenerOverride = false, bashResults = [], readResults = [], toolStatus, taskPlan }: {
   entry: AnyEntry
   lineNo?: number
   // forceOpen: 搜索命中该卡 — 用户显式查看, 优先级最高, 压过 parentOrderedCollapse 与用户曾手动折叠.
   forceOpen?: boolean
-  // parentOrderedCollapse: forgotten-flag 收尾卡 (agent 被 forgotten-flag 系统提醒触发的机械删 flag 链路) —
+  // 红色搜索命中标记独立于 forceOpen；自动定位结束后仍醒目，但不再干预用户折叠。
+  searchHighlighted?: boolean
+  // parentOrderedCollapse: 上下文折叠规则命中的卡片 (forgotten-flag 收尾链路 / 加密 reasoning) —
   // 默认折叠, 压过本地展开条件, 但被 forceOpen 压过. 用户仍可手动展开 (onToggle 写回 state, userToggledRef 阻止自动掀开).
   parentOrderedCollapse?: boolean
   showMeta?: boolean
   // dense: compact surfaces render the shared card with genuinely smaller
   // header classes instead of relying only on a parent CSS override.
   dense?: boolean
+  // easyMode keeps the standard card renderer but changes only its compact presentation.
+  easyMode?: boolean
+  easyOpenerOverride?: boolean
   bashResults?: BashToolResult[]
   readResults?: BashToolResult[]
-  resolvedMap?: ResolvedCallMap | null
+  // 已派生的每卡工具状态 ('running' | 'success' | 'error' | null). 父层 toolStatusOf
+  // 按 (entry, map) 记忆后传入 — primitive prop, SSE 新数据不再让内容未变的卡重渲染.
+  toolStatus?: ToolStatus | null
   // 任务工具 (TaskCreate/TaskUpdate) 的跨条目累积快照 (JsonlView 顶层扫描产出,
   // anchor uuid → PlanUpdate). 与 update_plan / task_reminder 共用计划卡片视图.
   taskPlan?: PlanUpdate | null
 }) {
   const type = entry?.type || 'unknown'
+  const easyOpener = easyMode && (easyOpenerOverride || isRoundOpenerEntry(entry))
   // 超大卡片保护: entry + 工具结果的渲染字符总量超过 10 万时, 用截断版渲染, 避免前端卡顿崩溃.
   // 截断版只影响"展开态内容渲染", 卡片头部摘要 / 配色 / 折叠态不受影响.
-  const { renderEntry, renderBashResults, renderReadResults, oversized, totalChars, imageOutputUrls, imageOutputText } = useMemo(() => {
-    // codex function_call_output 里的内嵌图片 (input_image base64): 单独抽 data url 走 <img> 渲染,
-    // 不进字段模式递归展开 base64. 图片源取自未截断的原始 entry (截断会破坏 base64).
+  const { renderEntry, renderBashResults, renderReadResults, oversized, totalChars, imageOutputUrls, imageOutputText, imageDeferred } = useMemo(() => {
+    // codex function_call_output 里的内嵌图片 (input_image base64) 与 Claude tool_result 里的
+    // MCP 图像信封: 单独抽 data url 走 <img> 渲染, 不进字段模式递归展开 base64.
+    // 图片源取自未截断的原始 entry (截断会破坏 base64).
     const isImageOutput = entry?.type === 'response_item' && isFunctionCallOutputPayload(entry?.payload)
-    const imageUrls = isImageOutput ? functionOutputImageUrls(entry?.payload?.output) : []
-    const imageText = isImageOutput ? functionOutputTextBody(entry?.payload?.output) : ''
+    const claudeImages = isImageOutput ? null : claudeToolResultImageOutput(entry)
+    const imageUrls = isImageOutput ? functionOutputImageUrls(entry?.payload?.output) : claudeImages?.imageUrls ?? []
+    const imageText = isImageOutput ? functionOutputTextBody(entry?.payload?.output) : claudeImages?.textBody ?? ''
+    // 存根场景: 原图在 <persisted-output> 落盘文件里, 由 PersistedImageOutputPanel 按需取回.
+    const deferred = !isImageOutput ? claudeImages?.deferred ?? null : null
     const total =
       estimateRenderChars(entry) +
       estimateToolResultsChars(bashResults) +
       estimateToolResultsChars(readResults)
     // 含图片的 output 走专用渲染分支, 不展开 base64 字段, 不会卡顿, 不触发超大卡片保护.
-    if (imageUrls.length > 0) {
-      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText }
+    if (imageUrls.length > 0 || deferred) {
+      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText, imageDeferred: deferred }
     }
     if (total <= MAX_CARD_RENDER_CHARS) {
-      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText }
+      return { renderEntry: entry, renderBashResults: bashResults, renderReadResults: readResults, oversized: false, totalChars: total, imageOutputUrls: imageUrls, imageOutputText: imageText, imageDeferred: deferred }
     }
     const budget = { remaining: MAX_CARD_RENDER_CHARS }
     return {
@@ -212,9 +245,10 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
       totalChars: total,
       imageOutputUrls: imageUrls,
       imageOutputText: imageText,
+      imageDeferred: deferred,
     }
   }, [entry, bashResults, readResults])
-  const canImage = imageOutputUrls.length > 0
+  const canImage = imageOutputUrls.length > 0 || !!imageDeferred
   const headerSummary = useMemo(() => buildHeaderSummary(renderEntry), [renderEntry])
   // 任务工具卡摘要增强: 跨条目累积快照在手时, 标题栏显示 "计划 · X/N · 任务标题"
   // 而非原始 tool_use JSON. 仅影响一行预览, 字段模式仍可看原始数据.
@@ -244,16 +278,22 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   const canCode = !!codeEdit || !!writeCall || bashCalls.length > 0 || readCalls.length > 0
   // canPlan 覆盖计划视图: update_plan function_call 走可视化步骤卡片.
   const canPlan = !!planUpdate
+  // 任务工具卡 (TaskCreate/TaskUpdate) 的价值全在计划视图: 计划被簇去重摘走后, 这张卡只剩
+  // 一行 tool_use JSON 摘要, 没有自动铺开的必要 → 默认收起 (用户仍可手动展开).
+  const taskToolCardWithoutPlan = useMemo(
+    () => !canPlan && extractTaskToolCalls(renderEntry).length > 0,
+    [canPlan, renderEntry],
+  )
   // canInitial 覆盖初始视图: 首轮注入上下文消息走分块手风琴卡片.
   const canInitial = !!initialContext
   const isPatchApplyEvent = entry?.type === 'event_msg' && String(entry?.payload?.type || '').startsWith('patch_apply')
   // 正文含 blackboard 标记 → 视作 Research Blackboard 相关消息.
   const isBlackboard = headerSummary.full.includes(BLACKBOARD_MARKER)
-  // 配色优先级: 初始消息 (结构辨识, 最具体) > blackboard 相关 (最醒目) > user compact 完成信号 (gold) > user /goal 设置信号 (gold) > user 其他本地命令产物 (gold) > assistant 只含 thinking 思考卡 (purple) > assistant end_turn (gold) > assistant 文本关键词 (gold) > name:"Edit" 的 tool_use (indigo) > AIMUX 协作执行 (teal) > Bash command 含 "start.py" (gold) > 普通 Bash tool_use (cyan) > event_msg.context_compacted (gold) > 顶层 type.
+  // 配色优先级: 初始消息 (结构辨识, 最具体) > blackboard 相关 (最醒目) > user compact 完成信号 (gold) > user /goal 设置信号 (gold) > user 其他本地命令产物 (gold) > assistant 只含 thinking 思考卡 (purple) > codex reasoning 思考卡 (purple) > assistant end_turn (gold) > assistant 文本关键词 (gold) > name:"Edit" 的 tool_use (indigo) > AIMUX 协作执行 (teal) > Bash command 含 "start.py" (gold) > 普通 Bash tool_use (cyan) > Read tool_use (sky) > 内嵌图片载体卡 (teal 图像) > event_msg.context_compacted (gold) > 顶层 type.
   // initial 必须排在 blackboard 之前: research 会话的初始消息正文含 blackboard 字样, 但它是初始消息不是黑板写入.
   // start.py 必须排在 Bash 之前: 它本身也是 Bash, 但语义更具体, 不能被 cyan 普通主题盖掉.
   // compact / goal-set 必须排在 local-cmd 之前: 它们都是 local-command-stdout 的特例, 文案/标签更具体.
-  // thinking-only 必须排在 end_turn 之前: 只含思考块的卡片, "这是思考卡"比"这是结束态"更能说明卡片性质.
+  // thinking-only / reasoning 必须排在 end_turn 之前: 只含思考块的卡片, "这是思考卡"比"这是结束态"更能说明卡片性质.
   const theme = canInitial
     ? INITIAL_THEME
     : isBlackboard
@@ -266,6 +306,8 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
     ? LOCAL_COMMAND_THEME
     : isThinkingOnlyAssistantEntry(entry)
     ? THINKING_ONLY_THEME
+    : isReasoningEntry(entry)
+    ? REASONING_THEME
     : isAssistantEndTurnEntry(entry)
     ? ASSISTANT_END_TURN_THEME
     : isAssistantResponseGoldKeyword(entry)
@@ -282,6 +324,8 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
     ? BASH_TOOL_THEME
     : readCalls.length > 0
     ? READ_TOOL_THEME
+    : canImage
+    ? IMAGES_THEME
     : isContextCompactedEvent(entry)
     ? CONTEXT_COMPACTED_THEME
     : isThreadSettingsAppliedEvent(entry)
@@ -291,20 +335,42 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
     : mcpResult
     ? MCP_RESULT_THEME
     : (TYPE_THEME[type] || DEFAULT_THEME)
+  // 简易模式只有白名单卡片平铺，其余条目统一进入微缩卡片；助手正文视作“应答”白名单。
+  // Easy mode flattens only the whitelist; all other entries use the micro-card treatment.
+  const easyFlat = easyMode && !easyOpener && (
+    theme.label === '应答' ||
+    theme.label === '错误' ||
+    theme.label === '结束' ||
+    theme.label === '图像' ||
+    (assistantEntryText(entry).trim().length > 0 && !canCode)
+  )
+  // 平铺文本卡 (正文 markdown) 的复制按钮与时间移到卡片底部独立一行, 不压正文.
+  // Flat text cards move their copy button and timestamp into a footer row under the body.
+  const easyFlatText = easyFlat && !canCode && !canImage
+  const easyInline = easyMode && !easyOpener && !easyFlat
+  const easyCompactSummary = easyInline || easyOpener
+  const easyHideType = easyOpener || easyFlat
+  const easyMicroTitle = EASY_MICRO_TITLES[theme.label] || theme.label
   const ts = entry?.timestamp ? formatTs(entry.timestamp) : null
   // 仅 summary 被截断时才提供"精简模式"入口; 没截断的卡片只有字段模式
   const canCompact = headerSummary.canCompact
+  // 各专属视图的数据是否在手: plan 来自顶层 taskPlans 映射 (会被任务推进簇去重摘走), 其余来自本卡自身解析.
+  const modeAvailability = useMemo<CardModeAvailability>(
+    () => ({ plan: canPlan, initial: canInitial, code: canCode, image: canImage, compact: canCompact }),
+    [canPlan, canInitial, canCode, canImage, canCompact],
+  )
   // 展开后默认: 可计划 → 计划模式; 可初始 → 初始模式; 可代码 → 代码模式; 可图片 → 图片模式; 可精简 → 精简模式; 其它 → 字段模式
-  const [mode, setMode] = useState<CardMode>(canPlan ? 'plan' : canInitial ? 'initial' : canCode ? 'code' : canImage ? 'image' : canCompact ? 'compact' : 'field')
+  const [mode, setMode] = useState<CardMode>(() => pickCardMode(modeAvailability))
+  // 入场动画只播给 SSE 新到的条目 (挂载时消费一次性标记; ② 历史加载与滚动复挂不播).
+  const [isSseFresh] = useState(() => consumeFreshEntry(entry))
 
   // 卡片展开态受控于本地 state, 跨父组件重渲染 (实时轮询追加 entry) 保持不变.
   // 展开优先级集中在上方的 resolveDesiredOpen: field(字段模式) > forceOpen(搜索) >
-  // parentOrderedCollapse(forgotten-flag) > localExpand(本地展开条件) > toolError(工具失败) > 兜底折叠.
+  // parentOrderedCollapse(上下文规则) > localExpand(本地展开条件) > toolError(工具失败) > 兜底折叠.
   // 用户手动折叠 → onToggle 写回 state, 此后重渲染不再强制掀开 (字段模式也不会被自动掀开).
   const tourTarget = jsonEntryTourTarget(entry)
 
-  // 工具调用状态: 由 "该 tool_use 的结果是否已落地" 推导 (running = 已发起未回结果).
-  const toolStatus = deriveToolCallStatus(entry, resolvedMap)
+  // 工具调用状态: 父层预算好的每卡状态 (原为组级 map + 此处派生, 身份传染已消除).
 
   // 系统期望 open — 所有展开/折叠条件集中在上方的 resolveDesiredOpen 判定.
   const desiredOpen = resolveDesiredOpen({
@@ -319,20 +385,33 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
     canImage,
     isErrorType: type === 'error',
     toolError: toolStatus === 'error',
+    taskToolCardWithoutPlan,
   })
 
-  // 用户是否手动点过折叠/展开: 一旦手动操作, 自动展开就不再强制掀开 (字段模式除外).
+  // 用户是否手动点过折叠/展开 (或卡片已按"数据被摘走"自动回落): 一旦置位, 自动展开不再强制掀开.
   const userToggledRef = useRef(false)
-  const [open, setOpen] = useState<boolean>(desiredOpen)
+  const easyInitialOpen = easyCompactSummary ? false : easyFlat ? true : desiredOpen
+  const [open, setOpen] = useState<boolean>(easyInitialOpen)
 
-  // 自动信号跟随 — ratchet (只掀开不折回; 字段模式保持折叠) + 尊重用户手动:
-  //   · forceOpen (搜索): 非字段模式下即使用户曾手动折叠也强制掀开 (显式查看优先).
+  // 自动信号跟随 — ratchet (只掀开不折回) + 尊重用户手动:
+  //   · forceOpen (搜索): 即使用户曾手动折叠或当前是字段模式也强制掀开 (显式查看优先).
   //   · 其它信号: 用户手动操作过则锁定不动.
   useEffect(() => {
-    if (forceOpen && mode !== 'field') { setOpen(true); return }
-    if (!userToggledRef.current && desiredOpen) setOpen(true)
+    if (forceOpen) { setOpen(true); return }
+    if (!userToggledRef.current && (easyCompactSummary ? false : easyFlat ? true : desiredOpen)) setOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forceOpen, desiredOpen])
+  }, [forceOpen, desiredOpen, easyInline])
+
+  // 专属视图的数据被上游摘走时主动回落 (典型: 任务推进簇去重把计划卡移到簇尾那张,
+  // 先到货的卡计划被摘走): 卡在 'plan' 且计划为空会一路跌到最后的原始 JSON 字段树.
+  // 回落到首选链 (通常是精简摘要) 并折叠收起 —— 回落后这张卡只剩"这条调用做了什么",
+  // 不该继续占屏展开. 置 userToggledRef 让自动展开不再掀开, 搜索 forceOpen 仍可掀开.
+  useEffect(() => {
+    if (isCardModeAvailable(mode, modeAvailability)) return
+    setMode(pickCardMode(modeAvailability))
+    userToggledRef.current = true
+    setOpen(false)
+  }, [mode, modeAvailability])
 
   // 精简/字段模式复制按钮反馈: 点击后短暂切换为 Check 图标再还原.
   const [copied, setCopied] = useState<boolean>(false)
@@ -346,11 +425,11 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
   // 视觉位置不变, 但 DOM 上 button 是 details 的直接子元素而非 summary 后代, 规范合规.
   // 字段模式也带复制按钮 (复制原始 JSON), 与精简模式的复制按钮对齐, 故 hasHeaderAction
   // 额外纳入 mode === 'field' —— 让只支持字段模式的小卡片也能露出复制入口.
-  const hasHeaderAction = open && ((mode === 'compact') || (mode === 'field') || (mode === 'image') || (mode === 'plan') || (mode === 'initial') || canCompact || canCode || canImage || canPlan || canInitial)
+  const hasHeaderAction = !easyFlatText && open && ((mode === 'compact') || (mode === 'field') || (mode === 'image') || (mode === 'plan') || (mode === 'initial') || canCompact || canCode || canImage || canPlan || canInitial)
 
   // 模式切换图标按钮: 计算点击后将切换到的目标模式 + 悬停说明.
   // (原为文字按钮显示目标模式名, 现改为图标按钮, 文字说明收进 title.)
-  const modeToggle = (canCompact || canCode || canImage || canPlan || canInitial)
+  const modeToggle = !easyMode && (canCompact || canCode || canImage || canPlan || canInitial)
     ? (() => {
         let target: CardMode
         let title: string
@@ -387,28 +466,34 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
       data-density={dense ? 'dense' : undefined}
       open={open}
       onToggle={(e) => { userToggledRef.current = true; setOpen((e.currentTarget as HTMLDetailsElement).open) }}
-      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm card-enter ${theme.border} ${theme.bg}`}>
-      <summary className={`jsonl-entry-summary cursor-pointer ${dense ? 'px-1 pt-0.5 gap-1' : 'px-3 pt-1.5 gap-2'} ${open ? 'pb-0.5' : dense ? 'pb-0.5' : 'pb-1.5'} flex items-center select-text${hasHeaderAction ? ' pr-[120px]' : ''}`}>
-        {showMeta && typeof lineNo === 'number' && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">#{lineNo}</span>}
-        {showMeta && ts && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">{ts}</span>}
-        {toolStatus ? (
+      data-search-hit={searchHighlighted ? 'true' : undefined}
+      aria-label={searchHighlighted ? '搜索命中条目' : undefined}
+      className={`jsonl-entry-card relative mb-2 rounded-lg border shadow-sm ${easyInline ? 'jsonl-entry-card--easy-inline' : ''} ${easyFlat ? 'jsonl-entry-card--easy-flat' : ''} ${easyOpener ? 'jsonl-entry-card--easy-opener' : ''} ${isSseFresh ? 'card-enter' : ''} ${theme.border} ${theme.bg} ${searchHighlighted ? 'ring-2 ring-red-500/95 border-red-500/95 shadow-[0_0_0_3px_rgba(239,68,68,0.3),0_0_24px_rgba(239,68,68,0.32)]' : ''}`}>
+      <summary onClick={easyOpener ? (e) => e.preventDefault() : undefined} className={`jsonl-entry-summary ${easyOpener ? 'jsonl-entry-summary--easy-opener cursor-text' : 'cursor-pointer'} ${dense ? 'px-1 pt-0.5 gap-1' : 'px-3 pt-1.5 gap-2'} ${open ? 'pb-0.5' : dense ? 'pb-0.5' : 'pb-1.5'} flex items-center select-text${hasHeaderAction ? ' pr-[120px]' : ''}`}>
+        {!easyCompactSummary && showMeta && typeof lineNo === 'number' && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">#{lineNo}</span>}
+        {!easyCompactSummary && showMeta && ts && <span className="jsonl-entry-summary-meta text-[var(--text-muted)] font-mono flex-shrink-0">{ts}</span>}
+        {easyInline ? (
+          toolStatus ? <ToolStatusIcon status={toolStatus} /> : <CircleDot className={theme.text} size={14} strokeWidth={2.2} aria-hidden="true" />
+        ) : toolStatus ? (
           <ToolStatusIcon status={toolStatus} />
         ) : (
           <span className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
             <span className={`h-1.5 w-1.5 rounded-full ${theme.dot}`}></span>
           </span>
         )}
-        <span className={`font-mono font-semibold ${theme.text} flex-shrink-0`}>{theme.label}</span>
-        {canCode && (
+        {!easyHideType && <span className={`font-mono font-semibold ${theme.text} flex-shrink-0`}>{easyMode ? easyMicroTitle : theme.label}</span>}
+        {!easyMode && canCode && (
           <span
             className={`inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border-current/30 ${theme.text}`}
-            title="代码模式 — 点击展开查看 diff / 文件 / 命令 / 读取结果"
-            aria-label="代码模式"
+            title={theme === AIMUX_COMMAND_THEME ? '协作执行 — 点击展开查看远程协作设备上的命令与读取结果' : '代码模式 — 点击展开查看 diff / 文件 / 命令 / 读取结果'}
+            aria-label={theme === AIMUX_COMMAND_THEME ? '协作执行' : '代码模式'}
           >
-            <Code2 className="h-3 w-3" strokeWidth={2.2} aria-hidden="true" />
+            {theme === AIMUX_COMMAND_THEME
+              ? <RemoteAimuxMcpIcon className="h-[13.2px] w-[13.2px]" aria-hidden="true" />
+              : <Code2 className="h-3 w-3" strokeWidth={2.2} aria-hidden="true" />}
           </span>
         )}
-        {canPlan && (
+        {!easyMode && canPlan && (
           <span
             className={`inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border-current/30 ${theme.text}`}
             title="计划模式 — 点击展开查看分步计划"
@@ -428,7 +513,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
         {/* 精简模式展开时正文已渲染完整摘要 (headerSummary.full), header 顶部 short 与之重复 → 隐藏;
             折叠态或 code/field/plan/image 等其它模式仍保留 short 作预览.
             任务工具卡用 effectiveHeaderSummary (累积快照的 "计划 · X/N · 标题"). */}
-        {effectiveHeaderSummary.short && !(open && mode === 'compact') && <span className="jsonl-entry-summary-preview text-[var(--text-muted)] truncate flex-1">{effectiveHeaderSummary.short}</span>}
+        {(easyOpener ? effectiveHeaderSummary.full : effectiveHeaderSummary.short) && !(open && mode === 'compact') && <span className={`jsonl-entry-summary-preview ${easyOpener ? 'jsonl-entry-summary-preview--easy-opener' : ''} text-[var(--text-muted)] ${easyOpener ? 'flex-1' : 'truncate flex-1'}`}>{easyOpener ? effectiveHeaderSummary.full : effectiveHeaderSummary.short}</span>}
       </summary>
       {hasHeaderAction && (
         <div className="absolute top-1 right-2 flex items-center gap-1.5 z-[5]">
@@ -506,7 +591,15 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
               ⚠ 该条目原始约 {totalChars.toLocaleString()} 字符, 超过 10 万字符渲染上限, 超出部分已截断以避免前端卡顿.
             </div>
           )}
-          {localCommandParts.length > 0 ? (
+          {easyFlat && canImage ? (
+            imageDeferred ? <PersistedImageOutputPanel callId={imageDeferred.callId} savedPath={imageDeferred.savedPath} /> : <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
+          ) : easyFlat && !canCode ? (
+            <div className="easy-flat-markdown max-w-none">
+              <Suspense fallback={<CompactPlainTextFallback text={headerSummary.full} />}>
+                <CompactMarkdown text={headerSummary.full} />
+              </Suspense>
+            </div>
+          ) : localCommandParts.length > 0 ? (
             <JsonEntryLocalCommandBlock parts={localCommandParts} />
           ) : mode === 'code' && codeEdit ? (
             <JsonEntryCodeDiff edit={codeEdit} />
@@ -522,7 +615,7 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
               )}
             </div>
           ) : mode === 'image' && canImage ? (
-            <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
+            imageDeferred ? <PersistedImageOutputPanel callId={imageDeferred.callId} savedPath={imageDeferred.savedPath} /> : <ImageOutputPanel imageUrls={imageOutputUrls} textBody={imageOutputText} />
           ) : mode === 'plan' && planUpdate ? (
             <JsonEntryPlanCard plan={planUpdate} />
           ) : mode === 'initial' && initialContext ? (
@@ -536,13 +629,58 @@ function JsonEntryCardInner({ entry, lineNo, forceOpen = false, parentOrderedCol
           ) : (
             Object.entries(renderEntry).map(([k, v]) => <KeyNode key={k} k={k} v={v} depth={0} />)
           )}
+          {easyFlatText && (
+            <div className="easy-flat-footer">
+              {ts && <span className="easy-flat-footer__time font-mono">{ts}</span>}
+              <JsonlCopyButton
+                copied={copied}
+                title="复制渲染前的原始 markdown 源"
+                copiedTitle="Markdown 已复制"
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  navigator.clipboard.writeText(headerSummary.full).then(() => {
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 1000)
+                  })
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
     </details>
   )
 }
 
+// ── memo 判等辅助: 引用先比, 内容后比 ──────────────────────────────────────
+// bashResults/readResults/taskPlan 每代流水线都重建对象 (merge 从零分配), 引用判等会
+// 让内容未变的卡全量重渲染; 这里做深度受限的内容判等 (记录字段是扁平结构, 值多为
+// 直接取自 entry 的引用, 引用快路径通常直接命中).
+function contentEqual(a: unknown, b: unknown, depth: number): boolean {
+  if (a === b) return true
+  if (depth <= 0 || a === null || b === null) return false
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) { if (!contentEqual(a[i], b[i], depth - 1)) return false }
+    return true
+  }
+  if (typeof a !== 'object' || typeof b !== 'object') return false
+  const ka = Object.keys(a as object)
+  const kb = Object.keys(b as object)
+  if (ka.length !== kb.length) return false
+  for (const k of ka) { if (!contentEqual((a as any)[k], (b as any)[k], depth - 1)) return false }
+  return true
+}
+
+function toolResultsEqual(a: BashToolResult[] | undefined, b: BashToolResult[] | undefined): boolean {
+  if (a === b) return true
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) { if (!contentEqual(a[i], b[i], 3)) return false }
+  return true
+}
+
 export const JsonEntryCard = memo(
   JsonEntryCardInner,
-  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && prev.bashResults === next.bashResults && prev.readResults === next.readResults && prev.resolvedMap === next.resolvedMap && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && prev.taskPlan === next.taskPlan,
+  (prev, next) => prev.entry === next.entry && prev.lineNo === next.lineNo && prev.showMeta === next.showMeta && prev.dense === next.dense && prev.easyMode === next.easyMode && prev.easyOpenerOverride === next.easyOpenerOverride && toolResultsEqual(prev.bashResults, next.bashResults) && toolResultsEqual(prev.readResults, next.readResults) && prev.toolStatus === next.toolStatus && prev.parentOrderedCollapse === next.parentOrderedCollapse && prev.forceOpen === next.forceOpen && prev.searchHighlighted === next.searchHighlighted && contentEqual(prev.taskPlan, next.taskPlan, 4),
 )

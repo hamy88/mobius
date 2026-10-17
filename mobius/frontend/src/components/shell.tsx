@@ -1,16 +1,14 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { lazyWithRetry } from '../services/handle-stale-chunk'
+import { warmCreateMenuListsOnIdle } from '../services/warm-create-lists'
 import { useStore, api } from '../store'
-import { ChangePasswordModal, AimuxGuideModal, DesktopDownloadModal, MobileDownloadModal, TerminalInstallModal } from './modals'
-import { GlobalCreateMenu, GlobalCreateRoot, type CreateKind } from './global-create'
-import { SearchModal } from './search-modal'
+import { GlobalCreateMenu, type CreateKind } from './global-create'
 import { AimuxStatusBadge } from './aimux-status-badge'
 import { ProjectPathBindGate } from './project-path-bind-gate'
-import { AdminPanel, type AdminPanelTab } from './panels'
+import type { AdminPanelTab } from './panels'
 import { MobiusLogo } from './mobius-logo'
-import { GuideHelpModal } from './guide-help'
-import { CustomThemePalette } from './custom-theme-palette'
-import { Check, ChevronDown, ChevronRight, CircleDot, CircleQuestionMark, FlaskConical, History, LayoutPanelTop, Menu, MessageSquare, Moon, Network, Palette, Plus, Search, Sliders, Sparkles, Sun, UserRound, WavesHorizontal, createLucideIcon } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, CircleDot, FlaskConical, History, LayoutPanelTop, Menu, MessageSquare, Moon, Network, Palette, Plus, Search, Sliders, Sparkles, Sun, Type, UserRound, WavesHorizontal, createLucideIcon } from 'lucide-react'
 import { THEME_OPTIONS, getThemeOption } from '../theme'
 import { applyCustomThemeToRoot, customThemeSwatches, getBaseOption, loadActiveCustomThemeId, loadCustomThemes, saveActiveCustomThemeId, type CustomTheme } from '../services/custom-themes'
 import { pollRecursive } from '../services/polling'
@@ -19,9 +17,11 @@ import { useDesktopWindowDrag, WindowControls } from './window-controls'
 import { WorkspaceLayoutToggle } from './workspace/workspace-layout-toggle'
 import { TopNavActionElement } from './top-nav-action'
 import { RecentSessionGroupList } from './recent-session-group-list'
-import { setLayoutMode, useLayoutMode, setSessionDensity, useSessionDensity } from '../services/layout-mode'
+import { setLayoutMode, useLayoutMode } from '../services/layout-mode'
+import { assistantAllowedFor } from '../services/assistant-availability'
 import { buildEasyModeUrlFromContext } from '../services/easy-route-state'
 import { buildRecentSessionTreeGroups } from '../services/recent-session-tree'
+import { projectHref } from '../services/project-url'
 
 // 桌面端标题栏: Electron 窗口下顶栏充当可拖拽标题栏 (VSCode 风)。
 // isDesktop 来自 window.mobiusDesktop (preload 注入)。三平台 (Win/Linux/mac) 统一: 顶栏右侧渲染
@@ -70,7 +70,8 @@ export function timeAgoPrecise(date: string) {
     const diffMs = now.getTime() - d.getTime()
     if (diffMs < 60 * 1000) return '刚刚'
     const diffMin = Math.floor(diffMs / 60000)
-    if (diffMin < 60) return `${diffMin}分钟前 ${hhmm}`
+    // 「N分钟前」已经足够精确, 不再尾随挂一个绝对时刻 (25分钟前 18:23 → 25分钟前)
+    if (diffMin < 60) return `${diffMin}分钟前`
     return `今天 ${hhmm}`
   }
   const yesterday = new Date(now)
@@ -141,7 +142,6 @@ const RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT = 70
 const VERSION_UPTIME_VISIBLE_MAX_MS = 2 * 60 * 60 * 1000
 
 type MemInfo = { usedPercent: number; usedMb: number; totalMb: number }
-type CpuInfo = { usedPercent: number; cores: number; loadavg1: number }
 type DiskInfo = {
   usedPercent: number
   usedGb: number
@@ -244,51 +244,14 @@ function DiskIndicator() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
           d="M7.5 17.25h.01M10.5 17.25h.01" />
       </svg>
-      <span className="text-[12px] tabular-nums font-medium">
+      <span className="text-[length:var(--fs-md)] tabular-nums font-medium">
         {pct != null ? `${pct}%` : '--'}
       </span>
     </TopNavActionElement>
   )
 }
 
-function CpuIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT }: { visibleThresholdPercent?: number } = {}) {
-  const [cpu, setCpu] = useState<CpuInfo | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    const stop = pollRecursive(async (signal) => {
-      const d = await api('/api/health/cpu', { signal })
-      if (alive) setCpu(d)
-    }, 60 * 1000)
-    return () => { alive = false; stop() }
-  }, [])
-
-  const pct = cpu?.usedPercent
-  // 常规模式传 0 常显; 默认 70 → 低占用隐藏降噪 (与内存一致)
-  if (pct == null || pct < visibleThresholdPercent) return null
-
-  const danger = pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
-  const color = danger ? '#ef4444' : 'var(--text-muted)'
-
-  return (
-    <TopNavActionElement
-      as="div"
-      interactive={false}
-      className="select-none"
-      title={cpu ? `服务器 CPU 占用 ${pct}%（${cpu.cores} 核 · load ${cpu.loadavg1}）` : '服务器 CPU 占用'}
-      style={{ color }}>
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-          d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-      </svg>
-      <span className="text-[12px] tabular-nums font-medium">
-        {pct != null ? `${pct}%` : '--'}
-      </span>
-    </TopNavActionElement>
-  )
-}
-
-function MemoryIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT }: { visibleThresholdPercent?: number } = {}) {
+function MemoryIndicator() {
   const [mem, setMem] = useState<MemInfo | null>(null)
 
   useEffect(() => {
@@ -301,8 +264,7 @@ function MemoryIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRE
   }, [])
 
   const pct = mem?.usedPercent
-  // visibleThresholdPercent=0 → 常规模式常显 (用户要求可见); 默认 70 → 低占用隐藏降噪
-  if (pct == null || pct < visibleThresholdPercent) return null
+  if (pct == null || pct < RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT) return null
 
   const danger = pct != null && pct > RESOURCE_USAGE_VISIBLE_THRESHOLD_PERCENT
   const color = danger ? '#ef4444' : 'var(--text-muted)'
@@ -318,7 +280,7 @@ function MemoryIndicator({ visibleThresholdPercent = RESOURCE_USAGE_VISIBLE_THRE
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
           d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z" />
       </svg>
-      <span className="text-[12px] tabular-nums font-medium">
+      <span className="text-[length:var(--fs-md)] tabular-nums font-medium">
         {pct != null ? `${pct}%` : '--'}
       </span>
     </TopNavActionElement>
@@ -365,12 +327,12 @@ function VersionIndicator() {
       className="max-w-[210px] select-none"
       title={title}
       style={{ color: 'var(--text-muted)' }}>
-      {/* <span className="text-[11px] font-medium tracking-wide" style={{ color: 'var(--text-muted)' }}>ver</span>
-      <span className="text-[12px] tabular-nums truncate" style={{ color: 'var(--text-secondary)' }}>
+      {/* <span className="text-[length:var(--fs-sm)] font-medium tracking-wide" style={{ color: 'var(--text-muted)' }}>ver</span>
+      <span className="text-[length:var(--fs-md)] tabular-nums truncate" style={{ color: 'var(--text-secondary)' }}>
         {version}
       </span> */}
-      <span className="text-[11px] font-medium tracking-wide" style={{ color: 'var(--text-muted)' }}>UP</span>
-      <span className="text-[11px] font-medium tracking-wide" style={{ color: 'var(--text-muted)' }}>
+      <span className="text-[length:var(--fs-sm)] font-medium tracking-wide" style={{ color: 'var(--text-muted)' }}>UP</span>
+      <span className="text-[length:var(--fs-sm)] font-medium tracking-wide" style={{ color: 'var(--text-muted)' }}>
         {uptime}
       </span>
     </TopNavActionElement>
@@ -423,15 +385,15 @@ function NavSwitcherPanel({
           value={search}
           onChange={e => onSearchChange(e.target.value)}
           placeholder="搜索..."
-          className="h-7 w-full rounded-md pl-7 pr-2 text-[12px] focus:outline-none"
+          className="h-7 w-full rounded-md pl-7 pr-2 text-[length:var(--fs-md)] focus:outline-none"
           style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
         />
       </div>
       <div className="overflow-y-auto">
         {loading ? (
-          <div className="px-2 py-3 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>加载中...</div>
+          <div className="px-2 py-3 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>加载中...</div>
         ) : filtered.length === 0 ? (
-          <div className="px-2 py-3 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>{emptyText}</div>
+          <div className="px-2 py-3 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>{emptyText}</div>
         ) : (
           filtered.map(item => (
             <LinklessRouteButton
@@ -449,7 +411,7 @@ function NavSwitcherPanel({
               />
               <span className="min-w-0 flex-1">
                 <span
-                  className="block truncate text-[12px] font-medium leading-5"
+                  className="block truncate text-[length:var(--fs-md)] font-medium leading-5"
                   style={{
                     color: item.status === 'completed' ? 'var(--text-muted)' : 'var(--text-primary)',
                     textDecoration: item.status === 'completed' ? 'line-through' : undefined,
@@ -458,7 +420,7 @@ function NavSwitcherPanel({
                   {item.label}
                 </span>
                 {item.meta && (
-                  <span className="block truncate text-[10px] leading-4" style={{ color: 'var(--text-muted)' }}>{item.meta}</span>
+                  <span className="block truncate text-[length:var(--fs-xs)] leading-4" style={{ color: 'var(--text-muted)' }}>{item.meta}</span>
                 )}
               </span>
               {item.active && <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-secondary)' }} />}
@@ -538,8 +500,8 @@ function projectChipStyle(active: boolean): React.CSSProperties {
 function recentSessionStatus(session: RecentSession) {
   if (session.agent_status === 'running') return { label: '执行中', color: '#f59e0b', bg: 'rgba(245,158,11,.10)' }
   if (session.agent_status === 'pending') return { label: '启动中', color: '#fbbf24', bg: 'rgba(251,191,36,.10)' }
-  if (session.agent_status === 'waiting') return { label: '待命', color: '#38bdf8', bg: 'rgba(56,189,248,.10)' }
-  if (session.agent_status === 'completed' || session.status === 'completed') return { label: '已完成', color: '#34d399', bg: 'rgba(52,211,153,.10)' }
+  if (session.agent_status === 'waiting') return { label: '待命中', color: '#38bdf8', bg: 'rgba(56,189,248,.10)' }
+  if (session.agent_status === 'completed' || session.status === 'completed') return { label: '完成', color: 'var(--text-muted)', bg: 'var(--bg-card)' }
   return { label: '空闲', color: 'var(--text-muted)', bg: 'var(--bg-card)' }
 }
 
@@ -647,13 +609,13 @@ function RecentSessionsPanel({
       <div className="flex items-center justify-between gap-2 px-2.5 py-2" style={{ borderBottom: '1px solid var(--border-color)' }}>
         <div className="flex min-w-0 items-center gap-2">
           <History className="h-3.5 w-3.5 flex-shrink-0" style={{ color: 'var(--text-secondary)' }} />
-          <span className="text-[12px] font-semibold" style={{ color: 'var(--text-primary)' }}>近期活跃会话</span>
+          <span className="text-[length:var(--fs-md)] font-semibold" style={{ color: 'var(--text-primary)' }}>近期活跃会话</span>
         </div>
         <LinklessRouteButton
           to={`/u/${userParam}/mobius_overview_cluster`}
           onClick={onPick}
           title="系统可视化 · 查看全局会话集群图谱"
-          className="inline-flex flex-shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium leading-none transition-colors hover:bg-[var(--bg-hover)]"
+          className="inline-flex flex-shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[length:var(--fs-sm)] font-medium leading-none transition-colors hover:bg-[var(--bg-hover)]"
           style={{ color: 'var(--text-secondary)' }}
         >
           <Network className="h-3.5 w-3.5" />
@@ -665,7 +627,7 @@ function RecentSessionsPanel({
           <button
             type="button"
             onClick={() => setSelectedProject(null)}
-            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] leading-none transition-colors"
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[length:var(--fs-sm)] leading-none transition-colors"
             style={projectChipStyle(effectiveProject === null)}
           >
             <span>全部</span>
@@ -676,7 +638,7 @@ function RecentSessionsPanel({
               type="button"
               onClick={() => setSelectedProject(p.id)}
               title={p.name}
-              className="inline-flex max-w-[160px] items-center gap-1 rounded-md px-2 py-1 text-[11px] leading-none transition-colors"
+              className="inline-flex max-w-[160px] items-center gap-1 rounded-md px-2 py-1 text-[length:var(--fs-sm)] leading-none transition-colors"
               style={projectChipStyle(effectiveProject === p.id)}
             >
               <span className="truncate">{p.name}</span>
@@ -687,11 +649,11 @@ function RecentSessionsPanel({
       )}
       <div className="flex-1 min-h-0 overflow-y-auto py-1">
         {loading ? (
-          <div className="px-3 py-6 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>加载中...</div>
+          <div className="px-3 py-6 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>加载中...</div>
         ) : error ? (
-          <div className="px-3 py-6 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>{error}</div>
+          <div className="px-3 py-6 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>{error}</div>
         ) : visibleSessions.length === 0 ? (
-          <div className="px-3 py-6 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>暂无近期会话</div>
+          <div className="px-3 py-6 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>暂无近期会话</div>
         ) : (
           <div aria-label="按项目与任务分组的近期活跃会话" data-testid="normal-recent-session-tree">
             {visibleGroups.map(group => {
@@ -717,12 +679,12 @@ function RecentSessionsPanel({
                       {isResearch ? <FlaskConical className="h-3 w-3" /> : <CircleDot className="h-3 w-3" />}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[9px] leading-3" style={{ color: 'var(--text-muted)' }}>{group.projectName}</span>
-                      <span className="block truncate text-[11px] font-semibold leading-4" style={{ color: 'var(--text-primary)' }}>{group.subjectTitle}</span>
+                      <span className="block truncate text-[length:var(--fs-2xs)] leading-3" style={{ color: 'var(--text-muted)' }}>{group.projectName}</span>
+                      <span className="block truncate text-[length:var(--fs-sm)] font-semibold leading-4" style={{ color: 'var(--text-primary)' }}>{group.subjectTitle}</span>
                     </span>
                     <span className="flex flex-shrink-0 flex-col items-end gap-0.5">
-                      <span className="text-[8px] font-medium" style={{ color: isResearch ? '#c084fc' : '#60a5fa' }}>{isResearch ? '研究' : '任务'}</span>
-                      <span className="text-[8px] tabular-nums" style={{ color: group.activeCount ? '#fbbf24' : 'var(--text-muted)' }}>
+                      <span className="text-[length:var(--fs-2xs)] font-medium" style={{ color: isResearch ? '#c084fc' : '#60a5fa' }}>{isResearch ? '研究' : '任务'}</span>
+                      <span className="text-[length:var(--fs-2xs)] tabular-nums" style={{ color: group.activeCount ? '#4ade80' : 'var(--text-muted)' }}>
                         {group.activeCount ? `${group.activeCount} 活跃` : `${group.sessions.length} ${isResearch ? '智能体' : '会话'}`}
                       </span>
                     </span>
@@ -755,15 +717,15 @@ function RecentSessionsPanel({
                           <span className="absolute -left-2 top-1/2 w-1.5 border-t" style={{ borderColor: 'var(--border-color)' }} aria-hidden="true" />
                           <span className="min-w-0 flex-1">
                             <span className="flex min-w-0 items-center gap-1">
-                              <span className="flex-shrink-0 rounded px-1 py-0.5 text-[8px] font-medium leading-3" style={{ color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>{isResearch ? '智能体' : '会话'}</span>
-                              <span className="min-w-0 flex-1 truncate text-[10px] font-medium leading-4" style={{ color: 'var(--text-primary)' }}>{session.name || session.session_id}</span>
+                              <span className="flex-shrink-0 rounded px-1 py-0.5 text-[length:var(--fs-2xs)] font-medium leading-3" style={{ color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>{isResearch ? '智能体' : '会话'}</span>
+                              <span className="min-w-0 flex-1 truncate text-[length:var(--fs-xs)] font-medium leading-4" style={{ color: 'var(--text-primary)' }}>{session.name || session.session_id}</span>
                             </span>
-                            <span className="mt-0.5 flex items-center gap-1.5 text-[8px] leading-3" style={{ color: 'var(--text-muted)' }}>
+                            <span className="mt-0.5 flex items-center gap-1.5 text-[length:var(--fs-2xs)] leading-3" style={{ color: 'var(--text-muted)' }}>
                               <span>{timeAgoPrecise(session.last_active || '')}</span>
                               <span className="inline-flex items-center gap-0.5"><MessageSquare className="h-2.5 w-2.5" />{session.message_count || 0}</span>
                             </span>
                           </span>
-                          <span className="flex-shrink-0 rounded-full px-1 py-0.5 text-[8px] font-medium leading-3" style={{ color: status.color, background: status.bg }}>{status.label}</span>
+                          <span className="flex-shrink-0 rounded-full px-1 py-0.5 text-[length:var(--fs-2xs)] font-medium leading-3" style={{ color: status.color, background: status.bg }}>{status.label}</span>
                           {active && <Check className="h-3 w-3 flex-shrink-0" style={{ color: 'var(--text-secondary)' }} />}
                         </LinklessRouteButton>
                       )
@@ -835,15 +797,15 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
   const navigate = useNavigate()
   const location = useLocation()
   const layoutMode = useLayoutMode()
-  const sessionDensity = useSessionDensity()
   const easyModeEnabled = layoutMode === 'easy_mode'
+  // 顶栏右侧动作区是否收起。除了全局模式, 还要看当前路由: 直接深链进 /easy_mode 时
+  // layout_mode 可能还没写进 localStorage (此时 useLayoutMode() 是 null), 但页面已经是简易模式,
+  // 动作区必须一并收起, 否则同一个页面会出现两副顶栏。
+  const easyTopNavCollapsed = easyModeEnabled || /\/easy_mode\/?$/.test(location.pathname)
   // 会话页内 (Issue/Research 且选中了会话) 的开关切换的是"呈现密度":
   // 原地换 ChatArea 的 layout, 不导航不卸载 → 代码对话编辑器等工作区状态全保留.
   // 非会话区域 (用户主页/项目页/easy_mode 页本身) 仍走全局 layout_mode 切换页面.
-  const inSessionContext = !!(params.issue || params.research) && !!currentSession
-  const sessionEasyEnabled = inSessionContext ? sessionDensity === 'easy' : easyModeEnabled
-  // 极简界面态: 会话页内看呈现密度, 其余页面看全局模式。驱动顶栏右上角的精简渲染。
-  const easyUI = sessionEasyEnabled
+  const sessionEasyEnabled = easyModeEnabled
   const [showChangePw, setShowChangePw] = useState(false)
   const [showAimuxGuide, setShowAimuxGuide] = useState(false)
   const [showDesktopDownload, setShowDesktopDownload] = useState(false)
@@ -852,8 +814,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showThemeMenu, setShowThemeMenu] = useState(false)
   const [showRecentSessions, setShowRecentSessions] = useState(false)
-  const [showGuideHelp, setShowGuideHelp] = useState(false)
   const [showPalette, setShowPalette] = useState(false)
+  const [showFontSettings, setShowFontSettings] = useState(false)
   // 调色盘里的主题列表与当前激活 id — 在下拉菜单和顶栏按钮里都用到.
   // 每次打开菜单 / 关闭调色盘 / 主题切换时刷新, 避免在下拉里看到陈旧数据.
   const [customThemes, setCustomThemes] = useState<CustomTheme[]>([])
@@ -956,6 +918,10 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
     return () => document.removeEventListener('click', closeSwitcher)
   }, [openSwitcher])
 
+  // 空闲时预热「+」新建菜单的项目/任务列表: 首次打开也能秒出下拉, 而不是转圈等接口.
+  // Idle-time warm so the create menu's dropdowns are ready on the very first open.
+  useEffect(() => warmCreateMenuListsOnIdle(user?.id, projectParam), [user?.id, projectParam])
+
   // Tab 标题: 项目内显示「<项目名> - 莫比乌斯AI」, 非项目内沿用 branding.systemNameZh.
   // projectName 未异步加载时 fallback 到 projectParam(项目 ID), 保证 tab 不闪空白.
   useEffect(() => {
@@ -1014,7 +980,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
       meta: p.kind === 'extension' ? '拓展项目' : (p.is_self_develop ? '自迭代' : (p.created_by ? `@${p.created_by}` : undefined)),
       status: 'active',
       active: p.id === projectParam,
-      to: `/u/${p.created_by || userParam}/p/${p.id}`,
+      to: projectHref(p, userParam),
     }))
 
   const issueItems: SwitcherItem[] = ((issuesMap[projectParam ?? ''] || []) as any[])
@@ -1052,8 +1018,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
 
   return (
     <>
-      <div className={`mobius-topnav h-9 border-b flex items-center justify-between px-5 flex-shrink-0 select-none`}
-        style={{ borderColor: 'var(--border-color)', background: 'var(--bg-primary)' }}
+      <div className={`mobius-topnav h-9 flex items-center justify-between px-5 flex-shrink-0 select-none`}
+        style={{ background: 'var(--bg-primary)' }}
         onPointerDown={onTopNavPointerDown}
         onDoubleClick={onTopNavDoubleClick}>
         {/* 桌面端拖拽: 整条顶栏空白区作拖拽热区 (pointerdown 命中 button/a/input 等交互元素则放行点击,
@@ -1100,7 +1066,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
             >
               {!branding.hideLogo && <MobiusLogo size={28} />}
               {/* {branding.systemNameEn && (
-                <span className="mobius-topnav-brandtext font-semibold text-[14px] tracking-tight" style={{ color: 'var(--text-primary)' }}>
+                <span className="mobius-topnav-brandtext font-semibold text-[length:var(--fs-xl)] tracking-tight" style={{ color: 'var(--text-primary)' }}>
                   {branding.systemNameEn}
                 </span>
               )} */}
@@ -1115,22 +1081,22 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               />
             )}
           </div>
-          <span className="mobius-topnav-sep-pre text-[13px]" style={{ color: 'var(--text-muted)' }}>/</span>
+          <span className="mobius-topnav-sep-pre text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>/</span>
           <LinklessRouteButton
             to={userParam ? `/u/${userParam}` : '/'}
             newTab
             aria-label="回到主页"
             title="回到主页"
-            className="mobius-topnav-userlink text-[13px] hover:text-blue-400 truncate flex-shrink-0"
+            className="mobius-topnav-userlink uppercase text-[length:var(--fs-lg)] hover:text-blue-400 truncate flex-shrink-0"
             style={{ color: 'var(--text-secondary)', maxWidth: 140 }}>
             {userParam}
           </LinklessRouteButton>
           {projectParam && (
             <>
-              <span className="mobius-topnav-sep-post text-[13px]" style={{ color: 'var(--text-muted)' }}>/</span>
+              <span className="mobius-topnav-sep-post text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>/</span>
               <div className="mobius-topnav-projectcrumb relative flex min-w-0 items-center">
                 <LinklessRouteButton to={`/u/${userParam}/p/${projectParam}`}
-                  className="text-[13px] hover:text-blue-400 truncate"
+                  className="uppercase text-[length:var(--fs-lg)] hover:text-blue-400 truncate"
                   style={{ color: 'var(--text-secondary)', maxWidth: 180 }}
                   title={projectName}>
                   {projectName}
@@ -1161,7 +1127,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
           )}
           {issueParam && (
             <>
-              <span className="text-[13px]" style={{ color: 'var(--text-muted)' }}>/</span>
+              <span className="text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>/</span>
               <div className="relative flex min-w-0 items-center">
                 <button
                   type="button"
@@ -1170,7 +1136,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                   aria-label="切换任务"
                   aria-haspopup="menu"
                   aria-expanded={openSwitcher === 'issue'}
-                  className="flex min-w-0 items-center gap-0.5 text-[13px] hover:text-blue-400"
+                  className="flex min-w-0 items-center gap-0.5 text-[length:var(--fs-lg)] hover:text-blue-400"
                   style={{ color: 'var(--text-primary)' }}>
                   <span className="truncate" style={{ maxWidth: 270 }} title={issueTitle}>{issueTitle}</span>
                   <ChevronDown className={`h-3 w-3 flex-shrink-0 transition-transform ${openSwitcher === 'issue' ? 'rotate-180' : ''}`} style={{ color: 'var(--text-muted)' }} />
@@ -1190,7 +1156,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
           )}
           {researchParam && (
             <>
-              <span className="text-[13px]" style={{ color: 'var(--text-muted)' }}>/</span>
+              <span className="text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>/</span>
               <div className="relative flex min-w-0 items-center">
                 <button
                   type="button"
@@ -1199,7 +1165,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                   aria-label="切换研究"
                   aria-haspopup="menu"
                   aria-expanded={openSwitcher === 'research'}
-                  className="flex min-w-0 items-center gap-0.5 text-[13px] hover:text-blue-400"
+                  className="flex min-w-0 items-center gap-0.5 text-[length:var(--fs-lg)] hover:text-blue-400"
                   style={{ color: 'var(--text-primary)' }}>
                   <span className="truncate" style={{ maxWidth: 270 }} title={researchTitle}>{researchTitle}</span>
                   <ChevronDown className={`h-3 w-3 flex-shrink-0 transition-transform ${openSwitcher === 'research' ? 'rotate-180' : ''}`} style={{ color: 'var(--text-muted)' }} />
@@ -1222,89 +1188,70 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
         {/* 中间弹性填充 spacer (整条顶栏已统一挂拖拽, 此处仅占位; 不再单独挂 DesktopDragHandle 以免重复触发)。 */}
         <div className="mobius-topnav-spacer flex-1 self-stretch" aria-hidden style={{ cursor: topnavDrag.enabled ? 'grab' : undefined }} />
 
-        {/* 右侧操作。
-            极简界面态 (easyUI) 下精简为: 搜索 / 存储使用 / 极简⇄专家切换 / 管理中心入口 (+必要窗口控制);
-            专家界面保持完整功能。easyUI 判定: 会话页内看呈现密度, 其余页面看全局模式。 */}
+        {/* 右侧操作: 普通模式全量呈现; 简易模式只保留"外观"入口, 新建/搜索/系统可视化/系统状态
+            (磁盘·内存·版本) 一律不渲染 —— 简易模式有页面内自带的创建与检索入口, 顶栏再放一份
+            纯属噪音。注意这里用条件渲染而非 CSS 隐藏: 磁盘/版本徽标内部有 30~60s 轮询, 不渲染
+            就连带停掉请求 (见 DiskIndicator / VersionIndicator 内的 pollRecursive)。 */}
         <div className="mobius-topnav-actions flex min-w-0 flex-shrink-0 items-center gap-1.5 xl:gap-2">
-          {!easyUI && rightExtra}
+          {rightExtra}
           {/* 桌面端 aimux 反向连接状态徽标 — 仅 Electron 检测到时渲染（搜索按钮左侧） */}
-          {!easyUI && <AimuxStatusBadge />}
+          <AimuxStatusBadge />
           {/* 桌面端项目本地路径绑定闸门 — 仅 Electron + 进入未绑定项目时弹窗（替代旧 Electron 注入 overlay） */}
           <ProjectPathBindGate projectId={projectParam} />
-          {/* 新建下拉 — 全局 4 类创建 (项目 / Issue / Session / Research Agent) */}
-          {!easyUI && (
-            <GlobalCreateMenu
-              open={showNewMenu}
-              onOpenChange={setShowNewMenu}
-              onPick={setCreateKind}
-              inProject={inProject}
-              currentProject={currentProject}
-            />
+          {!easyTopNavCollapsed && (
+            <>
+              {/* 新建下拉 — 全局 4 类创建 (项目 / Issue / Session / Research Agent) */}
+              <GlobalCreateMenu
+                open={showNewMenu}
+                onOpenChange={setShowNewMenu}
+                onPick={setCreateKind}
+                inProject={inProject}
+                currentProject={currentProject}
+              />
+              {/* 工作区布局切换 (会话 ↔ 代码对话) — 仅 Issue/Research 路由渲染, 桌面端可见 */}
+              <WorkspaceLayoutToggle />
+              {/* 顶栏搜索 — 跨项目/Issue/Research 搜索所有会话内容 (紧邻 +新建) */}
+              <TopNavActionElement
+                type="button"
+                onClick={() => setShowSearch(true)}
+                title="搜索会话内容"
+                aria-label="搜索会话内容"
+                data-tour="top-search"
+                className="mobius-search-trigger">
+                <Search className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+                {/* {!isMobile && <span className="mobius-topnav-search-label text-[length:var(--fs-md)] font-medium">搜索</span>} */}
+              </TopNavActionElement>
+              {/* 系统可视化入口 — 固定在搜索按钮右侧，沿用当前用户路由上下文。 */}
+              <TopNavActionElement
+                type="button"
+                onClick={() => navigate(`/u/${userParam}/mobius_overview_cluster`)}
+                title="系统可视化"
+                aria-label="前往系统可视化"
+                data-tour="top-overview-cluster"
+              >
+                <Sparkles className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+              </TopNavActionElement>
+            </>
           )}
-          {/* 工作区布局切换 (会话 ↔ 代码对话) — 仅 Issue/Research 路由渲染, 桌面端可见 */}
-          {!easyUI && <WorkspaceLayoutToggle />}
-          {/* 顶栏搜索 — 跨项目/Issue/Research 搜索所有会话内容 (紧邻 +新建) */}
           <TopNavActionElement
-            type="button"
-            onClick={() => setShowSearch(true)}
-            title="搜索会话内容"
-            aria-label="搜索会话内容"
-            data-tour="top-search"
-            className="mobius-search-trigger">
-            <Search className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-            {/* {!isMobile && <span className="mobius-topnav-search-label text-[12px] font-medium">搜索</span>} */}
+            as="a"
+            href="https://github.com/mobius-system/mobius.git"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="GitHub"
+            aria-label="GitHub"
+            className="mobius-topnav-github"
+          >
+            <GithubIcon className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
           </TopNavActionElement>
-          {/* 系统可视化入口 — 固定在搜索按钮右侧，沿用当前用户路由上下文。 */}
-          {!easyUI && (
-            <TopNavActionElement
-              type="button"
-              onClick={() => navigate(`/u/${userParam}/mobius_overview_cluster`)}
-              title="系统可视化"
-              aria-label="前往系统可视化"
-              data-tour="top-overview-cluster"
-            >
-              <Sparkles className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-            </TopNavActionElement>
-          )}
-          {/* 帮助与引导入口已并入用户菜单 (top-user-menu) 内的「帮助与引导」菜单项 */}
-          {!easyUI && (
-            <TopNavActionElement
-              as="a"
-              href="https://github.com/mobius-system/mobius.git"
-              target="_blank"
-              rel="noopener noreferrer"
-              title="GitHub"
-              aria-label="GitHub"
-              className="mobius-topnav-github"
-            >
-              <GithubIcon className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-            </TopNavActionElement>
-          )}
-          {!IS_DESKTOP && (
+          {!IS_DESKTOP && !easyTopNavCollapsed && (
             <div data-tour="top-system-status" className="mobius-topnav-status flex shrink-0 items-center gap-2">
-              {/* 存储使用: 极简态保留 (磁盘告警对所有人都重要); 内存/版本仅专家态。 */}
               <DiskIndicator />
-              {!easyUI && <CpuIndicator visibleThresholdPercent={0} />}
-              {!easyUI && <MemoryIndicator visibleThresholdPercent={0} />}
-              {!easyUI && <VersionIndicator />}
+              <MemoryIndicator />
+              <VersionIndicator />
             </div>
           )}
-          {/* 极简 ⇄ 专家 切换入口已合并到「外观」菜单内的简易模式开关 (shell.tsx 中 easy-mode-switch),
-              顶栏不再保留独立按钮。 */}
-          {/* 极简态的管理中心直达入口 (仅管理员可见; 专家态藏在用户菜单里) */}
-          {easyUI && user?.role === 'admin' && (
-            <TopNavActionElement
-              type="button"
-              onClick={() => window.openAdminOverlay?.()}
-              title="管理中心"
-              aria-label="管理中心"
-              data-testid="easy-admin-entry"
-            >
-              <Sliders className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
-              <span className="text-[12px] font-medium whitespace-nowrap">管理</span>
-            </TopNavActionElement>
-          )}
-          {/* 外观按钮 — 极简态也显示 (菜单内含简易模式开关, 是极简 ⇄ 完整的唯一切回入口) */}
+          {/* 简易模式开关在「外观」菜单内，两种模式的入口和退出路径保持一致。 */}
           <div className="relative shrink-0" data-tour="top-theme-toggle">
             <TopNavActionElement
               type="button"
@@ -1322,7 +1269,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               className="max-w-[128px] min-w-0 justify-center"
             >
               {headerIconKey === 'light' ? <Sun className="w-3.5 h-3.5 shrink-0" strokeWidth={2} /> : headerIconKey === 'dark' ? <Moon className="w-3.5 h-3.5 shrink-0" strokeWidth={2} /> : <Sliders className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />}
-              <span className="mobius-topnav-theme-label min-w-0 max-w-[80px] truncate text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>外观</span>
+              <span className="mobius-topnav-theme-label min-w-0 max-w-[80px] truncate text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-secondary)' }}>外观</span>
             </TopNavActionElement>
             {showThemeMenu && (
               <div
@@ -1349,8 +1296,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                         ))}
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block text-[12px] font-semibold leading-4" style={{ color: 'var(--text-primary)' }}>{option.label}</span>
-                        <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>{option.description}</span>
+                        <span className="block text-[length:var(--fs-md)] font-semibold leading-4" style={{ color: 'var(--text-primary)' }}>{option.label}</span>
+                        <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>{option.description}</span>
                       </span>
                       {selected ? <Check className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--text-secondary)' }} /> : null}
                     </button>
@@ -1367,8 +1314,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                 >
                   <WavesHorizontal className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[12px] font-semibold leading-4">背景光流</span>
-                    <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>
+                    <span className="block text-[length:var(--fs-md)] font-semibold leading-4">背景光流</span>
+                    <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>
                       缓慢色彩流动 · {backgroundFlowEnabled ? '已开启' : '已关闭'}
                     </span>
                   </span>
@@ -1390,6 +1337,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                     />
                   </span>
                 </button>
+                {/* 小莫助手临时关闭期间不对普通用户展示这个入口 (见 assistant-availability). */}
+                {assistantAllowedFor(user) && (
                 <button
                   type="button"
                   role="switch"
@@ -1400,8 +1349,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                 >
                   <CircleDot className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[12px] font-semibold leading-4">小莫光点</span>
-                    <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>
+                    <span className="block text-[length:var(--fs-md)] font-semibold leading-4">小莫光点</span>
+                    <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>
                       浮动入口 · {assistantBubbleEnabled ? '已显示' : '已隐藏'}
                     </span>
                   </span>
@@ -1423,6 +1372,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                     />
                   </span>
                 </button>
+                )}
                 <button
                   type="button"
                   role="switch"
@@ -1431,13 +1381,6 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                   data-testid="easy-mode-switch"
                   onClick={() => {
                     setShowThemeMenu(false)
-                    if (inSessionContext) {
-                      // 会话内原地切换: 只改呈现密度, 不动路由不动全局模式.
-                      // ChatArea 因 layout prop 变化重渲染, 但组件不卸载 →
-                      // SSE/草稿/代码对话 iframe 等全部保活.
-                      setSessionDensity(sessionDensity === 'easy' ? 'professional' : 'easy')
-                      return
-                    }
                     const nextEnabled = !easyModeEnabled
                     setLayoutMode(nextEnabled ? 'easy_mode' : 'normal_mode')
                     if (nextEnabled) {
@@ -1460,9 +1403,9 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                 >
                   <LayoutPanelTop className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[12px] font-semibold leading-4">简易模式</span>
-                    <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>
-                      {inSessionContext ? '会话内原地切换 · ' : '精简会话界面 · '}{sessionEasyEnabled ? '已开启' : '已关闭'}
+                    <span className="block text-[length:var(--fs-md)] font-semibold leading-4">简易模式</span>
+                    <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>
+                      {'精简会话界面 · '}{sessionEasyEnabled ? '已开启' : '已关闭'}
                     </span>
                   </span>
                   <span
@@ -1486,7 +1429,7 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                 {customThemes.length > 0 && (
                   <>
                     <div className="my-1.5 border-t" style={{ borderColor: 'var(--border-color)' }} />
-                    <div className="px-2 py-1 text-[10px] uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+                    <div className="px-2 py-1 text-[length:var(--fs-xs)] uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
                       自定义主题
                     </div>
                     {customThemes.map(t => {
@@ -1512,8 +1455,8 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                             <span className="flex-1" style={{ background: accent }} />
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block text-[12px] font-semibold leading-4 truncate" style={{ color: 'var(--text-primary)' }}>{t.name}</span>
-                            <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>
+                            <span className="block text-[length:var(--fs-md)] font-semibold leading-4 truncate" style={{ color: 'var(--text-primary)' }}>{t.name}</span>
+                            <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>
                               基于「{getBaseOption(t.base).label}」· {Object.keys(t.overrides).length} 个覆写
                             </span>
                           </span>
@@ -1532,16 +1475,27 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
                 >
                   <Palette className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[12px] font-semibold leading-4">调色盘</span>
-                    <span className="block truncate text-[11px] leading-4" style={{ color: 'var(--text-muted)' }}>自由调节主题颜色 · 保存到浏览器</span>
+                    <span className="block text-[length:var(--fs-md)] font-semibold leading-4">调色盘</span>
+                    <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>自由调节主题颜色 · 保存到浏览器</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowThemeMenu(false); setShowFontSettings(true) }}
+                  className="w-full rounded-md px-2 py-2 text-left hover:bg-[var(--bg-hover)] transition-colors flex items-center gap-2"
+                  style={{ color: 'var(--text-primary)' }}
+                >
+                  <Type className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[length:var(--fs-md)] font-semibold leading-4">字体设置</span>
+                    <span className="block truncate text-[length:var(--fs-sm)] leading-4" style={{ color: 'var(--text-muted)' }}>七档字号统一调节 · 保存到浏览器</span>
                   </span>
                 </button>
               </div>
             )}
           </div>
 
-          {/* 用户菜单 — 极简态隐藏 (改名/下载/改密等均属专家功能; 管理员另有直达入口) */}
-          {!easyUI && (
+          {/* 用户菜单与普通模式一致，管理、下载和退出入口始终可用。 */}
           <div className="relative" data-tour="top-user-menu">
             <TopNavActionElement
               type="button"
@@ -1552,66 +1506,60 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               aria-expanded={showUserMenu}
               onClick={(e: any) => { e.stopPropagation(); setShowUserMenu((s) => !s) }}>
               {isMobile && <UserRound className="h-4 w-4" strokeWidth={2} />}
-              {!isMobile && <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>{user?.display_name}</span>}
+              {!isMobile && <span className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-secondary)' }}>{user?.display_name}</span>}
               {!isMobile && <svg className="w-3 h-3" style={{ color: 'var(--text-muted)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
             </TopNavActionElement>
             {showUserMenu && (
               <div className="absolute right-0 top-9 z-50 rounded-lg shadow-xl py-1 min-w-[180px]"
                 style={{ background: 'var(--menu-bg)', border: '1px solid var(--border-color)' }}
                 onClick={e => e.stopPropagation()}>
-                {user?.role === 'admin' && (
+                {user && (
                   <button onClick={() => { setShowUserMenu(false); window.openAdminOverlay?.() }}
-                    className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
+                    className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                     style={{ color: 'var(--text-primary)' }}>
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6m6 0h-6m6 0v-6a2 2 0 012-2h2a2 2 0 012 2v6m-6 0h6" /></svg>
                     管理中心
                   </button>
                 )}
                 <div className="border-t my-0.5" style={{ borderColor: 'var(--border-color)' }} />
-                <button onClick={() => { setShowUserMenu(false); setShowGuideHelp(true) }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
-                  style={{ color: 'var(--text-primary)' }}>
-                  <CircleQuestionMark className="w-3.5 h-3.5" strokeWidth={2} />
-                  帮助与引导
-                </button>
                 <button onClick={() => { setShowUserMenu(false); setShowAimuxGuide(true) }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                   style={{ color: 'var(--text-primary)' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
                   AIMUX 连接指引
                 </button>
                 <button onClick={() => { setShowUserMenu(false); setShowDesktopDownload(true) }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                   style={{ color: 'var(--text-primary)' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
-                  下载桌面客户端 <span className="font-mono text-[11px] opacity-70">(v0.0.30)</span>
+                  下载桌面客户端
                 </button>
                 <button onClick={() => { setShowUserMenu(false); setShowTerminalInstall(true) }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                   style={{ color: 'var(--text-primary)' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 17l6-6-6-6m8 12h8" /></svg>
-                  下载命令行终端 <span className="font-mono text-[11px] opacity-70">(v0.1.28)</span>
+                  下载命令行终端
                 </button>
                 <button onClick={() => { setShowUserMenu(false); setShowMobileDownload(true) }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                   style={{ color: 'var(--text-primary)' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
-                  下载移动端 App <span className="font-mono text-[11px] opacity-70">(v0.4.4)</span>
+                  下载移动端 App
                 </button>
                 <button onClick={() => { setShowUserMenu(false); setShowChangePw(true) }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2"
                   style={{ color: 'var(--text-primary)' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>
                   修改密码
                 </button>
                 <button onClick={() => { setShowUserMenu(false); toggleTheme() }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[var(--bg-hover)] flex items-center gap-2 md:hidden"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-[var(--bg-hover)] flex items-center gap-2 md:hidden"
                   style={{ color: 'var(--text-primary)' }}>
                   <Palette className="w-3.5 h-3.5" />
                   切换主题
                 </button>
                 <button onClick={() => { setShowUserMenu(false); logout(); navigate('/') }}
-                  className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-red-500/10 flex items-center gap-2"
+                  className="w-full px-3 py-1.5 text-left text-[length:var(--fs-md)] hover:bg-red-500/10 flex items-center gap-2"
                   style={{ color: '#ef4444' }}>
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
                   退出登录
@@ -1619,30 +1567,36 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
               </div>
             )}
           </div>
-          )}
           {/* 桌面端自绘窗口控制按钮 (三平台统一自绘; macOS 已改 frame:false 无原生交通灯) */}
           {IS_DESKTOP && <WindowControls />}
         </div>
       </div>
 
-      {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
-      {showAimuxGuide && <AimuxGuideModal onClose={() => setShowAimuxGuide(false)} />}
-      {showDesktopDownload && <DesktopDownloadModal onClose={() => setShowDesktopDownload(false)} />}
-      {showTerminalInstall && <TerminalInstallModal onClose={() => setShowTerminalInstall(false)} />}
-      {showMobileDownload && <MobileDownloadModal onClose={() => setShowMobileDownload(false)} />}
-      {showGuideHelp && <GuideHelpModal onClose={() => setShowGuideHelp(false)} />}
-      {showPalette && <CustomThemePalette onClose={() => setShowPalette(false)} />}
-      {showSearch && (
-        <SearchModal onClose={() => setShowSearch(false)} onNavigate={navigate} />
-      )}
-      {createKind && (
-        <GlobalCreateRoot
-          kind={createKind}
-          ctx={{ projectId: projectParam, issueId: issueParam, researchId: researchParam }}
-          onClose={() => setCreateKind(null)}
-          onNavigate={navigate}
-        />
-      )}
+      {/* 弹层全部按需下载: 它们都只在用户点开后才渲染, 静态引入等于把弹窗代码(含 markdown
+          渲染栈与全局创建面板)算进每个页面的首屏体积. */}
+      {/* Every overlay downloads on demand: each one renders only after a user action, so a
+          static import would count dialog code (markdown stack, global create panel) as
+          first-paint weight on every page. */}
+      <Suspense fallback={null}>
+        {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
+        {showAimuxGuide && <AimuxGuideModal onClose={() => setShowAimuxGuide(false)} />}
+        {showDesktopDownload && <DesktopDownloadModal onClose={() => setShowDesktopDownload(false)} />}
+        {showTerminalInstall && <TerminalInstallModal onClose={() => setShowTerminalInstall(false)} />}
+        {showMobileDownload && <MobileDownloadModal onClose={() => setShowMobileDownload(false)} />}
+        {showPalette && <CustomThemePalette onClose={() => setShowPalette(false)} />}
+        {showFontSettings && <FontSettingsModal onClose={() => setShowFontSettings(false)} />}
+        {showSearch && (
+          <SearchModal onClose={() => setShowSearch(false)} onNavigate={navigate} projectId={projectParam} />
+        )}
+        {createKind && (
+          <GlobalCreateRoot
+            kind={createKind}
+            ctx={{ projectId: projectParam, issueId: issueParam, researchId: researchParam }}
+            onClose={() => setCreateKind(null)}
+            onNavigate={navigate}
+          />
+        )}
+      </Suspense>
       <OverlayPanels />
     </>
   )
@@ -1654,7 +1608,28 @@ export function TopNav({ rightExtra }: { rightExtra?: React.ReactNode } = {}) {
 // =====================================================================
 type OverlayKind = 'admin' | null
 
-// 全局打开 overlay 的函数 (供引导系统等外部触发, 如「重温管理中心」按钮先打开 overlay 再启动引导).
+// 管理中心整包按需加载: 它是首屏无关的重弹层(panels.tsx 体积最大), 静态 import 会把它
+// 拖进每个页面的首屏闭包; 这里跟随其它路由页一样走 lazyWithRetry, 打开弹层时才下载.
+// The whole admin center loads on demand: it is the heaviest overlay and is irrelevant
+// to first paint, so it uses lazyWithRetry like the routed pages instead of a static import.
+const AdminPanel = lazyWithRetry(() => import('./panels').then(module => ({ default: module.AdminPanel })))
+// 其余"点了才出现"的弹层同理: 首屏不渲染它们, 静默 import 只是替用户提前付流量.
+// 新建下拉 (GlobalCreateMenu) 不在此列 —— 它在常规模式首屏就可见, 延后会出现按钮后到的跳动.
+// The other click-to-open overlays load on demand for the same reason. The "+新建" dropdown
+// is deliberately excluded: it is visible on the normal-mode first paint, and deferring it
+// would make the top-bar button pop in late.
+const ChangePasswordModal = lazyWithRetry(() => import('./modals').then(module => ({ default: module.ChangePasswordModal })))
+const AimuxGuideModal = lazyWithRetry(() => import('./modals').then(module => ({ default: module.AimuxGuideModal })))
+const DesktopDownloadModal = lazyWithRetry(() => import('./modals').then(module => ({ default: module.DesktopDownloadModal })))
+const MobileDownloadModal = lazyWithRetry(() => import('./modals').then(module => ({ default: module.MobileDownloadModal })))
+const TerminalInstallModal = lazyWithRetry(() => import('./modals').then(module => ({ default: module.TerminalInstallModal })))
+const GlobalCreateRoot = lazyWithRetry(() => import('./global-create').then(module => ({ default: module.GlobalCreateRoot })))
+const SearchModal = lazyWithRetry(() => import('./search-modal').then(module => ({ default: module.SearchModal })))
+const CustomThemePalette = lazyWithRetry(() => import('./custom-theme-palette').then(module => ({ default: module.CustomThemePalette })))
+// 字体设置弹窗 (外观菜单入口) — 同样懒加载, 打开时才下载
+const FontSettingsModal = lazyWithRetry(() => import('./font-settings-modal').then(module => ({ default: module.FontSettingsModal })))
+
+// 全局打开 overlay 的函数 (供外部按钮触发, 如「监控」「配置」入口直接落到对应 tab).
 // 可选 tab: 传入即直接落到该 tab (例如「监控」按钮传 'runtime' = 运行监控), 不传则用管理中心默认 tab.
 // 使用 pending 模式: OverlayPanels 在 useEffect 中赋值 _setOverlay 之前若被调用, 请求会留在 _pendingAdminTab
 // 里, 下次 OverlayPanels 挂载 AdminPanel 时读取并清空, 避免「点按钮 overlay 没反应 / 落错 tab」.
@@ -1679,7 +1654,11 @@ function OverlayPanels() {
   _pendingAdminTab = null
   return (
     <div className="fixed inset-0 z-40 flex" style={{ background: 'var(--bg-secondary)' }}>
-      {overlay === 'admin' && <AdminPanel onClose={() => setOverlay(null)} initialTab={initialTab ?? undefined} />}
+      {overlay === 'admin' && (
+        <Suspense fallback={<Loading text="正在加载管理中心..." />}>
+          <AdminPanel onClose={() => setOverlay(null)} initialTab={initialTab ?? undefined} />
+        </Suspense>
+      )}
     </div>
   )
 }
@@ -1690,7 +1669,7 @@ function OverlayPanels() {
 export function Loading({ text = '加载中...' }: { text?: string } = {}) {
   return (
     <div className="flex-1 flex items-center justify-center" style={{ color: 'var(--text-muted)' }}>
-      <div className="text-[13px]">{text}</div>
+      <div className="text-[length:var(--fs-lg)]">{text}</div>
     </div>
   )
 }

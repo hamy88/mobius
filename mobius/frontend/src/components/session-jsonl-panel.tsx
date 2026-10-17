@@ -1,156 +1,582 @@
-import { lazy, memo, Suspense, type RefObject } from 'react'
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import { JsonlLiveTailCard, JsonlView } from './jsonl-view'
+import { DisplayFileContext } from './viewer/DisplayFileContext'
 import { VSCodeOpenProvider } from './jsonl-vscode-link'
+import { PendingQueueCard } from './viewer/PendingQueueCard'
+import type { SessionHistoryStore } from '../services/agent-history-store'
+import { useHistorySnapshotOf } from '../services/agent-history-store'
+import { scrollDebug } from './scroll-debug'
+import { registerDiagProbe, ms, px, bool } from '../services/scroll-diagnostics'
 
-const EasyJsonlView = lazy(() => import('./easy-jsonl/EasyJsonlView'))
+const JsonlViewEasy = lazy(() => import('./viewer/JsonlViewEasy'))
+
+// LIVE token output is deliberately paced instead of rendering every network chunk.
+const LIVE_TOKEN_MAX_BUFFER_CHARS = 3200
+const LIVE_TOKEN_MAX_CHARS_PER_SECOND = 60
+const LIVE_TOKEN_TICK_MS = 50
+
+// 接管态的方向判定需要"用户意图背书"的时间窗: 手势发生在先, onScroll 紧随其后 (同一帧或下一帧).
+// 窗口只用来把"刚发生的真实手势"和"浏览器自己补偿的滚动"区分开, 不需要精确.
+// How long a recorded user gesture keeps vouching for the direction check that follows it.
+const INTENT_BACKING_MS = 400
+
+// 轮次跳转的守卫窗: 平滑滚动起步到离开底部只需几帧, 但第一个 scroll 事件一定还在底部.
+// 这段时间内不把"贴底"当成用户滚回底部, 否则刚声明的接管态会被清掉 (见 navigationAtRef).
+// How long a round-jump keeps the bottom reading from clearing the takeover it declared.
+const NAVIGATION_GUARD_MS = 700
+
+// 显示 buffer 满了的缩容策略: 一次性删除前 2/3、保留后 1/3，腾出空间继续追加,
+// 避免每次追加都 slice(-MAX) 做 O(n) 拷贝 (每 tick 反复触发).
+function trimLiveBuffer(text: string): string {
+  if (text.length <= LIVE_TOKEN_MAX_BUFFER_CHARS) return text
+  return text.slice(Math.floor(text.length * 2 / 3))
+}
+
+// ── 最新可解析时间戳 (LIVE 卡锚点 / 诊断用). 从尾部向前找, 跳过无时间戳的元数据条目. ──
+// 从 chat.tsx 迁入 (Chat 不再订阅快照, 摊平条目的派生消费集中到本面板).
+function parseDebugTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const ms = new Date(value as string | number).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+export function findLatestEntryTimestamp(entries: any[]): {
+  value: string | null
+  index: number | null
+  source: string | null
+} {
+  const candidates: Array<{ source: string; get: (entry: any) => unknown }> = [
+    { source: 'timestamp', get: (entry) => entry?.timestamp },
+    { source: 'created_at', get: (entry) => entry?.created_at },
+    { source: 'payload.timestamp', get: (entry) => entry?.payload?.timestamp },
+    { source: 'message.created_at', get: (entry) => entry?.message?.created_at },
+  ]
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    for (const candidate of candidates) {
+      const value = candidate.get(entry)
+      if ((typeof value === 'string' || typeof value === 'number') && parseDebugTimestamp(value) !== null) {
+        return { value: String(value), index, source: candidate.source }
+      }
+    }
+  }
+  return { value: null, index: null, source: null }
+}
 
 type SessionJsonlPanelProps = {
   currentProjectId: string
+  projectBindPath?: string
+  // Stable identity for the currently displayed session. History-store
+  // instances may be replaced while data is loading; search highlights must
+  // survive that replacement but must be cleared when the user changes
+  // sessions.
+  sessionIdentity?: string
   chatContainerRef: RefObject<HTMLDivElement>
   endRef: RefObject<HTMLDivElement>
-  visibleJsonl: any[]
-  loadedJsonlCount: number
-  jsonlTotal: number
-  jsonlEmptyLoadingText: string
-  jsonlInitialLoading: boolean
-  jsonlLoadingMore: boolean
+  // agent-history-store 实例 (快照订阅在本面板内部 — Chat 不随每条数据重渲染).
+  historyStore: SessionHistoryStore | null
+  // 空会话占位文案的状态输入 (文案规则见下, 由 Chat 的会话状态派生).
+  derivedStatus: string
   showJsonlMeta: boolean
-  cursorStyleTools: boolean
   backendAlive: boolean | null
   backendWorking: boolean | null
+  // LIVE 卡乐观窗口 (见 chat.tsx LIVE_OPTIMISTIC_*_MS): 'on' = 提交后强制显示, 'off' = 终止后强制隐藏,
+  // 'auto' = 面板按 alive && working 自己判.
+  liveCardMode?: 'auto' | 'on' | 'off'
   backendPid: number | null
   realTimeInfo?: string
-  lastTimestamp?: string | null
   hasNewMessages: boolean
-  onLoadAllJsonl: () => void
-  // 超长会话按需加载: 骨架模式下展开某轮时拉取该轮的主轨明细切片.
-  onLoadRoundDetail?: (openerUuid: string, fromTs: string, toTs: string | null) => void
-  roundDetailLoaded?: Set<string>
-  roundDetailVersion?: number
-  spineMode?: boolean
-  loadingRoundUuid?: string | null
-  onScrollPositionChange: (userScrolledUp: boolean) => void
+  // reason 是给诊断浮窗看的触发源描述 (wheel/keydown/onScroll/切会话), 业务逻辑不读它.
+  onScrollPositionChange: (userScrolledUp: boolean, reason?: string) => void
   onJumpToBottom: () => void
-  // 搜索结果跳转: 命中条目 uuid / timestamp, JsonlView 解析到所属轮次卡片后滚动.
+  // 排队卡片闪电按钮: 打断当前 turn 并出队下一条排队指令.
+  onPauseToDequeue?: () => void
+  // 搜索结果跳转: 命中条目 uuid / timestamp, JsonlView 解析到所属组后滚动.
   scrollToEntryUuid?: string | null
   scrollToMatchTs?: string | null
   onMatchScrollResolved?: () => void
-  onMatchScrollUnresolved?: () => void
+  // 当前会话是否仍保留搜索命中红框。与 URL 中的 match/ts 独立，供 Chat 追底逻辑同步读取。
+  searchHighlightActiveRef?: MutableRefObject<boolean>
+  searchHighlightTargetRef?: MutableRefObject<{ uuid: string | null; ts: string | null } | null>
+  searchHighlightClearSignal?: number
+  searchHits?: Array<{ uuid?: string | null; timestamp?: string | null }>
+  onSearchHitJump?: () => void
+  onSearchHitPrevious?: () => void
+  onSearchHitNext?: () => void
+  onSearchHitClear?: () => void
   onEasyRoundCountChange?: (count: number) => void
   easyExpandAllSignal?: number
   variant?: 'standard' | 'easy'
+  // Replaces the conversation contents while preserving the panel and scroll container.
+  exclusiveContent?: ReactNode
 }
 
 function SessionJsonlPanelInner({
   currentProjectId,
+  projectBindPath,
+  sessionIdentity = '',
   chatContainerRef,
   endRef,
-  visibleJsonl,
-  loadedJsonlCount,
-  jsonlTotal,
-  jsonlEmptyLoadingText,
-  jsonlInitialLoading,
-  jsonlLoadingMore,
+  historyStore,
+  derivedStatus,
   showJsonlMeta,
-  cursorStyleTools,
   backendAlive,
   backendWorking,
+  liveCardMode = 'auto',
   backendPid,
   realTimeInfo,
-  lastTimestamp,
   hasNewMessages,
-  onLoadAllJsonl,
-  onLoadRoundDetail,
-  roundDetailLoaded,
-  roundDetailVersion,
-  spineMode,
-  loadingRoundUuid,
   onScrollPositionChange,
   onJumpToBottom,
+  onPauseToDequeue,
   scrollToEntryUuid,
   scrollToMatchTs,
   onMatchScrollResolved,
-  onMatchScrollUnresolved,
+  searchHighlightActiveRef,
+  searchHighlightTargetRef,
+  searchHighlightClearSignal = 0,
+  searchHits = [],
+  onSearchHitJump,
+  onSearchHitPrevious,
+  onSearchHitNext,
+  onSearchHitClear,
   onEasyRoundCountChange,
   easyExpandAllSignal,
   variant = 'standard',
+  exclusiveContent,
 }: SessionJsonlPanelProps) {
-  const effectiveTotal = jsonlTotal > loadedJsonlCount
-    ? jsonlTotal - (loadedJsonlCount - visibleJsonl.length)
-    : undefined
+  // 订阅下沉: 快照/摊平条目/派生值都在本组件内算, Chat 只递 store.
+  const historySnapshot = useHistorySnapshotOf(historyStore)
+  // URL 中的 match/ts 会在首次精确滚动完成后被上层清理，命中视觉反馈不能随之消失。
+  // 面板本地保留本次目标，直到切换到另一份 historyStore（即离开当前会话）。
+  const highlightTargetRef = useRef<{ uuid: string | null; ts: string | null } | null>(null)
+  const previousClearSignalRef = useRef(searchHighlightClearSignal)
+  const previousSessionIdentityRef = useRef(sessionIdentity)
+  // Keep the target synchronously while rendering. The parent removes match/ts as soon as
+  // scrolling completes; a passive effect here can lose a frame (and the highlight) when
+  // that URL cleanup races the initial target capture.
+  if (previousSessionIdentityRef.current !== sessionIdentity) {
+    highlightTargetRef.current = null
+    previousSessionIdentityRef.current = sessionIdentity
+  }
+  if (scrollToEntryUuid || scrollToMatchTs) {
+    highlightTargetRef.current = { uuid: scrollToEntryUuid || null, ts: scrollToMatchTs || null }
+  }
+  if (previousClearSignalRef.current !== searchHighlightClearSignal) {
+    previousClearSignalRef.current = searchHighlightClearSignal
+    highlightTargetRef.current = null
+  }
+  const effectiveScrollToEntryUuid = scrollToEntryUuid || highlightTargetRef.current?.uuid || null
+  const effectiveScrollToMatchTs = scrollToMatchTs || highlightTargetRef.current?.ts || null
+  if (searchHighlightActiveRef) {
+    searchHighlightActiveRef.current = !!(effectiveScrollToEntryUuid || effectiveScrollToMatchTs)
+  }
+  if (searchHighlightTargetRef) {
+    searchHighlightTargetRef.current = effectiveScrollToEntryUuid || effectiveScrollToMatchTs
+      ? { uuid: effectiveScrollToEntryUuid, ts: effectiveScrollToMatchTs }
+      : null
+  }
+  const visibleJsonl = useMemo(
+    () => (historyStore ? historyStore.flattenEntries() : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [historyStore, historySnapshot.rev],
+  )
+  const jsonlInitialLoading = !historySnapshot.negotiated && historySnapshot.groups.length === 0 && !historySnapshot.error
+  // 空会话占位文案: pending(刚发消息等创建进程) / running(agent 在跑等首条输出) 时给 loading 文案,
+  // 由 JsonlView 配 spinner 显示; idle/waiting(终态空, 不会有数据自动到来) 时留空.
+  const jsonlEmptyLoadingText = visibleJsonl.length === 0
+    ? (derivedStatus === 'pending'
+        ? (backendAlive ? '智能体进程已创建，联络中' : '正在创建智能体进程，请稍等')
+        : derivedStatus === 'running' ? '智能体工作中，等待输出…' : '')
+    : ''
+  const lastTimestamp = useMemo(() => findLatestEntryTimestamp(visibleJsonl).value, [visibleJsonl])
+  const liveCardVisible = liveCardMode === 'on' ? true
+    : liveCardMode === 'off' ? false
+    : !!(backendAlive === true && backendWorking === true)
+  // 强开窗 (提交乐观窗 / 发送阶段, 见 chat.tsx liveMode) 内不要求已有时间戳: 会话刚提交、首条
+  // entry 还没落盘时, 卡片按"已提交 · 等待智能体响应…"渲染, 与左下角黄字提示同一时间段.
+  const liveCardMounted = exclusiveContent == null && liveCardVisible
+    && (!!lastTimestamp || liveCardMode === 'on')
+  const [liveTokenText, setLiveTokenText] = useState('')
+  const liveTokenBufferRef = useRef('')
+  const liveTokenDisplayRef = useRef('')
+  const liveTokenClearTimerRef = useRef<number | null>(null)
+
+  // The LIVE card consumes only tokens produced after this subscription starts.
+  // The proxy's only_latest mode suppresses its historical snapshot; snapshot
+  // events are still ignored for compatibility with older proxy instances.
+  useEffect(() => {
+    if (!liveCardMounted || backendWorking !== true || !sessionIdentity) {
+      liveTokenBufferRef.current = ''
+      liveTokenDisplayRef.current = ''
+      setLiveTokenText('')
+      if (liveTokenClearTimerRef.current !== null) {
+        window.clearTimeout(liveTokenClearTimerRef.current)
+        liveTokenClearTimerRef.current = null
+      }
+      return
+    }
+
+    const source = new EventSource(`/api/token_stream?session=${encodeURIComponent(sessionIdentity)}&only_latest=1`)
+    const handleToken = (event: MessageEvent<string>) => {
+      let payload: { text?: unknown }
+      try { payload = JSON.parse(event.data) } catch { return }
+      const text = typeof payload.text === 'string' ? payload.text : ''
+      const normalizedText = text.replace(/\r\n?|\n/g, ' ')
+      if (!normalizedText) return
+
+      // Keep deltas contiguous. If the producer outruns the typewriter, fast-forward
+      // the complete visible tail instead of deleting the queue head repeatedly and
+      // joining two non-adjacent fragments (which looks like reordered text).
+      const combined = liveTokenBufferRef.current + normalizedText
+      if (combined.length > LIVE_TOKEN_MAX_BUFFER_CHARS) {
+        liveTokenDisplayRef.current = trimLiveBuffer(liveTokenDisplayRef.current + combined)
+        liveTokenBufferRef.current = ''
+        setLiveTokenText(liveTokenDisplayRef.current)
+      } else {
+        liveTokenBufferRef.current = combined
+      }
+      if (liveTokenClearTimerRef.current !== null) window.clearTimeout(liveTokenClearTimerRef.current)
+      liveTokenClearTimerRef.current = window.setTimeout(() => {
+        liveTokenBufferRef.current = ''
+        liveTokenDisplayRef.current = ''
+        liveTokenClearTimerRef.current = null
+        setLiveTokenText('')
+      }, 5000)
+    }
+    const handleSnapshot = () => {
+      // only_latest should never send this; ignore it if an older proxy does.
+    }
+    source.addEventListener('token', handleToken as EventListener)
+    source.addEventListener('snapshot', handleSnapshot as EventListener)
+    const charsPerTick = Math.max(1, Math.round(LIVE_TOKEN_MAX_CHARS_PER_SECOND * LIVE_TOKEN_TICK_MS / 1000))
+    const typewriterTimer = window.setInterval(() => {
+      const pending = liveTokenBufferRef.current
+      if (!pending) return
+      const next = pending.slice(0, charsPerTick)
+      liveTokenBufferRef.current = pending.slice(next.length)
+      liveTokenDisplayRef.current = trimLiveBuffer(liveTokenDisplayRef.current + next)
+      setLiveTokenText(liveTokenDisplayRef.current)
+    }, LIVE_TOKEN_TICK_MS)
+
+    return () => {
+      source.removeEventListener('token', handleToken as EventListener)
+      source.removeEventListener('snapshot', handleSnapshot as EventListener)
+      source.close()
+      window.clearInterval(typewriterTimer)
+      liveTokenBufferRef.current = ''
+      liveTokenDisplayRef.current = ''
+      setLiveTokenText('')
+      if (liveTokenClearTimerRef.current !== null) {
+        window.clearTimeout(liveTokenClearTimerRef.current)
+        liveTokenClearTimerRef.current = null
+      }
+    }
+  }, [backendWorking, liveCardMounted, sessionIdentity])
+  // 上一帧 scrollTop, 用于"方向性"解除判定 (仅向上滚才算用户解除钉底).
+  const lastScrollTopRef = useRef<number | null>(null)
+  // 内容是否真的撑满视口 (有可滚动余量). 对话没满时下方并没有被遮住的内容, "新消息"
+  // 按钮纯属噪音 — 它此前会在空/短会话里亮着. 容器与内容根都盯: 容器管视口尺寸变化,
+  // 内容根 (第一个子元素, 高度随内容走) 管新条目长高.
+  const [hasScrollRoom, setHasScrollRoom] = useState(false)
+  useEffect(() => {
+    const el = chatContainerRef.current
+    if (!el) return
+    const measure = () => setHasScrollRoom(el.scrollHeight - el.clientHeight > 4)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    if (el.firstElementChild instanceof HTMLElement) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [chatContainerRef])
+
+  // 用户输入意图监听: wheel / touchmove / keydown 一旦表达"向上翻"意图, 立即把
+  // userScrolledUp 置 true (终止 EntriesAutoScroll 的追底), 不再依赖 onScroll 里
+  // "向上滚 > 2px"的方向推断 — 慢速小步上滚会被 lerp 追底拉回. 这些事件天然来自用户,
+  // 绕开"程序滚动 vs 用户滚动"的来源识别; 恢复钉底仍由 onScroll 的 dist < 4 负责.
+  // 不监听 pointerdown: 点按卡片/代码/选中文字等非滚动点击也会触发它, 会把 userScrolledUp
+  // 误置 true 从而永久停掉追底 ("不追底"); 只有落在滚动条带上的 pointerdown 例外 (见下).
+  // 最后一次用户滚动意图 (浮窗用): 因 C 的现场 —— "接管态是刚才那一下 wheel 置的, 而它
+  // 发生在卡片内部的嵌套滚动区里, 对话本身根本没动".
+  // Last user scroll intent, the crime scene for cause C.
+  const lastIntentRef = useRef<{ at: number; text: string }>({ at: 0, text: '—' })
+  // 正在拖容器自己的滚动条. 拖滚动条是唯一"不产生 wheel/按键"的用户上滚方式, 只能靠
+  // onScroll 的方向判定兜住; 但必须先用指针落点确认它真的压在滚动条上 —— 否则点击卡片、
+  // 选中文字引起的程序滚动也会被算成用户意图.
+  // Dragging the container's own scrollbar: the one user gesture with no wheel/key events,
+  // so the direction check needs explicit permission from the pointer's landing spot.
+  const draggingScrollbarRef = useRef(false)
+  // 被"无用户意图背书"挡下的方向判定 (浮窗用): 计数即"浏览器补偿发生过几次", 修好后应当
+  // 有计数、无接管态翻转 —— 这正是验证修复是否生效的观测量.
+  // Counter for suppressed direction verdicts: it proves the compensation happened and was caught.
+  const suppressedRef = useRef({ count: 0, at: 0, px: 0 })
+  // 轮次跳转控件 (▲/▼/摘要) 的接管时刻. 平滑滚动起步时第一个 scroll 事件仍报"还在底部"
+  // (动画还没挪动), 会被下面的"贴底恢复钉底"当成用户滚回底部, 把刚声明的接管态清掉,
+  // 追底环随之把视野拽回底部 —— 跳转看着无效. 守卫窗内不采信贴底读数.
+  // When a round-jump control is pressed, the animation's first scroll event still reports
+  // the old bottom position; the "restore pinning" rule below would read that as the user
+  // returning to the bottom, clear the takeover, and let the chase drag the view back.
+  const navigationAtRef = useRef(0)
+
+  useEffect(() => {
+    const el = chatContainerRef.current
+    if (!el) return
+
+    // 内容没撑满视口时"上滚"不会产生任何位移, 不代表用户在看历史: 记成解除钉底会让
+    // 追底永久停摆 (连新会话都不再自动滚), 还会在底部亮出无意义的"新消息"按钮.
+    const roomToScroll = () => el.scrollHeight - el.clientHeight > 4
+    // 卡片内部的嵌套滚动区 (bash/diff/read 输出等): 在里面滚动不会移动对话, 不该算用户接管.
+    // A nested scroller inside a card: scrolling there cannot move the conversation.
+    const inNestedScroller = (target: EventTarget | null) => {
+      let node = target instanceof Element ? target : null
+      while (node && node !== el) {
+        const style = window.getComputedStyle(node)
+        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && node.scrollHeight - node.clientHeight > 1) return true
+        node = node.parentElement
+      }
+      return false
+    }
+    const noteIntent = (text: string) => { lastIntentRef.current = { at: Date.now(), text } }
+    // wheel 上滚 (deltaY<0) 才算向上翻; 向下滚留 onScroll 贴底判定恢复钉底.
+    const onWheel = (e: WheelEvent) => {
+      const nested = inNestedScroller(e.target)
+      scrollDebug('wheel event: deltaY=', e.deltaY, e.deltaY < 0 ? '(上滚→flag true)' : '(下滚, 交给 onScroll)', nested ? '[卡片内滚动区]' : '[对话区]')
+      if (e.deltaY < 0 && roomToScroll()) {
+        const reason = nested ? 'wheel↑ 卡片内滚动区 (疑似误判)' : 'wheel↑ 对话区'
+        noteIntent(reason)
+        onScrollPositionChange(true, reason)
+      }
+    }
+    // 手指下移 (clientY 增大) = 内容上滚 (向上翻); 反之回底部交给 onScroll 恢复.
+    let lastTouchY: number | null = null
+    const onTouchMove = (e: TouchEvent) => {
+      const t = e.touches[0]
+      if (!t) return
+      if (lastTouchY !== null && t.clientY > lastTouchY && roomToScroll()) {
+        scrollDebug('touchmove: 手指下移(内容上翻) → flag true')
+        noteIntent('touchmove 上翻')
+        onScrollPositionChange(true, 'touchmove 上翻')
+      }
+      lastTouchY = t.clientY
+    }
+    // 仅"向上翻"类按键视为接管; 输入区与滚动容器是兄弟节点, 输入框方向键不会冒泡到此.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') && roomToScroll()) {
+        scrollDebug('keydown:', e.key, '→ flag true')
+        noteIntent(`keydown ${e.key}`)
+        onScrollPositionChange(true, `keydown ${e.key}`)
+      }
+    }
+    // 指针落点是否压在容器自己的滚动条带上 (内容区右沿之外). 覆盖式滚动条 (offsetWidth ==
+    // clientWidth) 时算不出带宽, 用最后 12px 兜底.
+    // Whether the press landed on the container's own scrollbar band, with a 12px fallback
+    // for overlay scrollbars, where the band has no measurable width.
+    const onScrollbarBand = (e: PointerEvent) => {
+      const rect = el.getBoundingClientRect()
+      const borderLeft = parseFloat(window.getComputedStyle(el).borderLeftWidth) || 0
+      const contentRight = rect.left + borderLeft + el.clientWidth
+      const barWidth = el.offsetWidth - el.clientWidth
+      return e.clientX >= (barWidth > 0 ? contentRight : contentRight - 12)
+    }
+    // 滚动条拖拽期间放行 onScroll 的方向判定; 抬手 (含在窗口外抬手) 即收回许可.
+    // Permit the direction check while the scrollbar is held; revoke on release anywhere.
+    const onPointerDown = (e: PointerEvent) => {
+      if (!onScrollbarBand(e)) return
+      scrollDebug('pointerdown: 落在滚动条带 → 方向判定获得许可')
+      draggingScrollbarRef.current = true
+      noteIntent('拖拽滚动条')
+    }
+    const onPointerUp = () => {
+      if (!draggingScrollbarRef.current) return
+      scrollDebug('pointerup: 收回滚动条拖拽许可')
+      draggingScrollbarRef.current = false
+    }
+
+    el.addEventListener('wheel', onWheel, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
+    el.addEventListener('keydown', onKeyDown)
+    el.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerUp)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('keydown', onKeyDown)
+      el.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+      draggingScrollbarRef.current = false
+    }
+  }, [chatContainerRef, onScrollPositionChange])
+
+  // 浮窗探针: 面板自身的滚动现场. 响应式值走 mirror ref, 探针只注册一次.
+  // Panel probe: the scroll container's live state, mirrored through a ref so the probe registers once.
+  const panelMirrorRef = useRef({ hasScrollRoom: false, liveCardMounted: false, hitCount: 0 })
+  panelMirrorRef.current = { hasScrollRoom, liveCardMounted, hitCount: searchHits.length }
+  useEffect(() => registerDiagProbe(() => {
+    const el = chatContainerRef.current
+    const mirror = panelMirrorRef.current
+    const intent = lastIntentRef.current
+    const dist = el ? el.scrollHeight - el.scrollTop - el.clientHeight : null
+    const intentText = intent.at
+      ? `${ms(Date.now() - intent.at)} 前 — ${intent.text}`
+      : '暂无'
+    return {
+      key: 'jsonl-panel',
+      title: 'JSONL 面板',
+      subtitle: variant === 'easy' ? '简易模式' : '标准模式',
+      tone: el ? undefined : 'bad',
+      rows: [
+        { label: '滚动容器', value: el ? '已挂载' : '未挂载 (面板未渲染)', tone: el ? undefined : 'bad' },
+        { label: 'scrollTop', value: el ? px(el.scrollTop) : '—' },
+        { label: 'scrollHeight', value: el ? px(el.scrollHeight) : '—' },
+        { label: 'clientHeight', value: el ? px(el.clientHeight) : '—' },
+        { label: '距底', value: dist == null ? '—' : px(dist), tone: dist != null && dist > 0.5 ? 'warn' : 'ok' },
+        { label: '有可滚动余量', value: bool(mirror.hasScrollRoom) },
+        { label: '上一帧 scrollTop', value: lastScrollTopRef.current == null ? '—' : px(lastScrollTopRef.current) },
+        { label: '最近用户滚动意图', value: intentText, tone: intent.at ? 'warn' : undefined },
+        // 被挡下的"上滚"判定: 无用户意图背书的方向位移, 通常是浏览器补偿 scrollTop, 挡下即证明 R1 生效.
+        // Suppressed upward-direction moves: browser scrollTop compensation without a user gesture behind it.
+        { label: '被挡下的补偿滚动', value: suppressedRef.current.count ? `${suppressedRef.current.count} 次 (最近 ${ms(Date.now() - suppressedRef.current.at)} 前, 上移 ${px(suppressedRef.current.px)})` : '无', tone: suppressedRef.current.count ? 'ok' : undefined },
+        { label: 'LIVE 尾部卡', value: bool(mirror.liveCardMounted, '显示中', '未显示') },
+        { label: '搜索命中数', value: String(mirror.hitCount) },
+      ],
+      flags: [
+        { key: 'panel.no-container', label: '滚动容器未挂载', active: !el, blocking: true, detail: '面板还没渲染出来, 任何追底都无处可滚' },
+      ],
+    }
+  }), [chatContainerRef, variant])
 
   return (
     <div data-tour="session-jsonl-view" className="mobius-chat-history flex min-w-0 flex-1 flex-col">
       <div
-        className="flex-1 overflow-y-auto relative"
+        className="flex-1 overflow-y-auto overflow-x-clip relative"
         ref={chatContainerRef}
-        tabIndex={0}
         onScroll={(e) => {
           const el = e.currentTarget
-          const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-          onScrollPositionChange(distFromBottom > 200)
+          const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+          // 方向性解除判定 (调参台定稿, 配套 EntriesAutoScroll 的 lerp 追赶):
+          // 只有"向上滚"才算用户解除钉底 — lerp 追赶与程序钉底全是向下的, 追高卡
+          // 途中 dist 再大也不误判; 手动滚回贴底 (dist<4) 恢复钉底. 内容切换时
+          // scrollTop 被 clamp 到边缘的跳变不算用户滚动.
+          const prev = lastScrollTopRef.current
+          lastScrollTopRef.current = el.scrollTop
+          const clampedToEdge = el.scrollTop <= 0 || el.scrollTop >= el.scrollHeight - el.clientHeight - 0.5
+          const movedUp = prev !== null && prev - el.scrollTop > 2 && !clampedToEdge
+          // 方向判定必须有用户意图背书: 内容变高变矮时浏览器会自己补偿 scrollTop (滚动锚定 /
+          // 钳制), 它和"用户上滚"在方向上一模一样, 单看方向必然误判 —— 一次补偿就能把接管态
+          // 闩死、整轮追底停摆 (现场见 docs/blueprints/chase_end_err.html).
+          // The direction check needs a user gesture behind it: browser scroll anchoring
+          // compensates for content resizing by moving scrollTop up, which is direction-wise
+          // indistinguishable from a real upward scroll.
+          const intentRecent = Date.now() - lastIntentRef.current.at < INTENT_BACKING_MS
+          if (movedUp && dist > 200) {
+            if (!draggingScrollbarRef.current && !intentRecent) {
+              const up = Math.round(prev - el.scrollTop)
+              suppressedRef.current = { count: suppressedRef.current.count + 1, at: Date.now(), px: up }
+              scrollDebug('onScroll: movedUp=true, dist=', dist, `→ 忽略 (无用户意图背书: 浏览器补偿/程序滚动, 上移 ${up}px)`)
+            } else {
+              const via = draggingScrollbarRef.current ? '拖拽滚动条' : '手势意图'
+              scrollDebug('onScroll: movedUp=true, dist=', dist, '→ flag true (', via, '背书)')
+              onScrollPositionChange(true, `onScroll 向上滚 ${Math.round(prev - el.scrollTop)}px (dist=${Math.round(dist)}, ${via})`)
+            }
+          } else if (dist < 4) {
+            // 跳转守卫窗内清不得: 跳转起步那一帧还在底部, 清了就等于把跳转让给追底环
+            // Not during a round-jump's guard window: that first frame is still at the bottom
+            if (Date.now() - navigationAtRef.current < NAVIGATION_GUARD_MS) {
+              scrollDebug('onScroll: dist=', dist.toFixed(1), '<4 → 忽略 (轮次跳转守卫窗内)')
+            } else {
+              scrollDebug('onScroll: dist=', dist.toFixed(1), '<4 → flag false (恢复钉底)')
+              onScrollPositionChange(false, 'onScroll 贴底 (dist<4)')
+            }
+          }
         }}
       >
-        <div className="px-5 py-5" style={variant === 'easy' ? { paddingBottom: 176 } : undefined}>
-          <VSCodeOpenProvider projectId={currentProjectId}>
-            {variant === 'easy' ? (
-              <Suspense fallback={<div className="py-10 text-center text-[12px] text-[var(--text-muted)]">正在整理简易对话...</div>}>
-                <EasyJsonlView
-                  entries={visibleJsonl}
+        <div
+          className={exclusiveContent == null ? 'px-5 py-5' : 'flex min-h-full items-center justify-center p-4'}
+          style={undefined}
+        >
+          {exclusiveContent == null ? (
+            <DisplayFileContext.Provider value={{ projectId: currentProjectId, sessionId: sessionIdentity, bindPath: projectBindPath }}>
+            <VSCodeOpenProvider projectId={currentProjectId}>
+              {variant === 'easy' ? (
+                <Suspense fallback={<div className="py-10 text-center text-[length:var(--fs-md)] text-[var(--text-muted)]">正在整理简易对话...</div>}>
+                  <JsonlViewEasy
+                    snapshot={historySnapshot}
+                    store={historyStore}
+                    title=""
+                    emptyLoadingText={jsonlEmptyLoadingText}
+                    initialLoading={jsonlInitialLoading}
+                    showMeta={showJsonlMeta}
+                    scrollToEntryUuid={effectiveScrollToEntryUuid}
+                    scrollToMatchTs={effectiveScrollToMatchTs}
+                    searchNavigationRequested={!!(scrollToEntryUuid || scrollToMatchTs)}
+                    onScrollResolved={onMatchScrollResolved}
+                    onPauseToDequeue={onPauseToDequeue}
+                    // 简易模式队列卡不在视图内渲染, 改由本面板排在 LIVE 卡之下.
+                    suppressPending
+                  />
+                </Suspense>
+              ) : (
+                <JsonlView
+                  snapshot={historySnapshot}
+                  store={historyStore}
+                  title=""
                   emptyLoadingText={jsonlEmptyLoadingText}
                   initialLoading={jsonlInitialLoading}
-                  total={effectiveTotal}
-                  onLoadMore={onLoadAllJsonl}
-                  loadingMore={jsonlLoadingMore}
-                  working={!!(backendAlive && backendWorking)}
-                  liveText={realTimeInfo}
-                  scrollToEntryUuid={scrollToEntryUuid}
-                  scrollToMatchTs={scrollToMatchTs}
+                  showMeta={showJsonlMeta}
+                  scrollToEntryUuid={effectiveScrollToEntryUuid}
+                  scrollToMatchTs={effectiveScrollToMatchTs}
+                  searchNavigationRequested={!!(scrollToEntryUuid || scrollToMatchTs)}
                   onScrollResolved={onMatchScrollResolved}
-                  onScrollUnresolved={onMatchScrollUnresolved}
-                  onRoundCountChange={onEasyRoundCountChange}
-                  expandAllSignal={easyExpandAllSignal}
+                  onPauseToDequeue={onPauseToDequeue}
+                  // 轮次跳转控件 = 明确的用户意图: 停掉追底并开守卫窗, 否则跳转会被逐帧拽回底部
+                  // Round-jump controls are explicit user intent: stop the chase and hold the
+                  // guard window, or it would drag the viewport back frame by frame
+                  onUserNavigation={(reason) => {
+                    navigationAtRef.current = Date.now()
+                    onScrollPositionChange(true, reason)
+                  }}
                 />
-              </Suspense>
-            ) : (
-              <JsonlView
-                entries={visibleJsonl}
-                title=""
-                emptyLoadingText={jsonlEmptyLoadingText}
-                initialLoading={jsonlInitialLoading}
-                total={effectiveTotal}
-                onLoadMore={onLoadAllJsonl}
-                loadingMore={jsonlLoadingMore}
-                showMeta={showJsonlMeta}
-                cursorStyleTools={cursorStyleTools}
-                onLoadRoundDetail={onLoadRoundDetail}
-                roundDetailLoaded={roundDetailLoaded}
-                roundDetailVersion={roundDetailVersion}
-                spineMode={spineMode}
-                loadingRoundUuid={loadingRoundUuid}
-                scrollToEntryUuid={scrollToEntryUuid}
-                scrollToMatchTs={scrollToMatchTs}
-                onScrollResolved={onMatchScrollResolved}
-                onScrollUnresolved={onMatchScrollUnresolved}
-              />
-            )}
-            {variant === 'standard' && backendAlive && backendWorking && (
-              <JsonlLiveTailCard
-                lastTimestamp={lastTimestamp}
-                pid={backendPid}
-                realTimeInfo={realTimeInfo}
-              />
-            )}
-            <div ref={endRef} />
-          </VSCodeOpenProvider>
+              )}
+              {liveCardVisible && (
+                <JsonlLiveTailCard
+                  lastTimestamp={lastTimestamp}
+                  pid={backendPid}
+                  realTimeInfo={realTimeInfo}
+                  liveTokenText={liveTokenText}
+                  optimistic={liveCardMode === 'on'}
+                  easyMode={variant === 'easy'}
+                />
+              )}
+              {/* 简易模式: 排队卡排在 LIVE 卡之下 (标准模式仍在视图内, 位于列表末尾). */}
+              {/* Easy mode: the queue card sits below the LIVE card. */}
+              {variant === 'easy' && (
+                <PendingQueueCard pending={historySnapshot.pending} onPauseToDequeue={onPauseToDequeue} easyMode />
+              )}
+              <div ref={endRef} />
+            </VSCodeOpenProvider>
+            </DisplayFileContext.Provider>
+          ) : exclusiveContent}
         </div>
       </div>
-      {hasNewMessages && (
+      {exclusiveContent == null && hasNewMessages && hasScrollRoom && (
         <div className="flex justify-center py-1 flex-shrink-0">
-          <button onClick={onJumpToBottom} className="px-4 py-1.5 text-[12px] bg-blue-500/90 text-white rounded-full hover:bg-blue-500 transition-colors shadow-md flex items-center gap-1.5">
+          <button onClick={onJumpToBottom} className="px-4 py-1.5 text-[length:var(--fs-md)] bg-blue-500/90 text-white rounded-full hover:bg-blue-500 transition-colors shadow-md flex items-center gap-1.5">
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
             新消息
           </button>
+        </div>
+      )}
+      {exclusiveContent == null && searchHits.length > 0 && (searchHighlightActiveRef?.current || searchHighlightTargetRef?.current) && (
+        <div className="flex justify-center py-1 flex-shrink-0">
+          <div className="inline-flex items-center gap-1 rounded-full border border-red-500/50 bg-red-500/10 px-1.5 py-1 shadow-md" role="group" aria-label="搜索命中导航">
+            <span className="px-2 text-[length:var(--fs-sm)] font-semibold text-red-100">查看命中</span>
+            <button type="button" onClick={onSearchHitJump} className="rounded-full px-2 py-1 text-[length:var(--fs-sm)] font-medium text-red-200 hover:bg-red-500/20">跳转</button>
+            <button type="button" onClick={onSearchHitPrevious} className="rounded-full px-2 py-1 text-[length:var(--fs-sm)] text-red-200 hover:bg-red-500/20" aria-label="上一个命中">上一个命中</button>
+            <button type="button" onClick={onSearchHitNext} className="rounded-full px-2 py-1 text-[length:var(--fs-sm)] text-red-200 hover:bg-red-500/20" aria-label="下一个命中">下一个命中</button>
+            <button type="button" onClick={onSearchHitClear} className="rounded-full px-2 py-1 text-[length:var(--fs-sm)] text-red-200 hover:bg-red-500/20" aria-label="清除搜索结果">清除搜索结果</button>
+          </div>
         </div>
       )}
     </div>

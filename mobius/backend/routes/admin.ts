@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import bcrypt from 'bcryptjs';
 import { adminAuth, auth } from '../middleware/auth';
-import { Users } from '../repositories/users';
+import { Users, assertWorkDirAssignable, previewDefaultWorkDir, workDirRoleProblem } from '../repositories/users';
 import { Sessions } from '../repositories/sessions';
 import { Messages } from '../repositories/messages';
 // @ts-ignore — bridge instance 仍是 .js
@@ -12,7 +12,7 @@ import { bridge } from '../bridge/instance';
 import { db } from '../../db';
 // @ts-ignore — agents 仍是 .js
 import agents from '../agents';
-import { homeWorkDirFor, ENABLE_PASSWORD_LOGIN } from '../config';
+import { workDirFor, ENABLE_PASSWORD_LOGIN } from '../config';
 // @ts-ignore — service 仍是 .js
 import adminSettings from '../services/admin-settings';
 // @ts-ignore — service 仍是 .js
@@ -37,8 +37,14 @@ import {
   statsSinceMinutes,
 } from '../services/agent-prompt-events';
 import { runningFlagPathOf, failedFlagPathOf, readFailedFlag } from '../utils/session-flags';
+import { isolationAllowsNormalUsers } from '../services/user-isolation';
 
 const router = express.Router();
+
+// 新权限模型不再提供群组管理入口。数据库中的历史群组数据暂不删除，避免存量迁移破坏。
+router.use('/user-groups', adminAuth, (_req: express.Request, res: express.Response) => {
+  res.status(410).json({ error: '群组权限模型已移除' });
+});
 
 const BACKENDS = [
   { key: 'codex', backendName: 'tmux-codex', label: 'Codex' },
@@ -103,8 +109,8 @@ function normalizeEmployeeId(value: unknown): string {
   return id;
 }
 
-function normalizeEmployeeRole(value: unknown): 'admin' | 'developer' | 'user' {
-  if (value === 'admin' || value === 'developer') return value;
+function normalizeEmployeeRole(value: unknown): 'admin' | 'user' {
+  if (value === 'admin') return value;
   return 'user';
 }
 
@@ -161,7 +167,7 @@ function normalizeEmployeePayload(input: EmployeeInput | null | undefined): any 
     display_name: normalizeDisplayName(src.display_name ?? src.name, id),
     password,
     role: normalizeEmployeeRole(src.role),
-    work_dir: explicitWorkDir || homeWorkDirFor(id),
+    work_dir: explicitWorkDir || workDirFor(id),
     work_dir_explicit: !!explicitWorkDir,
     group_id: group.id,
     group_name: group.name,
@@ -180,6 +186,9 @@ function tryCreateWorkDir(workDir: string): string | null {
 
 function createEmployeeAccount(input: EmployeeInput | null | undefined): any {
   const payload = normalizeEmployeePayload(input);
+  // 先把工作目录审一遍再建号: 普通用户必须落在工作区根下; 指向已有内容的目录 /
+  // 别人的工作目录一律拒绝.
+  assertWorkDirAssignable(payload.id, payload.work_dir, payload.role);
   const result = Users.createOrRestore({
     id: payload.id,
     display_name: payload.display_name,
@@ -612,11 +621,31 @@ router.get('/users', adminAuth, (req: express.Request, res: express.Response) =>
     prompt_length_avg: 0,
     last_active: null,
   };
-  res.json(users.map(u => ({ ...u, stats: taskMap[u.id] || emptyStats })));
+  res.json(users.map((u: any) => {
+    const { group_id: _groupId, group_name: _groupName, group_description: _groupDescription, ...publicUser } = u;
+    return { ...publicUser, stats: taskMap[u.id] || emptyStats };
+  }));
+});
+
+// 预览新建账号的默认工作目录. 占位符显示的就是这里返回的路径 —— 默认值由后端
+// (工作区根下是否可建) 决定, 前端不该自己拼.
+// Preview of the default work dir for a prospective account, so the form placeholder
+// shows the path the backend would actually use instead of a guessed one.
+router.get('/users/default-work-dir', adminAuth, (req: express.Request, res: express.Response) => {
+  try {
+    const id = normalizeEmployeeId(req.query.id ?? req.query.user_id);
+    res.json({ ok: true, id, ...previewDefaultWorkDir(id) });
+  } catch (e) {
+    const err = e as RepoError;
+    res.status(err.status || 400).json({ error: err.message || String(e) });
+  }
 });
 
 router.post('/users', adminAuth, (req: express.Request, res: express.Response) => {
   try {
+    if (String(req.body?.role || 'user') !== 'admin' && !isolationAllowsNormalUsers()) {
+      return res.status(503).json({ error: 'Landlock 沙盒不可用，当前禁止创建普通用户账号', code: 'AGENT_SANDBOX_UNAVAILABLE' });
+    }
     const user = createEmployeeAccount(req.body || {});
     res.status(user.status === 'created' ? 201 : 200).json({ ok: true, user });
   } catch (e) {
@@ -630,6 +659,10 @@ router.post('/users/bulk', adminAuth, (req: express.Request, res: express.Respon
   const employees = Array.isArray(body.employees) ? body.employees : [];
   if (!employees.length) { res.status(400).json({ error: '请提供 employees 数组' }); return; }
   if (employees.length > 200) { res.status(400).json({ error: '单次最多批量添加 200 个员工' }); return; }
+  if (!isolationAllowsNormalUsers() && employees.some((row: any) => String(row?.role || 'user') !== 'admin')) {
+    res.status(503).json({ error: 'Landlock 沙盒不可用，当前禁止创建普通用户账号', code: 'AGENT_SANDBOX_UNAVAILABLE' });
+    return;
+  }
 
   const created: any[] = [];
   const restored: any[] = [];
@@ -698,8 +731,25 @@ router.patch('/users/:id', adminAuth, (req: express.Request, res: express.Respon
     const body = req.body || {};
     const hasField = (k1: string, k2?: string) =>
       Object.prototype.hasOwnProperty.call(body, k1) || (k2 !== undefined && Object.prototype.hasOwnProperty.call(body, k2));
+    // 工作目录先校验后落库: 否则被拒时角色/显示名已经改完了, 管理端看到的是"报错但改了一半".
+    // 校验按本次请求生效后的角色算: 同一次请求里既改角色又改目录时, 不能拿旧角色放行.
+    const effectiveRole = hasField('role') ? normalizeEmployeeRole(body.role) : target.role;
+    const nextWorkDir = hasField('work_dir', 'workDir') ? normalizeEmployeeWorkDir(body.work_dir ?? body.workDir) : '';
+    if (nextWorkDir) assertWorkDirAssignable(id, nextWorkDir, effectiveRole);
+    if (hasField('role') && effectiveRole !== 'admin' && target.role !== effectiveRole) {
+      // 角色改成普通用户时, 这次要用的目录 (新值优先, 否则沿用记录里的) 也必须落在
+      // 工作区根下 —— 否则等于把账号留在根外, 违反"普通用户只允许在工作区根下".
+      // 只改显示名/密码这类无关字段不动这个判断: 历史遗留的根外账号仍然能正常改动.
+      const roleProblem = workDirRoleProblem(nextWorkDir || target.work_dir, effectiveRole);
+      if (roleProblem) {
+        res.status(400).json({ error: `${roleProblem}（改角色前请先把工作目录设到该根下）` }); return;
+      }
+    }
     if (hasField('role')) {
-      const newRole = normalizeEmployeeRole(body.role);
+      const newRole = effectiveRole;
+      if (newRole === 'user' && target.role !== 'user' && !isolationAllowsNormalUsers()) {
+        res.status(503).json({ error: 'Landlock 沙盒不可用，当前禁止设置普通用户账号', code: 'AGENT_SANDBOX_UNAVAILABLE' }); return;
+      }
       if (newRole !== target.role) {
         if (target.role === 'admin' && newRole !== 'admin' && Users.activeAdminCount() <= 1) {
           res.status(400).json({ error: '不能降级最后一个管理员账号' }); return;
@@ -713,10 +763,7 @@ router.patch('/users/:id', adminAuth, (req: express.Request, res: express.Respon
     if (hasField('display_name', 'displayName')) {
       Users.updateDisplayName(id, normalizeDisplayName(body.display_name ?? body.displayName, id));
     }
-    if (hasField('work_dir', 'workDir')) {
-      const wd = normalizeEmployeeWorkDir(body.work_dir ?? body.workDir);
-      if (wd) Users.updateWorkDir(id, wd);
-    }
+    if (nextWorkDir) Users.updateWorkDir(id, nextWorkDir);
     const pwd = body.password ?? body.newPassword;
     if (typeof pwd === 'string' && pwd.length > 0) {
       if (pwd.length < 6) { res.status(400).json({ error: '密码至少 6 位' }); return; }
@@ -948,22 +995,12 @@ router.put('/settings/model-prompt-limits', adminAuth, (req: express.Request, re
       const mode = proxyMode ?? proxy_mode ?? ((useProxy ?? use_proxy) === true);
       adminSettings.setModelNetworkProxy(modelKey, mode);
     }
-    // 黑客帝国数字雨 · 捕获实时输出 (仅 claude code). 开启=生成 .withproxy.json,
-    // 关闭=删除. 持久化到 admin-settings.modelCaptureStream, 启动时由 model-registry 选用.
+    // 黑客帝国数字雨 · 捕获实时输出 (claude code / codex). 持久化到 admin-settings.modelCaptureStream.
+    // withproxy 由启动链路 per-session 生成 (tmux-claude-code / tmux-codex), 保存开关不再 per-model 落盘.
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'captureStream')
       || Object.prototype.hasOwnProperty.call(req.body || {}, 'capture_stream')) {
       const captureOn = (captureStream ?? capture_stream) === true;
       adminSettings.setModelCaptureStream(modelKey, captureOn);
-      try {
-        const resolved = modelRegistry.resolveSessionModel(modelKey);
-        const settingsPath = resolved?.backend === 'tmux-claude-code' ? (resolved.settingsPath || null) : null;
-        // 走统一不变量: capture 开 → 从最新 settings 克隆 (带上 auto-compact 等字段); 关 → 删.
-        // 与编辑/删除模型路径同一函数, 保证两者同时开启时压缩阈值也同步进克隆.
-        if (settingsPath) modelAccess.enforceWithProxyInvariant(settingsPath, captureOn);
-      } catch (e) {
-        // 仅 claude-code 模型可生成 withproxy; 解析不到配置就跳过, 不阻断开关保存.
-        console.warn(`[admin] captureStream withproxy 生成跳过 (${modelKey}): ${(e as Error).message}`);
-      }
     }
     // 手动上下文限制 · 每模型触发自动压缩的 token 阈值.
     //   claude code → 注入 settings.json 的 env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
@@ -1502,6 +1539,22 @@ router.post('/model-access/bestapi/sync', adminAuth, async (req: express.Request
   }
 });
 
+// 一键删除 BestAPI 注入的全部模型, 并清除连接状态 (保留连接会让自动同步立刻把模型加回来).
+router.delete('/model-access/bestapi/models', adminAuth, async (req: express.Request, res: express.Response) => {
+  try {
+    const result = await bestApiIntegration.removeAllBestApiModels();
+    AdminAuditLog.record({
+      adminId: adminReqUser(req).id,
+      action: 'remove-all-models',
+      resourceType: 'bestapi-model-access',
+      resourceId: 'bestapi',
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message || String(e) });
+  }
+});
+
 router.get('/model-access/claude-code', adminAuth, (_req: express.Request, res: express.Response) => {
   res.json(modelAccess.listClaudeCodeModels({ includeSettings: false }));
 });
@@ -1688,8 +1741,11 @@ router.delete('/model-access/deepseek-harness/:key', adminAuth, (req: express.Re
 });
 
 // ── Skill 与 Memory 备份/迁移 ──────────────────────────────────────────────
-// 列出当前管理员可用于导出的 Skill / Memory 清单 (用户级 = 自己 + 他人只读; 项目级 = 全部项目).
-router.get('/skill-memory/inventory', adminAuth, (req: express.Request, res: express.Response) => {
+// 这一组是「自己的 Skill / Memory」入口, 普通用户也要能用 —— 所以挂 auth 而非 adminAuth,
+// 由 service 按调用者身份收窄: 用户级只列自己的, 项目级普通用户只见自己可读的项目,
+// 导出逐条过 canReadContextItem, 导入到项目级要求对该项目有写权限.
+// 列出请求者可用于导出的 Skill / Memory 清单 (管理员: 用户级 = 自己 + 他人只读, 项目级 = 全部项目).
+router.get('/skill-memory/inventory', auth, (req: express.Request, res: express.Response) => {
   try {
     const projects = Projects.listAll().map((p: any) => ({
       id: p.id, name: p.name, created_by: p.created_by,
@@ -1707,10 +1763,12 @@ router.get('/skill-memory/inventory', adminAuth, (req: express.Request, res: exp
 });
 
 // 按勾选的 memory_ids / skill_ids 生成 base64 字符串.
-router.post('/skill-memory/export', adminAuth, (req: express.Request, res: express.Response) => {
+router.post('/skill-memory/export', auth, (req: express.Request, res: express.Response) => {
   const { memory_ids, skill_ids } = (req.body || {}) as { memory_ids?: unknown; skill_ids?: unknown };
+  const user = adminReqUser(req);
   const result = skillMemoryMigration.buildExportBundle({
-    userId: adminReqUser(req).id,
+    userId: user.id,
+    user,
     memoryIds: Array.isArray(memory_ids) ? memory_ids : [],
     skillIds: Array.isArray(skill_ids) ? skill_ids : [],
   });
@@ -1719,7 +1777,7 @@ router.post('/skill-memory/export', adminAuth, (req: express.Request, res: expre
 });
 
 // 预览备份字符串中的条目, 不写盘.
-router.post('/skill-memory/preview', adminAuth, (req: express.Request, res: express.Response) => {
+router.post('/skill-memory/preview', auth, (req: express.Request, res: express.Response) => {
   const { bundle } = (req.body || {}) as { bundle?: unknown };
   const result = skillMemoryMigration.previewBundle(bundle || '');
   if (!result.ok) { res.status(400).json({ error: (result as any).error }); return; }
@@ -1727,7 +1785,7 @@ router.post('/skill-memory/preview', adminAuth, (req: express.Request, res: expr
 });
 
 // 把勾选条目导入到指定 scope: { scope: 'user'|'project', project_id?, indexes? }.
-router.post('/skill-memory/import', adminAuth, (req: express.Request, res: express.Response) => {
+router.post('/skill-memory/import', auth, (req: express.Request, res: express.Response) => {
   const body = (req.body || {}) as {
     bundle?: unknown;
     target?: any;
@@ -1748,6 +1806,7 @@ router.post('/skill-memory/import', adminAuth, (req: express.Request, res: expre
   }
   const result = skillMemoryMigration.importBundle({
     requesterUserId: adminReqUser(req).id,
+    user: adminReqUser(req),
     base64: bundle || '',
     target: {
       scope: target.scope,

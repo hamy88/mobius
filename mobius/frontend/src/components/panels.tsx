@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheck,
+  CircleQuestionMark,
   Clock,
   Copy,
   Cpu,
@@ -24,6 +25,8 @@ import {
   FolderInput,
   FolderOpen,
   Globe,
+  GripVertical,
+  ImagePlus,
   KeyRound,
   LayoutDashboard,
   Loader2,
@@ -32,23 +35,24 @@ import {
   Pencil,
   Plus,
   Power,
-  Puzzle,
   RefreshCw,
   RotateCcw,
   Save,
   Server,
   Settings,
   Shield,
+  SlidersHorizontal,
   Sparkles,
   Terminal,
   Trash2,
+  Type,
   Upload,
   UserPlus,
   Users as UsersIcon,
   WandSparkles,
+  Container,
 } from 'lucide-react'
-import { api, useStore } from '../store'
-import { formatCstDateTimeShort } from '../utils/time-format'
+import { SERVER_BRAND_NAME, api, friendlyApiError, useStore } from '../store'
 import {
   TEXT_REDACTION_ENABLED_EVENT,
   TEXT_REDACTION_ENABLED_STORAGE_KEY,
@@ -67,9 +71,20 @@ import {
   writeTextRedactionRules,
   type TextRedactionRule,
 } from '../services/text-redaction'
+import {
+  CUSTOM_LOGO_MAX_FILE_BYTES,
+  importCustomLogoFile,
+  useBrandNameOverride,
+  useCustomLogo,
+  writeBrandNameOverride,
+  writeCustomLogo,
+} from '../services/brand-overrides'
 import { pollRecursive } from '../services/polling'
+import { startSceneTour } from '../services/tour'
 import { InlineWebTerminal } from './web-terminal-modal'
+import { PrimaryActionButton } from './primary-action-button'
 import { ToggleSwitch } from './toggle-switch'
+import { ToastCard } from './toast-card'
 import { SkillMarketLink } from './skill-market-link'
 
 type AdminTmuxContext = {
@@ -232,11 +247,11 @@ function StatusPill({ win }: { win: AdminTmuxWindow }) {
     <span
       title={hint}
       aria-label={`${label}: ${hint}`}
-      className={`inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium ${flagMap.cls}`}
+      className={`inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-[length:var(--fs-sm)] font-medium ${flagMap.cls}`}
     >
       {win.state === 'busy' && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
       {label}
-      <span className="text-[10px] opacity-70">({processMap.english})</span>
+      <span className="text-[length:var(--fs-xs)] opacity-70">({processMap.english})</span>
     </span>
   )
 }
@@ -244,19 +259,19 @@ function StatusPill({ win }: { win: AdminTmuxWindow }) {
 function StatTile({ icon, label, value, sub }: { icon: ReactNode; label: string; value: ReactNode; sub?: ReactNode }) {
   return (
     <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-      <div className="mb-2 flex items-center gap-2 text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+      <div className="mb-2 flex items-center gap-2 text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-secondary)' }}>
         {icon}
         <span>{label}</span>
       </div>
-      <div className="text-2xl font-semibold leading-none" style={{ color: 'var(--text-primary)' }}>{value}</div>
-      {sub && <div className="mt-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>{sub}</div>}
+      <div className="text-[length:var(--fs-2xl)] font-semibold leading-none" style={{ color: 'var(--text-primary)' }}>{value}</div>
+      {sub && <div className="mt-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{sub}</div>}
     </div>
   )
 }
 
 function EmptyRows({ label }: { label: string }) {
   return (
-    <div className="flex h-28 items-center justify-center text-[13px]" style={{ color: 'var(--text-muted)' }}>
+    <div className="flex h-28 items-center justify-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>
       {label}
     </div>
   )
@@ -278,44 +293,18 @@ type AdminUserStats = {
 type AdminUserRow = {
   id: string
   display_name: string
-  role: 'admin' | 'developer' | 'user' | string
+  role: 'admin' | 'user' | string
   work_dir?: string
-  group_id?: string | null
-  group_name?: string | null
-  group_description?: string | null
   created_at?: string
   deleted_at?: string | null
   stats?: AdminUserStats
-}
-
-type AdminUserGroup = {
-  id: string
-  name: string
-  description?: string
-  created_at?: string
-  updated_at?: string
-  active_user_count?: number
-  user_count?: number
-  is_default?: boolean
-  project_visibility_mode?: 'default' | 'restricted'
-  visible_project_ids?: string[]
-}
-
-type VisCandidate = {
-  id: string
-  name: string
-  kind?: string
-  visibility?: string
-  created_by?: string
-  created_by_name?: string
 }
 
 type EmployeeFormState = {
   id: string
   display_name: string
   password: string
-  role: 'user' | 'admin' | 'developer'
-  group_id: string
+  role: 'user' | 'admin'
   work_dir: string
 }
 
@@ -342,71 +331,265 @@ function parseBulkEmployees(text: string) {
         : line.split(/\s+/).map((p) => p.trim())
       const [id = '', password = '', ...rest] = parts
       const tail = rest.filter(Boolean)
-      let role: 'user' | 'admin' | 'developer' = 'user'
-      if (tail[0] === 'admin' || tail[0] === 'user' || tail[0] === 'developer') role = tail.shift() as 'user' | 'admin' | 'developer'
-      else if (tail[tail.length - 1] === 'admin' || tail[tail.length - 1] === 'user' || tail[tail.length - 1] === 'developer') role = tail.pop() as 'user' | 'admin' | 'developer'
+      let role: 'user' | 'admin' = 'user'
+      if (tail[0] === 'admin' || tail[0] === 'user') role = tail.shift() as 'user' | 'admin'
+      else if (tail[tail.length - 1] === 'admin' || tail[tail.length - 1] === 'user') role = tail.pop() as 'user' | 'admin'
       const workDir = tail.length && tail[tail.length - 1].startsWith('/') ? tail.pop() || '' : ''
-      let groupName = ''
-      const explicitGroupIndex = tail.findIndex((p) => p.startsWith('group=') || p.startsWith('群组='))
-      if (explicitGroupIndex >= 0) {
-        groupName = tail[explicitGroupIndex].slice(tail[explicitGroupIndex].indexOf('=') + 1).trim()
-        tail.splice(explicitGroupIndex, 1)
-      } else if (tail.length >= 2) {
-        groupName = tail.pop() || ''
-      }
       return {
         id,
         password,
         role,
         display_name: tail.join(commaMode ? ',' : ' '),
-        group_name: groupName,
         work_dir: workDir,
       }
     })
 }
 
+// 单个添加向导的三步: 每步只问一类信息, 配一句说明
+// The single-add wizard: three steps, each asking about exactly one thing
+const ADMIN_USER_WIZARD_STEPS = [
+  { key: 'identity', label: '基本资料', lead: '员工 ID 既是登录名，也决定默认工作目录。' },
+  { key: 'secret', label: '登录密码', lead: '给员工一个初始密码，员工首次登录后应自行修改。' },
+  { key: 'access', label: '角色与目录', lead: '角色决定权限范围，工作目录决定文件落在哪里。' },
+] as const
+
+// 下面四个校验镜像后端 normalizeEmployee* 的规则, 让错误就地出现而不必等接口回错
+// These validators mirror the backend normalizeEmployee* rules so mistakes surface in place
+function validateEmployeeId(value: string): string {
+  const id = value.trim()
+  if (!id) return '请填写员工 ID'
+  if (id.length > 64) return '员工 ID 最多 64 个字符'
+  if (id === '.' || id === '..') return '员工 ID 不能是 . 或 ..'
+  if (!/^[A-Za-z0-9._@-]+$/.test(id)) return '员工 ID 只能包含字母、数字、点、下划线、横线和 @'
+  return ''
+}
+
+function validateEmployeeDisplayName(value: string): string {
+  return value.trim().length > 80 ? '显示名称最多 80 个字符' : ''
+}
+
+function validateEmployeePassword(value: string): string {
+  if (!value) return '请填写初始密码'
+  return value.length < 6 ? '密码至少 6 位' : ''
+}
+
+function validateEmployeeWorkDir(value: string): string {
+  const dir = value.trim()
+  if (!dir) return ''
+  if (dir.length > 500) return '工作目录最多 500 个字符'
+  if (!dir.startsWith('/')) return '工作目录必须是绝对路径（以 / 开头）'
+  return ''
+}
+
+/*
+ * 管理端操作失败的即时提示. 面板顶部那行内联横幅在向导滚到第 3 步、或列表很长时
+ * 已经在视口外 —— 失败那一刻看不到, 就成了"点了没反应". 这里统一顶一条右上角 toast,
+ * 文案用后端原文 (换行完整显示, 不截断), 8 秒自动收起, 也可以手动关.
+ * A transient top-right toast for failed admin actions: the inline banner at the top of
+ * the panel is usually scrolled out of view, so a rejected save looked like a no-op.
+ */
+function useErrorToast() {
+  const [toast, setToast] = useState<{ title: string; detail?: string } | null>(null)
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), 8000)
+    return () => clearTimeout(timer)
+  }, [toast])
+  return {
+    showError: (title: string, detail?: string) => setToast({ title, detail }),
+    errorToast: toast ? (
+      <ToastCard
+        tone="error"
+        wrap
+        icon={<AlertTriangle className="h-4 w-4" />}
+        title={toast.title}
+        subtitle={toast.detail}
+        onClose={() => setToast(null)}
+      />
+    ) : null,
+  }
+}
+
+// ── 容器管理 (docker 用户隔离模式专属) ─────────────────────────────────────
+// 列出全部用户沙箱容器, 管理员可手动 重启 / 关闭; 附宿主侧 attach 命令,
+// 让管理员能直接进容器内 tmux 查看 agent (对应后端 /api/admin/sandboxes).
+function AdminSandboxesPanel() {
+  const [data, setData] = useState<{ method?: string; image?: string; idleDestroyMs?: number; sandboxes?: Array<Record<string, any>>; selfCheck?: { ok: boolean; ranAt: number; steps: Array<{ name: string; ok: boolean; detail: string }> } | null } | null>(null)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  // 倒计时用本地时钟每秒跳 (数据本身 30s 拉一次; lastActiveAt 是锚点, 无需高频请求)
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const load = useCallback(async (refresh = false) => {
+    try {
+      setError('')
+      setData(await api(`/api/admin/sandboxes${refresh ? '?refresh=1' : ''}`))
+    } catch (e) {
+      setError(friendlyApiError(e))
+    }
+  }, [])
+  useEffect(() => {
+    void load()
+    const t = setInterval(() => void load(), 30_000)
+    return () => clearInterval(t)
+  }, [load])
+  const act = async (userId: string, op: 'rebuild' | 'stop') => {
+    const tip = op === 'stop'
+      ? `确定关闭 ${userId} 的沙箱容器？其中运行中的任务会一并终止。`
+      : `确定重启 ${userId} 的沙箱容器？（杀旧起新，运行中的任务会终止）`
+    if (!window.confirm(tip)) return
+    setBusy(`${userId}:${op}`)
+    setNotice('')
+    try {
+      await api(`/api/admin/sandboxes/${encodeURIComponent(userId)}/${op}`, { method: 'POST' })
+      setNotice(op === 'stop' ? `已关闭 ${userId} 的沙箱容器` : `已重启 ${userId} 的沙箱容器`)
+      void load()
+    } catch (e) {
+      setError(friendlyApiError(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+  const copy = (text: string) => { void navigator.clipboard?.writeText(text).catch(() => {}) }
+  const rows = data?.sandboxes || []
+  const idleMs = Number(data?.idleDestroyMs) || 3 * 60 * 60 * 1000
+  // 距上次活跃的相对时间
+  const relActive = (ts: number) => {
+    const d = Math.max(0, now - ts)
+    if (d < 60_000) return `${Math.floor(d / 1000)} 秒前`
+    if (d < 3_600_000) return `${Math.floor(d / 60_000)} 分钟前`
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时 ${Math.floor((d % 3_600_000) / 60_000)} 分前`
+    return `${Math.floor(d / 86_400_000)} 天前`
+  }
+  const fmtCountdown = (ms: number) => {
+    const s = Math.max(0, Math.floor(ms / 1000))
+    return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+  }
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
+        <span>隔离方式: <span className="text-[var(--text-primary)]">{data?.method || '…'}</span></span>
+        <span>镜像: <span className="text-[var(--text-primary)]">{data?.image || '—'}</span></span>
+        <span>共 {rows.length} 个容器</span>
+        <span>空闲 {Math.round(idleMs / 3_600_000)} 小时无鉴权请求即销毁</span>
+        <button type="button" onClick={() => void load()} className="rounded border border-[var(--border-color)] px-2 py-0.5 hover:bg-[var(--bg-hover)]">刷新</button>
+      </div>
+      {data?.selfCheck && (
+        <div className="rounded-lg border border-[var(--border-color)] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-medium text-[var(--text-primary)]">
+              隔离自检 {data.selfCheck.ok ? '✅ 通过' : '❌ 未通过'}
+              <span className="ml-2 font-normal text-[var(--text-secondary)]">
+                {new Date(data.selfCheck.ranAt).toLocaleString()}
+              </span>
+            </span>
+            <button type="button" disabled={!!busy} onClick={() => void load(true)}
+              className="rounded border border-[var(--border-color)] px-2 py-0.5 text-xs hover:bg-[var(--bg-hover)] disabled:opacity-50">重新自检</button>
+          </div>
+          <div className="mt-2 grid gap-1">
+            {data.selfCheck.steps.map((st) => (
+              <div key={st.name} className="flex items-center gap-2 text-xs">
+                <span className={st.ok ? 'text-emerald-400' : 'text-red-400'}>{st.ok ? '✓' : '✗'}</span>
+                <span className="text-[var(--text-primary)]">{st.name}</span>
+                <span className="truncate text-[var(--text-secondary)]">{st.detail}</span>
+              </div>
+            ))}
+          </div>
+          {!data.selfCheck.ok && (
+            <div className="mt-2 text-xs text-red-400">自检未通过期间，普通用户的登录 / 建号 / Agent 将被拒绝（fail-closed）</div>
+          )}
+        </div>
+      )}
+      {notice && <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs">{notice}</div>}
+      {error && <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs">{error}</div>}
+      {rows.length === 0 && (
+        <div className="rounded border border-[var(--border-color)] px-3 py-6 text-center text-xs text-[var(--text-secondary)]">
+          当前没有运行中的沙箱容器（普通用户发起第一个任务时会自动创建）
+        </div>
+      )}
+      {rows.map((sb) => (
+        <div key={String(sb.user)} className="rounded-lg border border-[var(--border-color)] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-[var(--text-primary)]">{String(sb.user)}</span>
+              <span className={`rounded px-1.5 py-0.5 text-[10px] ${sb.alive ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>{sb.alive ? '运行中' : '已停止'}</span>
+              <span className="text-xs text-[var(--text-secondary)]">{String(sb.containerName)} · {String(sb.ip || '无IP')}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" disabled={!!busy} onClick={() => void act(String(sb.user), 'rebuild')}
+                className="rounded border border-[var(--border-color)] px-2.5 py-1 text-xs hover:bg-[var(--bg-hover)] disabled:opacity-50">
+                {busy === `${sb.user}:rebuild` ? '重启中…' : '重启'}
+              </button>
+              <button type="button" disabled={!!busy} onClick={() => void act(String(sb.user), 'stop')}
+                className="rounded border border-red-500/40 px-2.5 py-1 text-xs text-red-400 hover:bg-red-500/10 disabled:opacity-50">
+                {busy === `${sb.user}:stop` ? '关闭中…' : '关闭'}
+              </button>
+            </div>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--text-secondary)]">
+            <span>
+              上次活跃: {sb.lastActiveAt
+                ? <span title={new Date(Number(sb.lastActiveAt)).toLocaleString()}>{relActive(Number(sb.lastActiveAt))} ({new Date(Number(sb.lastActiveAt)).toLocaleTimeString()})</span>
+                : '—'}
+            </span>
+            {sb.alive && sb.lastActiveAt && (() => {
+              const remain = Number(sb.lastActiveAt) + idleMs - now
+              const color = remain <= 0 ? 'text-red-400' : remain <= 5 * 60_000 ? 'text-red-400' : remain <= 30 * 60_000 ? 'text-amber-400' : 'text-[var(--text-primary)]'
+              return (
+                <span className={color}>
+                  {remain > 0
+                    ? <>销毁倒计时 <span className="font-mono tabular-nums">{fmtCountdown(remain)}</span></>
+                    : <>已到空闲时限，等待回收（60s 扫描）</>}
+                </span>
+              )
+            })()}
+            <span>code-server: {String(sb.services?.codeServer?.length ?? 0)}</span>
+            <span>创建: {sb.createdAt ? new Date(Number(sb.createdAt)).toLocaleString() : '—'}</span>
+          </div>
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
+            <code className="truncate rounded bg-[var(--bg-hover)] px-1.5 py-0.5">docker exec -it {String(sb.containerName)} tmux -L mobius-agent attach -t imac_claude_code_agent_hub</code>
+            <button type="button" onClick={() => copy(`docker exec -it ${String(sb.containerName)} tmux -L mobius-agent attach -t imac_claude_code_agent_hub`)}
+              className="shrink-0 rounded border border-[var(--border-color)] px-1.5 py-0.5 hover:bg-[var(--bg-hover)]">复制 attach 命令</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function AdminUsersPanel() {
+  const { showError, errorToast } = useErrorToast()
   const [users, setUsers] = useState<AdminUserRow[]>([])
-  const [groups, setGroups] = useState<AdminUserGroup[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [form, setForm] = useState<EmployeeFormState>({ id: '', display_name: '', password: '', role: 'user', group_id: '', work_dir: '' })
+  const [form, setForm] = useState<EmployeeFormState>({ id: '', display_name: '', password: '', role: 'user', work_dir: '' })
   const [bulkText, setBulkText] = useState('')
-  const [newGroupName, setNewGroupName] = useState('')
-  const [groupDrafts, setGroupDrafts] = useState<Record<string, string>>({})
+  const [wizardStep, setWizardStep] = useState(0)
+  const [wizardError, setWizardError] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [bulkSubmitting, setBulkSubmitting] = useState(false)
-  const [creatingGroup, setCreatingGroup] = useState(false)
-  const [savingGroupId, setSavingGroupId] = useState<string | null>(null)
-  const [deletingGroupId, setDeletingGroupId] = useState<string | null>(null)
-  // 群组「项目可见性」编辑态: 一次只展开一个群组, 展开时按需加载候选项目.
-  const [visOpenId, setVisOpenId] = useState<string | null>(null)
-  const [visLoading, setVisLoading] = useState(false)
-  const [visSavingId, setVisSavingId] = useState<string | null>(null)
-  const [visMode, setVisMode] = useState<'default' | 'restricted'>('default')
-  const [visSelected, setVisSelected] = useState<string[]>([])
-  const [visCandidates, setVisCandidates] = useState<VisCandidate[]>([])
-  const [visQuery, setVisQuery] = useState('')
-  const [updatingUserId, setUpdatingUserId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [editingUser, setEditingUser] = useState<AdminUserRow | null>(null)
-  const [editForm, setEditForm] = useState<{ display_name: string; role: 'user' | 'developer' | 'admin'; work_dir: string; password: string }>({ display_name: '', role: 'user', work_dir: '', password: '' })
+  const [editForm, setEditForm] = useState<{ display_name: string; role: 'user' | 'admin'; work_dir: string; password: string }>({ display_name: '', role: 'user', work_dir: '', password: '' })
   const [savingEdit, setSavingEdit] = useState(false)
+  // 新建向导里"默认工作目录"由后端算, 不在前端拼路径 —— 见 AdminUsersPanel 的占位符
+  const [defaultWorkDir, setDefaultWorkDir] = useState('')
 
   const refresh = async (quiet = false, signal?: AbortSignal) => {
     if (!quiet) setLoading(true)
     try {
-      const [userData, groupData] = await Promise.all([
-        api('/api/admin/users', { signal }),
-        api('/api/admin/user-groups', { signal }),
-      ])
+      const userData = await api('/api/admin/users', { signal })
       setUsers(Array.isArray(userData) ? userData : [])
-      setGroups(Array.isArray(groupData) ? groupData : [])
       setError('')
     } catch (e: any) {
       if (e?.name === 'AbortError') return // 轮询超时/卸载放弃, 不算错误
-      setError(e?.message || String(e))
+      setError(friendlyApiError(e, '加载运行监控失败'))
     } finally {
       if (!quiet) setLoading(false)
     }
@@ -419,20 +602,20 @@ function AdminUsersPanel() {
     return () => stop()
   }, [])
 
+  // 向导第 2 步的"默认工作目录"按输入的 ID 向后端要, 输入防抖 300ms 避免每个字符一次请求.
   useEffect(() => {
-    setGroupDrafts((prev) => {
-      const next: Record<string, string> = {}
-      for (const g of groups) next[g.id] = prev[g.id] ?? g.name
-      return next
-    })
-  }, [groups])
+    if (wizardStep !== 2) return
+    const id = form.id.trim()
+    if (!id) { setDefaultWorkDir(''); return }
+    const timer = setTimeout(() => {
+      api(`/api/admin/users/default-work-dir?id=${encodeURIComponent(id)}`)
+        .then((data: any) => setDefaultWorkDir(String(data?.work_dir || '')))
+        .catch(() => setDefaultWorkDir(''))
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [wizardStep, form.id])
 
   const activeUsers = useMemo(() => users.filter((u) => !u.deleted_at), [users])
-  const defaultGroupId = useMemo(() => groups.find((g) => g.is_default)?.id || groups[0]?.id || '', [groups])
-
-  useEffect(() => {
-    if (!form.group_id && defaultGroupId) setForm((f) => ({ ...f, group_id: defaultGroupId }))
-  }, [defaultGroupId, form.group_id])
 
   const chartRows = useMemo(() => activeUsers
     .map((u) => {
@@ -442,7 +625,6 @@ function AdminUsersPanel() {
         id: u.id,
         name: u.display_name || u.id,
         role: u.role,
-        groupName: u.group_name || '默认组',
         sessionCount,
         activeCount: toCount(stats.active_count),
         completedCount: toCount(stats.completed_count),
@@ -468,7 +650,6 @@ function AdminUsersPanel() {
   const hasRows = chartRows.length > 0
   const totalEmployees = activeUsers.length
   const adminCount = activeUsers.filter((u) => u.role === 'admin').length
-  const totalGroups = groups.length
 
   const fieldStyle = {
     background: 'var(--input-bg)',
@@ -476,7 +657,42 @@ function AdminUsersPanel() {
     color: 'var(--text-primary)',
   }
 
-  const resetForm = () => setForm({ id: '', display_name: '', password: '', role: 'user', group_id: defaultGroupId, work_dir: '' })
+  const fieldClass = 'h-9 w-full min-w-0 rounded-md border px-2.5 text-[length:var(--fs-md)] outline-none transition-colors focus:border-blue-500/50'
+  const labelClass = 'mb-1 block text-[length:var(--fs-sm)]'
+  // "清空" 仅在表单有内容时可点, 避免空表单下的无效操作
+  // The clear button is only enabled when the form actually holds something
+  const formDirty = Boolean(form.id || form.display_name || form.password || form.work_dir) || form.role !== 'user'
+
+  const resetForm = () => setForm({ id: '', display_name: '', password: '', role: 'user', work_dir: '' })
+
+  // 当前步的校验结果; wizardError 只在点了"下一步/创建"后才亮出来, 不打断首次填写
+  // Current step's validation result; the error only shows after a next/create click
+  const stepError = [
+    validateEmployeeId(form.id) || validateEmployeeDisplayName(form.display_name),
+    validateEmployeePassword(form.password),
+    validateEmployeeWorkDir(form.work_dir),
+  ][wizardStep]
+
+  const resetWizard = () => { setWizardStep(0); setWizardError(''); setShowPassword(false) }
+
+  const gotoTab = (index: number) => {
+    // 只允许往回跳到已完成的步骤; 前进必须走"下一步"以便逐字段校验
+    // Only completed steps are clickable; moving forward must pass validation
+    if (index > wizardStep) return
+    setWizardStep(index)
+    setWizardError('')
+  }
+
+  const wizardNext = () => {
+    if (stepError) { setWizardError(stepError); return }
+    setWizardError('')
+    if (wizardStep < ADMIN_USER_WIZARD_STEPS.length - 1) setWizardStep(wizardStep + 1)
+    else void submitCreate()
+  }
+
+  // 批量框里能识别的行数 (跳过空行与 # 注释行), 提交前就告诉管理员会创建多少条
+  // Rows the bulk box can actually parse, so the admin knows the batch size before submitting
+  const bulkRowCount = useMemo(() => parseBulkEmployees(bulkText).length, [bulkText])
 
   const submitCreate = async () => {
     setError('')
@@ -485,15 +701,17 @@ function AdminUsersPanel() {
     try {
       const data = await api('/api/admin/users', {
         method: 'POST',
-        body: JSON.stringify({ ...form, group_id: form.group_id || defaultGroupId }),
+        body: JSON.stringify(form),
       })
       resetForm()
+      resetWizard()
       await refresh(true)
       const warning = data?.user?.warning ? ` · ${data.user.warning}` : ''
-      const groupLabel = data?.user?.group_name ? ` · ${data.user.group_name}` : ''
-      setNotice(`${data?.user?.status === 'restored' ? '已恢复' : '已添加'}员工 ${data?.user?.id || form.id}${groupLabel}${warning}`)
+      setNotice(`${data?.user?.status === 'restored' ? '已恢复' : '已添加'}员工 ${data?.user?.id || form.id}${warning}`)
     } catch (e: any) {
-      setError(e?.message || String(e))
+      const message = friendlyApiError(e, '创建用户失败')
+      setError(message)
+      showError(message)
     } finally {
       setSubmitting(false)
     }
@@ -505,6 +723,7 @@ function AdminUsersPanel() {
     const employees = parseBulkEmployees(bulkText)
     if (!employees.length) {
       setError('请先输入批量员工列表')
+      showError('请先输入批量员工列表')
       return
     }
     setBulkSubmitting(true)
@@ -521,148 +740,14 @@ function AdminUsersPanel() {
       if (data?.failed?.length) {
         const first = data.failed.slice(0, 3).map((f: any) => `第 ${Number(f.index) + 1} 行: ${f.error}`).join('; ')
         setError(first)
+        showError(`批量创建有 ${data.failed.length} 条未成功`, first)
       }
     } catch (e: any) {
-      setError(e?.message || String(e))
+      const message = friendlyApiError(e, '批量创建用户失败')
+      setError(message)
+      showError(message)
     } finally {
       setBulkSubmitting(false)
-    }
-  }
-
-  const createGroup = async () => {
-    const name = newGroupName.trim()
-    if (!name) {
-      setError('请输入群组名称')
-      return
-    }
-    setError('')
-    setNotice('')
-    setCreatingGroup(true)
-    try {
-      const data = await api('/api/admin/user-groups', {
-        method: 'POST',
-        body: JSON.stringify({ name }),
-      })
-      setNewGroupName('')
-      await refresh(true)
-      setNotice(`已新增群组 ${data?.group?.name || name}`)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setCreatingGroup(false)
-    }
-  }
-
-  const saveGroup = async (group: AdminUserGroup) => {
-    const name = (groupDrafts[group.id] || '').trim()
-    if (!name) {
-      setError('群组名称不能为空')
-      return
-    }
-    if (name === group.name) return
-    setError('')
-    setNotice('')
-    setSavingGroupId(group.id)
-    try {
-      const data = await api(`/api/admin/user-groups/${encodeURIComponent(group.id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ name }),
-      })
-      setGroupDrafts((prev) => ({ ...prev, [group.id]: data?.group?.name || name }))
-      await refresh(true)
-      setNotice(`已更新群组 ${data?.group?.name || name}`)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setSavingGroupId(null)
-    }
-  }
-
-  const deleteGroup = async (group: AdminUserGroup) => {
-    const activeCount = toCount(group.active_user_count)
-    if (group.is_default || activeCount > 0) return
-    const ok = window.confirm(`删除空群组 ${group.name}？`)
-    if (!ok) return
-    setError('')
-    setNotice('')
-    setDeletingGroupId(group.id)
-    try {
-      await api(`/api/admin/user-groups/${encodeURIComponent(group.id)}`, { method: 'DELETE' })
-      setGroupDrafts((prev) => {
-        const next = { ...prev }
-        delete next[group.id]
-        return next
-      })
-      await refresh(true)
-      setNotice(`已删除群组 ${group.name}`)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setDeletingGroupId(null)
-    }
-  }
-
-  const openGroupVis = async (group: AdminUserGroup) => {
-    if (visOpenId === group.id) { setVisOpenId(null); return }
-    setVisOpenId(group.id)
-    setVisLoading(true)
-    setVisQuery('')
-    setVisMode(group.project_visibility_mode === 'restricted' ? 'restricted' : 'default')
-    setVisSelected(Array.isArray(group.visible_project_ids) ? [...group.visible_project_ids] : [])
-    setVisCandidates([])
-    try {
-      const data = await api(`/api/admin/user-groups/${encodeURIComponent(group.id)}/project-visibility`)
-      setVisMode(data?.mode === 'restricted' ? 'restricted' : 'default')
-      setVisSelected(Array.isArray(data?.visible_project_ids) ? data.visible_project_ids : [])
-      setVisCandidates(Array.isArray(data?.candidates) ? data.candidates : [])
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setVisLoading(false)
-    }
-  }
-
-  const toggleVisProject = (pid: string) => {
-    setVisSelected((prev) => (prev.includes(pid) ? prev.filter((x) => x !== pid) : [...prev, pid]))
-  }
-
-  const saveGroupVis = async (group: AdminUserGroup) => {
-    setError(''); setNotice('')
-    setVisSavingId(group.id)
-    try {
-      await api(`/api/admin/user-groups/${encodeURIComponent(group.id)}/project-visibility`, {
-        method: 'PUT',
-        body: JSON.stringify({ mode: visMode, visible_project_ids: visSelected }),
-      })
-      await refresh(true)
-      setNotice(`已更新「${group.name}」的项目可见性：${visMode === 'restricted' ? '受限' : '标准'}`)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setVisSavingId(null)
-    }
-  }
-
-  const updateEmployeeGroup = async (row: AdminUserRow, groupId: string) => {
-    if (!groupId || groupId === row.group_id) return
-    const nextGroup = groups.find((g) => g.id === groupId)
-    setError('')
-    setNotice('')
-    setUpdatingUserId(row.id)
-    try {
-      await api(`/api/admin/users/${encodeURIComponent(row.id)}/group`, {
-        method: 'PATCH',
-        body: JSON.stringify({ group_id: groupId }),
-      })
-      setUsers((prev) => prev.map((u) => u.id === row.id
-        ? { ...u, group_id: groupId, group_name: nextGroup?.name || u.group_name }
-        : u))
-      await refresh(true)
-      setNotice(`已将 ${row.display_name || row.id} 调整到 ${nextGroup?.name || '新群组'}`)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setUpdatingUserId(null)
     }
   }
 
@@ -677,7 +762,9 @@ function AdminUsersPanel() {
       await refresh(true)
       setNotice(`已删除员工 ${row.id}`)
     } catch (e: any) {
-      setError(e?.message || String(e))
+      const message = friendlyApiError(e, '删除用户失败')
+      setError(message)
+      showError(message)
     } finally {
       setDeletingId(null)
     }
@@ -687,7 +774,7 @@ function AdminUsersPanel() {
     setError(''); setNotice('')
     setEditForm({
       display_name: u.display_name || '',
-      role: u.role === 'admin' ? 'admin' : u.role === 'developer' ? 'developer' : 'user',
+      role: u.role === 'admin' ? 'admin' : 'user',
       work_dir: u.work_dir || '',
       password: '',
     })
@@ -711,7 +798,9 @@ function AdminUsersPanel() {
       await refresh(true)
       setNotice(`已更新员工 ${label}`)
     } catch (e: any) {
-      setError(e?.message || String(e))
+      const message = friendlyApiError(e, '更新用户失败')
+      setError(message)
+      showError(message)
     } finally {
       setSavingEdit(false)
     }
@@ -719,17 +808,17 @@ function AdminUsersPanel() {
 
   return (
     <div className="space-y-4">
+      {errorToast}
       <section className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4" data-tour="admin-section-users">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="flex items-center gap-1.5 text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            <h3 className="flex items-center gap-1.5 text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
               <UsersIcon className="h-3.5 w-3.5 text-cyan-400" />
               用户管理
             </h3>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               <span>员工 {totalEmployees}</span>
               <span>管理员 {adminCount}</span>
-              <span>群组 {totalGroups}</span>
               <span>会话 {totalSessions}</span>
               <span>活跃 {activeSessions}</span>
               <span>平均提示词 {formatPromptLength(averagePromptLength)} 字</span>
@@ -739,7 +828,7 @@ function AdminUsersPanel() {
             type="button"
             onClick={() => refresh()}
             disabled={loading}
-            title="刷新用户和群组"
+            title="刷新用户"
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-50"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -747,14 +836,14 @@ function AdminUsersPanel() {
         </div>
 
         {error && (
-          <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
             <span className="break-all">{error}</span>
           </div>
         )}
 
         {notice && (
-          <div className="mt-3 flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-400">
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-[length:var(--fs-md)] text-emerald-400">
             <UserPlus className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
             <span className="break-all">{notice}</span>
           </div>
@@ -762,14 +851,13 @@ function AdminUsersPanel() {
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <StatTile icon={<UsersIcon className="h-4 w-4 text-cyan-400" />} label="启用员工" value={totalEmployees} sub={`管理员 ${adminCount}`} />
-          <StatTile icon={<Building2 className="h-4 w-4 text-emerald-400" />} label="群组" value={totalGroups} sub="单群组组织分类" />
           <StatTile icon={<BarChart3 className="h-4 w-4 text-sky-400" />} label="会话" value={totalSessions} sub={`活跃 ${activeSessions}`} />
           <StatTile icon={<FileText className="h-4 w-4 text-amber-400" />} label="平均提示词" value={formatPromptLength(averagePromptLength)} sub="任务单 + 执行会话字数" />
           <StatTile icon={<MessageSquare className="h-4 w-4 text-violet-400" />} label="消息" value={chartRows.reduce((sum, row) => sum + row.totalMessages, 0)} sub="全部员工累计" />
         </div>
 
         {!hasRows ? (
-          <div className="mt-4 flex h-24 items-center justify-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="mt-4 flex h-24 items-center justify-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
             {loading ? '加载中...' : '暂无用户'}
           </div>
         ) : (
@@ -779,15 +867,15 @@ function AdminUsersPanel() {
                 const width = row.sessionCount > 0
                   ? `${Math.min(100, Math.max(2, (row.sessionCount / maxCount) * 100))}%`
                   : '0%'
-                const accent = row.role === 'admin' ? '#f59e0b' : row.role === 'developer' ? '#a78bfa' : '#38bdf8'
+                const accent = row.role === 'admin' ? '#f59e0b' : '#38bdf8'
                 return (
                   <div key={row.id} className="grid grid-cols-[minmax(150px,220px)_1fr_88px] items-center gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-[12px] font-medium" title={`${row.name} (${row.id})`} style={{ color: 'var(--text-primary)' }}>
+                      <div className="truncate text-[length:var(--fs-md)] font-medium" title={`${row.name} (${row.id})`} style={{ color: 'var(--text-primary)' }}>
                         {row.name}
                       </div>
-                      <div className="truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        {row.id} · {row.groupName} · {row.role === 'admin' ? '管理员' : row.role === 'developer' ? '开发者' : '成员'}
+                      <div className="truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
+                        {row.id} · {row.role === 'admin' ? '管理员' : '普通用户'}
                       </div>
                     </div>
                     <div
@@ -803,7 +891,7 @@ function AdminUsersPanel() {
                           opacity: row.sessionCount > 0 ? 0.9 : 0,
                         }}
                       />
-                      <div className="relative z-10 flex h-full items-center justify-between gap-2 px-2.5 text-[11px]">
+                      <div className="relative z-10 flex h-full items-center justify-between gap-2 px-2.5 text-[length:var(--fs-sm)]">
                         <span className="truncate" style={{ color: row.sessionCount > 0 ? '#f8fafc' : 'var(--text-muted)' }}>
                           活跃 {row.activeCount} · 完成 {row.completedCount} · 归档 {row.archivedCount}
                         </span>
@@ -813,10 +901,10 @@ function AdminUsersPanel() {
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="tabular-nums text-[18px] font-semibold leading-none" style={{ color: 'var(--text-primary)' }}>
+                      <div className="tabular-nums text-[length:var(--fs-2xl)] font-semibold leading-none" style={{ color: 'var(--text-primary)' }}>
                         {row.sessionCount}
                       </div>
-                      <div className="mt-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                      <div className="mt-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
                         {formatRelative(row.lastActive)}
                       </div>
                     </div>
@@ -831,253 +919,248 @@ function AdminUsersPanel() {
       <section className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="flex items-center gap-1.5 text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-              <Building2 className="h-3.5 w-3.5 text-emerald-400" />
-              群组管理
-            </h3>
-            <p className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              群组用于员工组织分类；同组项目权限会按这里的归属判断。
-            </p>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            value={newGroupName}
-            onChange={(e) => { setNewGroupName(e.target.value); setError(''); setNotice('') }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !creatingGroup) createGroup() }}
-            placeholder="新群组名称"
-            className="h-9 min-w-[220px] rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-            style={fieldStyle}
-          />
-          <button
-            type="button"
-            onClick={createGroup}
-            disabled={creatingGroup}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
-          >
-            {creatingGroup ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-            新增群组
-          </button>
-        </div>
-
-        <div className="mt-3 grid gap-2 lg:grid-cols-2">
-          {groups.map((g) => {
-            const activeCount = toCount(g.active_user_count)
-            const saving = savingGroupId === g.id
-            const deleting = deletingGroupId === g.id
-            const draft = groupDrafts[g.id] ?? g.name
-            const changed = draft.trim() !== g.name
-            return (
-              <div key={g.id} className="rounded-lg border px-3 py-2" style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)' }}>
-                <div className="flex items-center gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <input
-                        value={draft}
-                        onChange={(e) => { setGroupDrafts((prev) => ({ ...prev, [g.id]: e.target.value })); setError(''); setNotice('') }}
-                        className="h-8 min-w-0 flex-1 rounded-md border px-2 text-[12px] outline-none focus:border-blue-500/50"
-                        style={fieldStyle}
-                      />
-                      {g.is_default && (
-                        <span className="flex-shrink-0 rounded-md border border-cyan-500/25 bg-cyan-500/10 px-2 py-0.5 text-[10px] text-cyan-400">默认</span>
-                      )}
-                      {!g.is_default && (
-                        <span className={`flex-shrink-0 rounded-md border px-2 py-0.5 text-[10px] ${g.project_visibility_mode === 'restricted' ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : 'border-[var(--border-color)] text-[var(--text-muted)]'}`}>
-                          {g.project_visibility_mode === 'restricted' ? '项目受限' : '项目标准'}
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                      启用员工 {activeCount} · 全部记录 {toCount(g.user_count)}
-                    </div>
-                  </div>
-                  {!g.is_default && (
-                    <button
-                      type="button"
-                      onClick={() => openGroupVis(g)}
-                      title="项目可见性"
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors hover:bg-[var(--bg-hover)] ${visOpenId === g.id ? 'border-amber-500/40 text-amber-400' : 'border-[var(--border-color)] text-[var(--text-secondary)]'}`}
-                    >
-                      <Shield className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => saveGroup(g)}
-                    disabled={saving || !changed}
-                    title="保存群组名称"
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-40"
-                  >
-                    {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteGroup(g)}
-                    disabled={deleting || !!g.is_default || activeCount > 0}
-                    title={g.is_default ? '默认组不能删除' : activeCount > 0 ? '只能删除空群组' : '删除空群组'}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-500/20 text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-35"
-                  >
-                    {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-                {!g.is_default && visOpenId === g.id && (
-                  <div className="mt-2 rounded-md border p-2.5" style={{ background: 'var(--bg-card)', borderColor: 'var(--border-color)' }}>
-                    {visLoading ? (
-                      <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" /> 加载中…
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>项目可见性</span>
-                          <div className="inline-flex overflow-hidden rounded-md border" style={{ borderColor: 'var(--border-color)' }}>
-                            <button type="button" onClick={() => setVisMode('default')}
-                              className={`h-7 px-2.5 text-[11px] ${visMode === 'default' ? 'bg-blue-500/15 text-blue-400' : 'text-[var(--text-muted)]'}`}>标准</button>
-                            <button type="button" onClick={() => setVisMode('restricted')}
-                              className={`h-7 px-2.5 text-[11px] ${visMode === 'restricted' ? 'bg-amber-500/15 text-amber-400' : 'text-[var(--text-muted)]'}`}>受限</button>
-                          </div>
-                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                            {visMode === 'restricted' ? '仅可见：自己创建的 + 自己被加入成员的 + 下方指定项目' : '可见全部公开项目 + 自己的项目'}
-                          </span>
-                          <button type="button" onClick={() => saveGroupVis(g)} disabled={visSavingId === g.id}
-                            className="ml-auto inline-flex h-7 items-center gap-1 rounded-md bg-blue-500 px-2.5 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50">
-                            {visSavingId === g.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} 保存
-                          </button>
-                        </div>
-                        {visMode === 'restricted' && (
-                          <div className="mt-2">
-                            <input value={visQuery} onChange={(e) => setVisQuery(e.target.value)} placeholder="搜索要开放给本组的项目…"
-                              className="h-7 w-full rounded-md border px-2 text-[11px] outline-none focus:border-blue-500/50" style={fieldStyle} />
-                            <div className="mt-1.5 max-h-44 overflow-auto rounded-md border" style={{ borderColor: 'var(--border-color)' }}>
-                              {visCandidates
-                                .filter((c) => !visQuery.trim() || String(c.name || '').toLowerCase().includes(visQuery.toLowerCase()))
-                                .map((c) => {
-                                  const checked = visSelected.includes(c.id)
-                                  return (
-                                    <label key={c.id} className="flex cursor-pointer items-center gap-2 border-b px-2.5 py-1.5 last:border-b-0 hover:bg-[var(--bg-hover)]" style={{ borderColor: 'var(--border-color)' }}>
-                                      <input type="checkbox" checked={checked} onChange={() => toggleVisProject(c.id)} className="h-3.5 w-3.5" />
-                                      <span className="min-w-0 flex-1 truncate text-[11px]" style={{ color: 'var(--text-primary)' }}>{c.name || c.id}</span>
-                                      {c.kind === 'extension' && <span className="flex-shrink-0 text-[9px]" style={{ color: 'var(--text-muted)' }}>拓展</span>}
-                                      {c.created_by_name && <span className="flex-shrink-0 text-[9px]" style={{ color: 'var(--text-muted)' }}>{c.created_by_name}</span>}
-                                    </label>
-                                  )
-                                })}
-                              {visCandidates.filter((c) => !visQuery.trim() || String(c.name || '').toLowerCase().includes(visQuery.toLowerCase())).length === 0 && (
-                                <div className="px-2.5 py-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>没有匹配的项目</div>
-                              )}
-                            </div>
-                            {visSelected.length > 0 && (
-                              <div className="mt-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>已选 {visSelected.length} 个项目对「{g.name}」可见</div>
-                            )}
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h3 className="flex items-center gap-1.5 text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            <h3 className="flex items-center gap-1.5 text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
               <UserPlus className="h-3.5 w-3.5 text-emerald-400" />
               员工账号
             </h3>
-            <p className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <p className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               删除账号会立即禁止登录；历史项目、Session 与消息保留。
             </p>
           </div>
         </div>
 
-        <div className="grid gap-3 xl:grid-cols-[minmax(360px,0.9fr)_minmax(420px,1.1fr)]">
-          <div className="space-y-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <input
-                value={form.id}
-                onChange={(e) => { setForm((f) => ({ ...f, id: e.target.value })); setError(''); setNotice('') }}
-                placeholder="员工 ID"
-                className="h-9 rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-                style={fieldStyle}
-              />
-              <input
-                value={form.display_name}
-                onChange={(e) => { setForm((f) => ({ ...f, display_name: e.target.value })); setError(''); setNotice('') }}
-                placeholder="显示名称"
-                className="h-9 rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-                style={fieldStyle}
-              />
-              <input
-                type="password"
-                value={form.password}
-                onChange={(e) => { setForm((f) => ({ ...f, password: e.target.value })); setError(''); setNotice('') }}
-                placeholder="初始密码，至少 6 位"
-                onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) submitCreate() }}
-                className="h-9 rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-                style={fieldStyle}
-              />
-              <select
-                value={form.role}
-                onChange={(e) => {
-                  const v = e.target.value
-                  setForm((f) => ({ ...f, role: v === 'admin' || v === 'developer' ? v : 'user' }))
-                }}
-                className="h-9 rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-                style={fieldStyle}
-              >
-                <option value="user">成员</option>
-                <option value="developer">开发者</option>
-                <option value="admin">管理员</option>
-              </select>
-              <select
-                value={form.group_id || defaultGroupId}
-                onChange={(e) => setForm((f) => ({ ...f, group_id: e.target.value }))}
-                className="h-9 rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-                style={fieldStyle}
-              >
-                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-              </select>
-              <input
-                value={form.work_dir}
-                onChange={(e) => { setForm((f) => ({ ...f, work_dir: e.target.value })); setError(''); setNotice('') }}
-                placeholder="工作目录（选填，默认 /home/员工ID/cc-workspace）"
-                className="h-9 rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50"
-                style={fieldStyle}
-              />
+        <div className="grid items-stretch gap-3 xl:grid-cols-2">
+          {/* 输入区落在卡片面上 (bg-tertiary), 字段用 input-bg 浮在其上, 双层背景都有对比 */}
+          {/* The forms sit on a card surface (bg-tertiary) so the input-bg fields stand out */}
+          <div className="flex flex-col rounded-lg border p-3" data-tour="admin-users-create" style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)' }}>
+            <div className="mb-3 flex items-center gap-2">
+              <span className="inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md border border-emerald-500/25 bg-emerald-500/10 text-emerald-400">
+                <UserPlus className="h-3.5 w-3.5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>单个添加</div>
+                <div className="text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>跟着向导走，一次创建一个账号</div>
+              </div>
+              <span className="flex-shrink-0 tabular-nums text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
+                第 {wizardStep + 1} 步 / 共 {ADMIN_USER_WIZARD_STEPS.length} 步
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={submitCreate}
-              disabled={submitting}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md bg-emerald-500 px-3 text-[12px] font-medium text-white transition-colors hover:bg-emerald-600 disabled:opacity-50"
-            >
-              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-              添加员工
-            </button>
+
+            {/* 步骤条: 已完成的步骤可点回去改, 前进只能走"下一步"以便逐字段校验 */}
+            {/* Step rail: finished steps can be reopened, forward movement goes through Next */}
+            <div className="mb-3 flex items-center gap-1">
+              {ADMIN_USER_WIZARD_STEPS.map((s, index) => {
+                const done = index < wizardStep
+                const active = index === wizardStep
+                return (
+                  <Fragment key={s.key}>
+                    {index > 0 && <span className="h-px flex-1" style={{ background: done || active ? 'var(--accent-primary)' : 'var(--border-color-strong)' }} />}
+                    <button
+                      type="button"
+                      onClick={() => gotoTab(index)}
+                      disabled={index > wizardStep}
+                      className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[length:var(--fs-sm)] transition-colors disabled:cursor-default"
+                      style={{
+                        background: active ? 'var(--bg-active)' : 'transparent',
+                        color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+                      }}
+                    >
+                      <span
+                        className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border text-[length:var(--fs-2xs)]"
+                        style={{
+                          borderColor: done ? 'rgba(16,185,129,0.5)' : active ? 'var(--accent-primary)' : 'var(--border-color-strong)',
+                          background: done ? 'rgba(16,185,129,0.15)' : 'transparent',
+                          color: done ? '#34d399' : undefined,
+                        }}
+                      >
+                        {done ? <Check className="h-2.5 w-2.5" /> : index + 1}
+                      </span>
+                      {s.label}
+                    </button>
+                  </Fragment>
+                )
+              })}
+            </div>
+
+            {/* 步骤体固定最小高度, 三步之间切换不跳高 */}
+            {/* Fixed min-height keeps the card from jumping between steps */}
+            <div className="flex flex-1 flex-col gap-2.5 xl:min-h-[176px]">
+              <p className="text-[length:var(--fs-sm)] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                {ADMIN_USER_WIZARD_STEPS[wizardStep].lead}
+              </p>
+
+              {wizardStep === 0 && (
+                <div className="grid gap-2.5 sm:grid-cols-2">
+                  <label className="block min-w-0">
+                    <span className={labelClass} style={{ color: 'var(--text-secondary)' }}>员工 ID</span>
+                    <input
+                      value={form.id}
+                      autoFocus
+                      onChange={(e) => { setForm((f) => ({ ...f, id: e.target.value })); setError(''); setNotice(''); setWizardError('') }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) wizardNext() }}
+                      placeholder="如 zhangsan"
+                      className={fieldClass}
+                      style={fieldStyle}
+                    />
+                  </label>
+                  <label className="block min-w-0">
+                    <span className={labelClass} style={{ color: 'var(--text-secondary)' }}>显示名称</span>
+                    <input
+                      value={form.display_name}
+                      onChange={(e) => { setForm((f) => ({ ...f, display_name: e.target.value })); setError(''); setNotice(''); setWizardError('') }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) wizardNext() }}
+                      placeholder="如 张三，留空则同员工 ID"
+                      className={fieldClass}
+                      style={fieldStyle}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {wizardStep === 1 && (
+                <label className="block min-w-0">
+                  <span className={labelClass} style={{ color: 'var(--text-secondary)' }}>初始密码</span>
+                  <span className="relative block">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={form.password}
+                      autoFocus
+                      onChange={(e) => { setForm((f) => ({ ...f, password: e.target.value })); setError(''); setNotice(''); setWizardError('') }}
+                      placeholder="至少 6 位"
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) wizardNext() }}
+                      className={`${fieldClass} pr-9`}
+                      style={fieldStyle}
+                    />
+                    {/* 明文/密文切换: 管理员要口头或书面对员工转交密码, 需要能核对 */}
+                    {/* Reveal toggle: the admin hands this password to the employee and must read it back */}
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      title={showPassword ? '隐藏密码' : '显示密码'}
+                      aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                      className="absolute inset-y-0 right-0 inline-flex w-8 items-center justify-center rounded-r-md transition-colors hover:bg-[var(--bg-hover)]"
+                      style={{ color: 'var(--text-muted)' }}
+                    >
+                      {showPassword ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                  </span>
+                  <span className="mt-1 block text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
+                    密码由管理员设定并转交给员工；员工登录后可在个人设置里修改。
+                  </span>
+                </label>
+              )}
+
+              {wizardStep === 2 && (
+                <>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {([
+                      { value: 'user', title: '普通用户', desc: '只能看到自己的项目、会话与数据' },
+                      { value: 'admin', title: '管理员', desc: '可进入管理中心，管理员工、模型与全站配置' },
+                    ] as const).map((option) => {
+                      const active = form.role === option.value
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => setForm((f) => ({ ...f, role: option.value }))}
+                          className="rounded-md border p-2 text-left transition-colors"
+                          style={{
+                            borderColor: active ? 'var(--accent-primary)' : 'var(--input-border)',
+                            background: active ? 'var(--bg-active)' : 'var(--input-bg)',
+                          }}
+                        >
+                          <span className="flex items-center gap-1.5 text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
+                            {active && <Check className="h-3 w-3 text-sky-400" />}
+                            {option.title}
+                          </span>
+                          <span className="mt-0.5 block text-[length:var(--fs-xs)] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                            {option.desc}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <label className="block min-w-0">
+                    <span className={labelClass} style={{ color: 'var(--text-secondary)' }}>工作目录（选填）</span>
+                    <input
+                      value={form.work_dir}
+                      onChange={(e) => { setForm((f) => ({ ...f, work_dir: e.target.value })); setError(''); setNotice(''); setWizardError('') }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) wizardNext() }}
+                      placeholder={defaultWorkDir ? `默认 ${defaultWorkDir}` : '留空则由系统按 ID 分配'}
+                      className={`${fieldClass} font-mono`}
+                      style={fieldStyle}
+                    />
+                  </label>
+                </>
+              )}
+            </div>
+
+            {wizardError && (
+              <div className="mt-2 flex items-start gap-1.5 text-[length:var(--fs-sm)] text-red-400">
+                <AlertTriangle className="mt-0.5 h-3 w-3 flex-shrink-0" />
+                <span>{wizardError}</span>
+              </div>
+            )}
+
+            <div className="mt-3 flex items-center gap-2 border-t border-[var(--border-color)] pt-3">
+              <button
+                type="button"
+                onClick={() => gotoTab(wizardStep - 1)}
+                disabled={wizardStep === 0}
+                className="inline-flex h-7 items-center rounded-md border px-2.5 text-[length:var(--fs-md)] transition-colors enabled:hover:bg-[var(--bg-hover)] disabled:opacity-40"
+                style={{ borderColor: 'var(--border-color-strong)', color: 'var(--text-secondary)' }}
+              >
+                上一步
+              </button>
+              <button
+                type="button"
+                onClick={() => { resetForm(); resetWizard() }}
+                disabled={!formDirty || submitting}
+                className="inline-flex h-7 items-center rounded-md px-2.5 text-[length:var(--fs-md)] transition-colors enabled:hover:bg-[var(--bg-hover)] enabled:hover:text-[var(--text-primary)] disabled:opacity-40"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                清空
+              </button>
+              <span className="flex-1" />
+              <PrimaryActionButton
+                type="button"
+                onClick={wizardNext}
+                disabled={submitting}
+                icon={submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : wizardStep === ADMIN_USER_WIZARD_STEPS.length - 1 ? <Check className="h-3.5 w-3.5" /> : <ArrowRight className="h-3.5 w-3.5" />}
+              >
+                {submitting ? '创建中…' : wizardStep === ADMIN_USER_WIZARD_STEPS.length - 1 ? '创建员工' : '下一步'}
+              </PrimaryActionButton>
+            </div>
           </div>
 
-          <div className="space-y-2">
+          <div className="flex flex-col rounded-lg border p-3" data-tour="admin-users-bulk" style={{ background: 'var(--bg-tertiary)', borderColor: 'var(--border-color)' }}>
+            <div className="mb-3 flex items-center gap-2">
+              <span className="inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md border border-sky-500/25 bg-sky-500/10 text-sky-400">
+                <Upload className="h-3.5 w-3.5" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>批量导入</div>
+                <div className="text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>每行一个员工，一次性创建多个账号</div>
+              </div>
+            </div>
             <textarea
               value={bulkText}
               onChange={(e) => { setBulkText(e.target.value); setError(''); setNotice('') }}
-              placeholder={'每行一个员工: ID,密码,角色,显示名称,群组,工作目录\nzhangsan,pass123,user,张三,研发组\nlisi,pass123,user,李四,运营组,/home/lisi/cc-workspace'}
-              className="min-h-28 w-full resize-y rounded-md border px-3 py-2 font-mono text-[12px] leading-relaxed outline-none focus:border-blue-500/50"
+              placeholder={'ID,密码,角色,显示名称,工作目录(选填)\nzhangsan,pass123,user,张三,'}
+              className="min-h-32 w-full flex-1 resize-y rounded-md border px-2.5 py-2 font-mono text-[length:var(--fs-md)] leading-relaxed outline-none transition-colors focus:border-blue-500/50"
               style={fieldStyle}
             />
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                支持逗号或空白分隔；群组不存在时会自动创建。
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-color)] pt-3">
+              <span className="text-[length:var(--fs-xs)] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                列顺序 ID / 密码 / 角色 / 显示名称 / 工作目录，逗号或空白分隔；角色仅支持 admin 或 user。
+                {bulkRowCount > 0 && <span className="ml-1.5 text-sky-400">已识别 {bulkRowCount} 行</span>}
               </span>
               <button
                 type="button"
                 onClick={submitBulk}
-                disabled={bulkSubmitting}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                disabled={bulkSubmitting || !bulkText.trim()}
+                className="inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-md border border-[var(--border-color-strong)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-40"
+                style={{ color: 'var(--text-primary)' }}
               >
                 {bulkSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
                 批量增加
@@ -1087,11 +1170,10 @@ function AdminUsersPanel() {
         </div>
 
         <div className="mt-4 overflow-x-auto">
-          <table className="min-w-[1080px] w-full border-separate border-spacing-y-1 text-left text-[12px]">
+          <table className="min-w-[1080px] w-full border-separate border-spacing-y-1 text-left text-[length:var(--fs-md)]">
             <thead style={{ color: 'var(--text-muted)' }}>
               <tr>
                 <th className="px-2 py-1 font-medium">员工</th>
-                <th className="px-2 py-1 font-medium">群组</th>
                 <th className="px-2 py-1 font-medium">角色</th>
                 <th className="px-2 py-1 font-medium">会话</th>
                 <th className="px-2 py-1 font-medium">平均提示词</th>
@@ -1104,30 +1186,15 @@ function AdminUsersPanel() {
               {activeUsers.map((u) => {
                 const stats = u.stats || {}
                 const deleting = deletingId === u.id
-                const updatingGroup = updatingUserId === u.id
                 return (
                   <tr key={u.id} className="rounded-md" style={{ background: 'var(--input-bg)' }}>
                     <td className="max-w-[180px] rounded-l-md px-2 py-2">
                       <div className="truncate font-medium" style={{ color: 'var(--text-primary)' }}>{u.display_name || u.id}</div>
-                      <div className="truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>{u.id}</div>
+                      <div className="truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>{u.id}</div>
                     </td>
                     <td className="px-2 py-2">
-                      <div className="flex items-center gap-1.5">
-                        <select
-                          value={u.group_id || defaultGroupId}
-                          disabled={updatingGroup}
-                          onChange={(e) => updateEmployeeGroup(u, e.target.value)}
-                          className="h-8 min-w-[120px] rounded-md border px-2 text-[11px] outline-none focus:border-blue-500/50 disabled:opacity-60"
-                          style={fieldStyle}
-                        >
-                          {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                        </select>
-                        {updatingGroup && <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--text-muted)' }} />}
-                      </div>
-                    </td>
-                    <td className="px-2 py-2">
-                      <span className={`inline-flex rounded-md border px-2 py-0.5 text-[11px] ${u.role === 'admin' ? 'border-amber-500/25 bg-amber-500/10 text-amber-400' : u.role === 'developer' ? 'border-violet-500/25 bg-violet-500/10 text-violet-400' : 'border-cyan-500/25 bg-cyan-500/10 text-cyan-400'}`}>
-                        {u.role === 'admin' ? '管理员' : u.role === 'developer' ? '开发者' : '成员'}
+                      <span className={`inline-flex rounded-md border px-2 py-0.5 text-[length:var(--fs-sm)] ${u.role === 'admin' ? 'border-amber-500/25 bg-amber-500/10 text-amber-400' : 'border-cyan-500/25 bg-cyan-500/10 text-cyan-400'}`}>
+                        {u.role === 'admin' ? '管理员' : '普通用户'}
                       </span>
                     </td>
                     <td className="px-2 py-2 tabular-nums" style={{ color: 'var(--text-secondary)' }}>
@@ -1137,7 +1204,7 @@ function AdminUsersPanel() {
                       {formatPromptLength(stats.prompt_length_avg)} 字
                     </td>
                     <td className="max-w-[250px] px-2 py-2">
-                      <div className="truncate font-mono text-[11px]" title={u.work_dir || ''} style={{ color: 'var(--text-muted)' }}>
+                      <div className="truncate font-mono text-[length:var(--fs-sm)]" title={u.work_dir || ''} style={{ color: 'var(--text-muted)' }}>
                         {u.work_dir || '-'}
                       </div>
                     </td>
@@ -1148,7 +1215,7 @@ function AdminUsersPanel() {
                           type="button"
                           onClick={() => openEdit(u)}
                           title="编辑员工"
-                          className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-500/20 px-2 text-[11px] text-blue-400 transition-colors hover:bg-blue-500/10"
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-500/20 px-2 text-[length:var(--fs-sm)] text-blue-400 transition-colors hover:bg-blue-500/10"
                         >
                           <Pencil className="h-3.5 w-3.5" />
                           编辑
@@ -1158,7 +1225,7 @@ function AdminUsersPanel() {
                           onClick={() => deleteEmployee(u)}
                           disabled={deleting}
                           title="删除员工账号"
-                          className="inline-flex h-7 items-center gap-1 rounded-md border border-red-500/20 px-2 text-[11px] text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-red-500/20 px-2 text-[length:var(--fs-sm)] text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
                         >
                           {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                           删除
@@ -1176,33 +1243,32 @@ function AdminUsersPanel() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => { if (!savingEdit) setEditingUser(null) }} />
           <div className="relative w-[460px] max-w-[calc(100vw-32px)] rounded-2xl p-6 shadow-2xl" style={{ background: 'var(--modal-bg)', border: '1px solid var(--border-color)' }}>
-            <h3 className="mb-4 text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>编辑员工 · {editingUser.display_name || editingUser.id}</h3>
+            <h3 className="mb-4 text-[length:var(--fs-2xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>编辑员工 · {editingUser.display_name || editingUser.id}</h3>
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>显示名称</label>
-                <input value={editForm.display_name} onChange={(e) => setEditForm((f) => ({ ...f, display_name: e.target.value }))} className="h-9 w-full rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50" style={fieldStyle} />
+                <label className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>显示名称</label>
+                <input value={editForm.display_name} onChange={(e) => setEditForm((f) => ({ ...f, display_name: e.target.value }))} className="h-9 w-full rounded-md border px-3 text-[length:var(--fs-md)] outline-none focus:border-blue-500/50" style={fieldStyle} />
               </div>
               <div>
-                <label className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>角色</label>
-                <select value={editForm.role} onChange={(e) => { const v = e.target.value; setEditForm((f) => ({ ...f, role: v === 'admin' || v === 'developer' ? v : 'user' })) }} className="h-9 w-full rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50" style={fieldStyle}>
-                  <option value="user">成员</option>
-                  <option value="developer">开发者</option>
+                <label className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>角色</label>
+                <select value={editForm.role} onChange={(e) => { const v = e.target.value; setEditForm((f) => ({ ...f, role: v === 'admin' ? 'admin' : 'user' })) }} className="h-9 w-full rounded-md border px-3 text-[length:var(--fs-md)] outline-none focus:border-blue-500/50" style={fieldStyle}>
+                  <option value="user">普通用户</option>
                   <option value="admin">管理员</option>
                 </select>
               </div>
               <div>
-                <label className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>工作目录（绝对路径，留空不改）</label>
-                <input value={editForm.work_dir} onChange={(e) => setEditForm((f) => ({ ...f, work_dir: e.target.value }))} placeholder={editingUser.work_dir || ''} className="h-9 w-full rounded-md border px-3 font-mono text-[11px] outline-none focus:border-blue-500/50" style={fieldStyle} />
+                <label className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>工作目录（绝对路径，留空不改）</label>
+                <input value={editForm.work_dir} onChange={(e) => setEditForm((f) => ({ ...f, work_dir: e.target.value }))} placeholder={editingUser.work_dir || ''} className="h-9 w-full rounded-md border px-3 font-mono text-[length:var(--fs-sm)] outline-none focus:border-blue-500/50" style={fieldStyle} />
               </div>
               <div>
-                <label className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>重置密码（至少 6 位，留空不改）</label>
-                <input type="password" value={editForm.password} onChange={(e) => setEditForm((f) => ({ ...f, password: e.target.value }))} placeholder="留空则不修改" className="h-9 w-full rounded-md border px-3 text-[12px] outline-none focus:border-blue-500/50" style={fieldStyle} />
+                <label className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>重置密码（至少 6 位，留空不改）</label>
+                <input type="password" value={editForm.password} onChange={(e) => setEditForm((f) => ({ ...f, password: e.target.value }))} placeholder="留空则不修改" className="h-9 w-full rounded-md border px-3 text-[length:var(--fs-md)] outline-none focus:border-blue-500/50" style={fieldStyle} />
               </div>
             </div>
-            {error && <div className="mt-3 text-[11px] text-red-400">{error}</div>}
+            {error && <div className="mt-3 text-[length:var(--fs-sm)] text-red-400">{error}</div>}
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => setEditingUser(null)} disabled={savingEdit} className="h-9 px-4 rounded-xl text-[13px] border transition-colors" style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}>取消</button>
-              <button type="button" onClick={submitEdit} disabled={savingEdit} className="inline-flex h-9 items-center gap-1.5 px-5 rounded-xl text-[13px] btn-primary transition-colors">
+              <button type="button" onClick={() => setEditingUser(null)} disabled={savingEdit} className="h-9 px-4 rounded-xl text-[length:var(--fs-lg)] border transition-colors" style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}>取消</button>
+              <button type="button" onClick={submitEdit} disabled={savingEdit} className="inline-flex h-9 items-center gap-1.5 px-5 rounded-xl text-[length:var(--fs-lg)] btn-primary transition-colors">
                 {savingEdit ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} 保存
               </button>
             </div>
@@ -1238,12 +1304,12 @@ function BackendSection({
       <div className="flex min-h-12 items-center justify-between border-b border-[var(--border-color)] px-4">
         <div className="flex min-w-0 items-center gap-2">
           <Terminal className="h-4 w-4 flex-shrink-0" style={{ color: accent }} />
-          <h3 className="truncate text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</h3>
-          <span className="rounded-md border border-[var(--border-color)] px-2 py-0.5 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+          <h3 className="truncate text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</h3>
+          <span className="rounded-md border border-[var(--border-color)] px-2 py-0.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-secondary)' }}>
             {backend?.backend_name || '-'}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+        <div className="flex items-center gap-3 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
           <span>{backend?.active_window_count ?? 0} 活跃</span>
           <span>{backend?.window_count ?? 0} Open</span>
           <span>{backend?.working_count ?? 0} Busy</span>
@@ -1253,7 +1319,7 @@ function BackendSection({
       </div>
 
       {backend?.error && (
-        <div className="flex items-start gap-2 border-b border-red-500/20 bg-red-500/5 px-4 py-3 text-[12px] text-red-400">
+        <div className="flex items-start gap-2 border-b border-red-500/20 bg-red-500/5 px-4 py-3 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
           <span className="break-all">{backend.error}</span>
         </div>
@@ -1269,7 +1335,7 @@ function BackendSection({
             <thead>
               <tr className="border-b border-[var(--border-color)] bg-[var(--bg-primary)]">
                 {['状态', instanceLabel, '会话', '所属', '运行时', '活动', '5小时提问', '操作'].map((h) => (
-                  <th key={h} className="px-4 py-2.5 text-left text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>{h}</th>
+                  <th key={h} className="px-4 py-2.5 text-left text-[length:var(--fs-md)] font-semibold" style={{ color: 'var(--text-secondary)' }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1287,10 +1353,10 @@ function BackendSection({
                   <tr key={`${win.backend_key}:${win.session_id}`} className="border-b border-[var(--border-color)] last:border-b-0 hover:bg-[var(--bg-hover)]">
                     <td className="px-4 py-3 align-top"><StatusPill win={win} /></td>
                     <td className="px-4 py-3 align-top">
-                      <div className="max-w-[170px] truncate text-[13px] font-medium" title={win.tmux_window_name} style={{ color: 'var(--text-primary)' }}>
+                      <div className="max-w-[170px] truncate text-[length:var(--fs-lg)] font-medium" title={win.tmux_window_name} style={{ color: 'var(--text-primary)' }}>
                         {win.tmux_window_name}
                       </div>
-                      <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                         {isHarness ? `PID ${win.pid || '-'}` : `index ${win.tmux_window_index ?? '-'}`}
                       </div>
                     </td>
@@ -1302,17 +1368,17 @@ function BackendSection({
                               to={sessionHref}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="block max-w-[220px] truncate text-[13px] font-medium text-[var(--text-primary)] hover:text-emerald-400 hover:underline"
+                              className="block max-w-[220px] truncate text-[length:var(--fs-lg)] font-medium text-[var(--text-primary)] hover:text-emerald-400 hover:underline"
                               title={ctx.session_name}
                             >
                               {ctx.session_name}
                             </Link>
                           ) : (
-                            <div className="max-w-[220px] truncate text-[13px] font-medium" title={ctx.session_name} style={{ color: 'var(--text-primary)' }}>
+                            <div className="max-w-[220px] truncate text-[length:var(--fs-lg)] font-medium" title={ctx.session_name} style={{ color: 'var(--text-primary)' }}>
                               {ctx.session_name}
                             </div>
                           )}
-                          <div className="mt-1 flex max-w-[220px] items-center gap-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                          <div className="mt-1 flex max-w-[220px] items-center gap-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                             {sessionHref ? (
                               <Link
                                 to={sessionHref}
@@ -1332,15 +1398,15 @@ function BackendSection({
                         </>
                       ) : (
                         <>
-                          <div className="max-w-[220px] truncate text-[13px] font-medium" title={win.session_id} style={{ color: 'var(--text-primary)' }}>
+                          <div className="max-w-[220px] truncate text-[length:var(--fs-lg)] font-medium" title={win.session_id} style={{ color: 'var(--text-primary)' }}>
                             {compactId(win.session_id)}
                           </div>
-                          <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>无 DB 记录</div>
+                          <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>无 DB 记录</div>
                         </>
                       )}
                     </td>
                     <td className="px-4 py-3 align-top">
-                      <div className="max-w-[230px] truncate text-[13px]" title={ctx?.project?.name || ''}>
+                      <div className="max-w-[230px] truncate text-[length:var(--fs-lg)]" title={ctx?.project?.name || ''}>
                         {sessionHref && ctx?.project?.name ? (
                           <Link
                             to={sessionHref}
@@ -1354,7 +1420,7 @@ function BackendSection({
                           <span style={{ color: 'var(--text-primary)' }}>{ctx?.project?.name || '-'}</span>
                         )}
                       </div>
-                      <div className="mt-1 max-w-[230px] truncate text-[11px]" title={subject?.title || ''} style={{ color: 'var(--text-muted)' }}>
+                      <div className="mt-1 max-w-[230px] truncate text-[length:var(--fs-sm)]" title={subject?.title || ''} style={{ color: 'var(--text-muted)' }}>
                         {subject ? (
                           <>
                             {subject.type === 'research' ? '研究' : '任务'}:{' '}
@@ -1374,33 +1440,33 @@ function BackendSection({
                         ) : '-'}
                       </div>
                       {subject?.role && (
-                        <div className="mt-1 text-[11px] text-emerald-400">{subject.role}</div>
+                        <div className="mt-1 text-[length:var(--fs-sm)] text-emerald-400">{subject.role}</div>
                       )}
                     </td>
                     <td className="px-4 py-3 align-top">
-                      <div className="text-[13px]" style={{ color: 'var(--text-primary)' }}>
+                      <div className="text-[length:var(--fs-lg)]" style={{ color: 'var(--text-primary)' }}>
                         {win.tmux_open ? `PID ${win.pid || '-'}` : isHarness ? 'Runtime 已关闭' : 'tmux 已关闭'}
                       </div>
                       {!isHarness && (
-                        <div className="mt-1 max-w-[180px] truncate text-[11px]" title={win.pane_current_command || ''} style={{ color: 'var(--text-muted)' }}>
+                        <div className="mt-1 max-w-[180px] truncate text-[length:var(--fs-sm)]" title={win.pane_current_command || ''} style={{ color: 'var(--text-muted)' }}>
                           cmd {win.pane_current_command || '-'}
                         </div>
                       )}
-                      <div className="mt-1 max-w-[180px] truncate text-[11px]" title={win.agent_session_id || ''} style={{ color: 'var(--text-muted)' }}>
+                      <div className="mt-1 max-w-[180px] truncate text-[length:var(--fs-sm)]" title={win.agent_session_id || ''} style={{ color: 'var(--text-muted)' }}>
                         agent {compactId(win.agent_session_id)}
                       </div>
-                      <div className="mt-1 text-[11px]" style={{ color: win.tui_agent_alive ? '#34d399' : 'var(--text-muted)' }}>
+                      <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: win.tui_agent_alive ? '#34d399' : 'var(--text-muted)' }}>
                         {isHarness
                           ? (win.tui_agent_alive ? 'Runtime 进程存活' : win.tmux_open ? 'Runtime 进程未响应' : 'Runtime 未运行')
                           : (win.tui_agent_alive ? 'tui agent isAlive' : win.tmux_open ? 'tui agent not isAlive' : 'tmux not open')}
                       </div>
                     </td>
                     <td className="px-4 py-3 align-top">
-                      <div className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{formatRelative(win.last_activity_at)}</div>
-                      <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>{formatAbsolute(win.last_activity_at)}</div>
+                      <div className="text-[length:var(--fs-lg)]" style={{ color: 'var(--text-primary)' }}>{formatRelative(win.last_activity_at)}</div>
+                      <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{formatAbsolute(win.last_activity_at)}</div>
                     </td>
                     <td className="px-4 py-3 align-top">
-                      <span className="inline-flex h-7 min-w-10 items-center justify-center rounded-md border border-[var(--border-color)] px-2 text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      <span className="inline-flex h-7 min-w-10 items-center justify-center rounded-md border border-[var(--border-color)] px-2 text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>
                         {win.question_count_5h}
                       </span>
                     </td>
@@ -1416,7 +1482,7 @@ function BackendSection({
                           {closing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
                         </button>
                       ) : (
-                        <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>-</span>
+                        <span className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>-</span>
                       )}
                     </td>
                   </tr>
@@ -1475,6 +1541,8 @@ function ModelPromptLimitsCard() {
   const [savingCompactTokenKey, setSavingCompactTokenKey] = useState<string | null>(null)
   const [savingAutoTitle, setSavingAutoTitle] = useState(false)
   const [savingOrderKey, setSavingOrderKey] = useState<string | null>(null)
+  const [draggingModelKey, setDraggingModelKey] = useState<string | null>(null)
+  const [dragOverModelKey, setDragOverModelKey] = useState<string | null>(null)
   const [error, setError] = useState('')
 
   const fieldKey = (modelKey: string, field: keyof ModelPromptLimitConfig) => `${modelKey}::${field}`
@@ -1742,17 +1810,9 @@ function ModelPromptLimitsCard() {
     }
   }
 
-  const moveModel = async (row: ModelPromptLimitRow, direction: -1 | 1) => {
-    if (!payload) return
-    const index = payload.models.findIndex(item => item.key === row.key)
-    const nextIndex = index + direction
-    if (index < 0 || nextIndex < 0 || nextIndex >= payload.models.length) return
-    const reordered = payload.models.slice()
-    const [picked] = reordered.splice(index, 1)
-    reordered.splice(nextIndex, 0, picked)
-    const previous = payload
-    setPayload({ ...payload, models: reordered })
-    setSavingOrderKey(row.key)
+  const persistModelOrder = async (reordered: ModelPromptLimitRow[], previous: ModelPromptLimitsPayload, savingKey: string) => {
+    setPayload({ ...previous, models: reordered })
+    setSavingOrderKey(savingKey)
     try {
       const next = await api('/api/admin/settings/model-display-order', {
         method: 'PUT',
@@ -1769,24 +1829,47 @@ function ModelPromptLimitsCard() {
     }
   }
 
+  const moveModel = async (row: ModelPromptLimitRow, direction: -1 | 1) => {
+    if (!payload) return
+    const index = payload.models.findIndex(item => item.key === row.key)
+    const nextIndex = index + direction
+    if (index < 0 || nextIndex < 0 || nextIndex >= payload.models.length) return
+    const reordered = payload.models.slice()
+    const [picked] = reordered.splice(index, 1)
+    reordered.splice(nextIndex, 0, picked)
+    await persistModelOrder(reordered, payload, row.key)
+  }
+
+  const reorderModelByDrop = async (sourceKey: string, targetKey: string) => {
+    if (!payload || sourceKey === targetKey || savingOrderKey) return
+    const sourceIndex = payload.models.findIndex(item => item.key === sourceKey)
+    const targetIndex = payload.models.findIndex(item => item.key === targetKey)
+    if (sourceIndex < 0 || targetIndex < 0) return
+    const reordered = payload.models.slice()
+    const [picked] = reordered.splice(sourceIndex, 1)
+    const insertIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+    reordered.splice(insertIndex, 0, picked)
+    await persistModelOrder(reordered, payload, sourceKey)
+  }
+
   return (
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4" data-tour="admin-section-settings">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>模型创建限制</h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>模型创建限制</h3>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             每个模型 4 个提问硬限制只阻止创建新 Session，不影响已有 Session 继续提问；tmux 窗口数量是软提醒，默认 12。
             代理模式推荐「直连」或「环境变量代理」(proxychains 对部分 CLI 如 Codex 无效)。
           </div>
         </div>
         <button type="button" onClick={load} disabled={loading}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           刷新
         </button>
       </div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -1795,8 +1878,8 @@ function ModelPromptLimitsCard() {
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2.5"
         style={{ borderColor: 'rgba(59,130,246,0.30)', background: 'rgba(59,130,246,0.06)' }}>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>全局默认模型</div>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>全局默认模型</div>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             新建 Session、快捷新建、小莫助理在「项目未设默认模型」时回落到此模型。留空则恢复系统内置默认（GPT-5.5 / 小莫 MiniMax 启发式）。
           </div>
         </div>
@@ -1805,7 +1888,7 @@ function ModelPromptLimitsCard() {
             value={globalDefaultSel}
             disabled={savingGlobal || loading}
             onChange={e => saveGlobalDefault(e.target.value)}
-            className="h-8 max-w-[220px] rounded-md border px-2 text-[12px] disabled:opacity-60"
+            className="h-8 max-w-[220px] rounded-md border px-2 text-[length:var(--fs-md)] disabled:opacity-60"
             style={{ borderColor: 'var(--input-border)', background: 'var(--input-bg)', color: 'var(--text-primary)' }}
           >
             <option value="">未设置（系统默认）</option>
@@ -1819,11 +1902,11 @@ function ModelPromptLimitsCard() {
       <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2.5"
         style={{ borderColor: autoTitleEnabled ? 'rgba(16,185,129,0.36)' : 'var(--input-border)', background: autoTitleEnabled ? 'rgba(16,185,129,0.08)' : 'var(--input-bg)' }}>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <div className="flex items-center gap-2 text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             <Sparkles className="h-3.5 w-3.5" style={{ color: autoTitleEnabled ? '#10b981' : 'var(--text-muted)' }} />
             <span>自动生成会话标题</span>
           </div>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             后端收到 agent 明确产出的标题事件时自动改名；codex 等后端由系统周期兜底生成。默认开启。
           </div>
         </div>
@@ -1839,12 +1922,12 @@ function ModelPromptLimitsCard() {
             background: autoTitleEnabled ? 'rgba(16,185,129,0.10)' : 'var(--bg-card)',
             borderColor: autoTitleEnabled ? 'rgba(16,185,129,0.40)' : 'var(--input-border)',
           }}>
-          <span className="text-[12px]" style={{ color: autoTitleEnabled ? '#16a34a' : 'var(--text-muted)' }}>
+          <span className="text-[length:var(--fs-md)]" style={{ color: autoTitleEnabled ? '#16a34a' : 'var(--text-muted)' }}>
             {autoTitleEnabled ? '已开启' : '已关闭'}
           </span>
         </ToggleSwitch>
       </div>
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mb-4 divide-y divide-[var(--border-color)]">
         {(payload?.models || []).map((row, index) => {
           const saving = savingKey === row.key
           const savingProxy = savingProxyKey === row.key
@@ -1857,25 +1940,66 @@ function ModelPromptLimitsCard() {
           const savingCompactToken = savingCompactTokenKey === row.key
           const savingOrder = savingOrderKey === row.key
           const isClaudeCode = row.backend === 'tmux-claude-code'
+          const isCodex = row.backend === 'tmux-codex'
           // DSH (deepseek-harness) 无视代理配置, 不给选择器.
           const isDsh = row.backend === 'deepseek-harness'
           return (
             <div key={row.key}
-              className="rounded-lg border px-3 py-2.5"
+              draggable={!savingOrderKey}
+              onDragStart={event => {
+                if ((event.target as HTMLElement).closest('input,select,button')) {
+                  event.preventDefault()
+                  return
+                }
+                event.dataTransfer.effectAllowed = 'move'
+                event.dataTransfer.setData('text/plain', row.key)
+                setDraggingModelKey(row.key)
+              }}
+              onDragOver={event => {
+                if (!draggingModelKey || draggingModelKey === row.key || savingOrderKey) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDragOverModelKey(row.key)
+              }}
+              onDragLeave={event => {
+                if (event.currentTarget === event.target) setDragOverModelKey(null)
+              }}
+              onDrop={async event => {
+                event.preventDefault()
+                const sourceKey = event.dataTransfer.getData('text/plain') || draggingModelKey
+                setDragOverModelKey(null)
+                setDraggingModelKey(null)
+                if (sourceKey) await reorderModelByDrop(sourceKey, row.key)
+              }}
+              onDragEnd={() => {
+                setDraggingModelKey(null)
+                setDragOverModelKey(null)
+              }}
+              className={`group px-2 py-2.5 transition-colors first:pt-1 last:pb-1 ${
+                dragOverModelKey === row.key ? 'bg-blue-500/10' : ''
+              } ${draggingModelKey === row.key ? 'opacity-60' : ''}`}
               style={{
-                background: configured ? 'rgba(59,130,246,0.08)' : 'var(--input-bg)',
-                borderColor: configured ? 'rgba(59,130,246,0.30)' : 'var(--input-border)',
+                borderLeft: dragOverModelKey === row.key ? '3px solid rgba(59,130,246,0.65)' : '3px solid transparent',
               }}>
-              <div className="mb-2 flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="truncate text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                    {row.title || row.label}
-                  </div>
-                  <div className="truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                    {row.key} · {row.sub}
-                  </div>
-                  <div className="mt-1 truncate font-mono text-[10px]" style={{ color: 'var(--text-muted)' }} title={row.config_path || ''}>
-                    {row.config_path || '未找到配置文件路径'}
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-start gap-2">
+                  <span
+                    className="mt-0.5 inline-flex h-6 w-5 shrink-0 cursor-grab items-center justify-center text-[var(--text-muted)] opacity-60 transition-opacity group-hover:opacity-100 active:cursor-grabbing"
+                    title="拖动调整模型顺序"
+                    aria-label="拖动调整模型顺序"
+                  >
+                    <GripVertical className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0 leading-tight">
+                    <div className="truncate text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>
+                      {row.title || row.label}
+                    </div>
+                    <div className="truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
+                      {row.key} · {row.sub}
+                      <span className="ml-1 font-mono opacity-75" title={row.config_path || ''}>
+                        · {row.config_path || '未找到配置文件路径'}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -1891,18 +2015,28 @@ function ModelPromptLimitsCard() {
                     className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-35">
                     {savingOrder ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDown className="h-3.5 w-3.5" />}
                   </button>
-                  <span className="rounded border px-1.5 py-0.5 text-[10px]"
+                  <span className="rounded border px-1.5 py-0.5 text-[length:var(--fs-xs)]"
                     style={{ color: configured ? '#3b82f6' : 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
                     {configured ? '已配置' : '默认'}
                   </span>
+                  <button type="button" title="保存限制" onClick={() => save(row)} disabled={saving || loading}
+                    className="inline-flex h-7 items-center justify-center gap-1 rounded bg-blue-600 px-2 text-[length:var(--fs-xs)] text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                    保存
+                  </button>
+                  <button type="button" title="恢复默认限制" onClick={() => setDefaults(row)} disabled={saving || loading || !configured}
+                    className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] px-2 text-[length:var(--fs-xs)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-40">
+                    <RotateCcw className="h-3 w-3" />
+                    默认
+                  </button>
                 </div>
               </div>
-              <div className="mb-2 grid grid-cols-2 gap-2">
+              <div className="mb-2 grid grid-cols-2 gap-1.5 sm:grid-cols-5">
                 {limitFields.map(field => {
                   const isTmux = field.key === 'tmuxWindows'
                   return (
-                    <label key={field.key} className={isTmux ? 'col-span-2' : ''}>
-                      <div className="mb-1 flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    <label key={field.key} className={isTmux ? 'col-span-2 md:col-span-1' : ''}>
+                      <div className="mb-0.5 flex items-center justify-between gap-1 text-[length:var(--fs-2xs)]" style={{ color: 'var(--text-muted)' }}>
                         <span>{field.label}</span>
                         <span>{field.hint}</span>
                       </div>
@@ -1912,121 +2046,108 @@ function ModelPromptLimitsCard() {
                         inputMode="numeric"
                         min={0}
                         placeholder={field.placeholder}
-                        className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none"
+                        className="h-7 w-full rounded border border-[var(--input-border)] bg-[var(--bg-card)] px-1.5 text-[length:var(--fs-sm)] text-[var(--text-primary)] outline-none"
                       />
                     </label>
                   )
                 })}
               </div>
-              {isDsh ? (
-                <div className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
-                  style={{ background: 'var(--bg-card)', borderColor: 'var(--input-border)' }}>
-                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>代理模式</span>
-                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>DSH 不使用代理 (直连)</span>
-                </div>
-              ) : (
-              <div className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
-                style={{
-                  background: proxyMode !== 'direct' ? 'rgba(16,185,129,0.10)' : 'var(--bg-card)',
-                  borderColor: proxyMode !== 'direct' ? 'rgba(16,185,129,0.36)' : 'var(--input-border)',
-                }}>
-                <span className="text-[11px]" style={{ color: proxyMode !== 'direct' ? '#16a34a' : 'var(--text-muted)' }}>
-                  代理模式
-                </span>
-                <select
-                  value={proxyMode}
-                  disabled={savingProxy || loading}
-                  onChange={e => setProxyMode(row, e.target.value)}
-                  className="h-7 rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-1.5 text-[11px]"
-                  style={{ color: 'var(--text-primary)' }}>
-                  <option value="direct">直连</option>
-                  <option value="env">环境变量代理</option>
-                  <option value="proxychains">proxychains 代理</option>
-                  <option value="env_proxychains">环境变量代理 + proxychains</option>
-                </select>
-              </div>
-              )}
-              {isClaudeCode && (
+              <div className="mb-2 grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+                {isDsh ? (
+                  <div className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
+                    style={{ background: 'var(--bg-card)', borderColor: 'var(--input-border)' }}>
+                    <span className="text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>代理模式</span>
+                    <span className="truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>DSH 直连</span>
+                  </div>
+                ) : (
+                  <div className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
+                    style={{
+                      background: proxyMode !== 'direct' ? 'rgba(16,185,129,0.10)' : 'var(--bg-card)',
+                      borderColor: proxyMode !== 'direct' ? 'rgba(16,185,129,0.36)' : 'var(--input-border)',
+                    }}>
+                    <span className="shrink-0 text-[length:var(--fs-xs)]" style={{ color: proxyMode !== 'direct' ? '#16a34a' : 'var(--text-muted)' }}>
+                      代理模式
+                    </span>
+                    <select
+                      value={proxyMode}
+                      disabled={savingProxy || loading}
+                      onChange={e => setProxyMode(row, e.target.value)}
+                      className="h-6 min-w-0 rounded border border-[var(--input-border)] bg-[var(--input-bg)] px-1 text-[length:var(--fs-xs)]"
+                      style={{ color: 'var(--text-primary)' }}>
+                      <option value="direct">直连</option>
+                      <option value="env">环境变量代理</option>
+                      <option value="proxychains">proxychains 代理</option>
+                      <option value="env_proxychains">环境变量代理 + proxychains</option>
+                    </select>
+                  </div>
+                )}
+                {(isClaudeCode || isCodex) && (
+                  <ToggleSwitch
+                    checked={capture}
+                    disabled={savingCapture || loading}
+                    loading={savingCapture}
+                    onChange={next => toggleCapture(row, next)}
+                    switchPosition="end"
+                    activeColor="#00ff41"
+                    className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
+                    style={{
+                      background: capture ? 'rgba(0,255,65,0.10)' : 'var(--bg-card)',
+                      borderColor: capture ? 'rgba(0,255,65,0.40)' : 'var(--input-border)',
+                    }}>
+                    <span className="truncate text-[length:var(--fs-xs)]" style={{ color: capture ? '#00ff41' : 'var(--text-muted)' }}>
+                      {capture ? '实时输出 · 数字雨' : '捕获实时输出'}
+                    </span>
+                  </ToggleSwitch>
+                )}
+                {/* 手动上下文限制 (auto-compact): 开关 + 触发压缩的 token 阈值. */}
                 <ToggleSwitch
-                  checked={capture}
-                  disabled={savingCapture || loading}
-                  loading={savingCapture}
-                  onChange={next => toggleCapture(row, next)}
+                  checked={compactEnabled}
+                  disabled={savingCompact || savingCompactToken || loading}
+                  loading={savingCompact}
+                  onChange={next => toggleCompact(row, next)}
                   switchPosition="end"
-                  activeColor="#00ff41"
-                  className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
+                  activeColor="#f59e0b"
+                  className="flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1"
                   style={{
-                    background: capture ? 'rgba(0,255,65,0.10)' : 'var(--bg-card)',
-                    borderColor: capture ? 'rgba(0,255,65,0.40)' : 'var(--input-border)',
+                    background: compactEnabled ? 'rgba(245,158,11,0.10)' : 'var(--bg-card)',
+                    borderColor: compactEnabled ? 'rgba(245,158,11,0.40)' : 'var(--input-border)',
                   }}>
-                  <span className="text-[11px]" style={{ color: capture ? '#00ff41' : 'var(--text-muted)' }}>
-                    {capture ? '捕获实时输出 · 数字雨' : '捕获实时输出'}
+                  <span className="truncate text-[length:var(--fs-xs)]" style={{ color: compactEnabled ? '#d97706' : 'var(--text-muted)' }}>
+                    {compactEnabled ? '上下文限制 · 已开启' : '手动上下文限制'}
                   </span>
                 </ToggleSwitch>
-              )}
-              {/* 手动上下文限制 (auto-compact): 开关 + 触发压缩的 token 阈值.
-                  claude code → settings.json 的 env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
-                  codex → ~/.codex/<channel>.config.toml 的 model_auto_compact_token_limit. */}
-              <ToggleSwitch
-                checked={compactEnabled}
-                disabled={savingCompact || savingCompactToken || loading}
-                loading={savingCompact}
-                onChange={next => toggleCompact(row, next)}
-                switchPosition="end"
-                activeColor="#f59e0b"
-                className="mb-2 flex items-center justify-between gap-3 rounded-md border px-2 py-1.5"
-                style={{
-                  background: compactEnabled ? 'rgba(245,158,11,0.10)' : 'var(--bg-card)',
-                  borderColor: compactEnabled ? 'rgba(245,158,11,0.40)' : 'var(--input-border)',
-                }}>
-                <span className="text-[11px]" style={{ color: compactEnabled ? '#d97706' : 'var(--text-muted)' }}>
-                  {compactEnabled ? '手动上下文限制 · 已开启' : '手动上下文限制'}
-                </span>
-              </ToggleSwitch>
+              </div>
               {compactEnabled && (
-                <div className="mb-2">
-                  <div className="mb-1 flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                <div className="mb-2 flex items-center gap-2">
+                  <div className="min-w-0 flex-1 text-[length:var(--fs-2xs)]" style={{ color: 'var(--text-muted)' }}>
                     <span>触发压缩的 Token 数</span>
-                    <span className="truncate font-mono" title={isClaudeCode ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'model_auto_compact_token_limit'}>
+                    <span className="ml-1 truncate font-mono opacity-75" title={isClaudeCode ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'model_auto_compact_token_limit'}>
                       {isClaudeCode ? 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' : 'model_auto_compact_token_limit'}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      value={readCompactInput(row)}
-                      onChange={e => updateCompactInput(row, e.target.value)}
-                      inputMode="numeric"
-                      min={0}
-                      placeholder="如 120000"
-                      disabled={savingCompactToken}
-                      className="h-8 min-w-0 flex-1 rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none disabled:opacity-60"
-                    />
-                    <button type="button" title="保存压缩阈值"
-                      onClick={() => saveCompactToken(row)}
-                      disabled={savingCompactToken || loading}
-                      className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-amber-600 px-2.5 text-[12px] text-white transition-colors hover:bg-amber-500 disabled:opacity-60">
-                      {savingCompactToken ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
+                  <input
+                    value={readCompactInput(row)}
+                    onChange={e => updateCompactInput(row, e.target.value)}
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="如 120000"
+                    disabled={savingCompactToken}
+                    className="h-7 w-32 rounded border border-[var(--input-border)] bg-[var(--bg-card)] px-1.5 text-[length:var(--fs-sm)] text-[var(--text-primary)] outline-none disabled:opacity-60"
+                  />
+                  <button type="button" title="保存压缩阈值"
+                    onClick={() => saveCompactToken(row)}
+                    disabled={savingCompactToken || loading}
+                    className="inline-flex h-7 shrink-0 items-center gap-1 rounded bg-amber-600 px-2 text-[length:var(--fs-xs)] text-white transition-colors hover:bg-amber-500 disabled:opacity-60">
+                    {savingCompactToken ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                    保存
+                  </button>
                 </div>
               )}
-              <div className="flex items-center gap-2">
-                <button type="button" title="保存限制" onClick={() => save(row)} disabled={saving || loading}
-                  className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
-                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                  保存
-                </button>
-                <button type="button" title="恢复默认限制" onClick={() => setDefaults(row)} disabled={saving || loading || !configured}
-                  className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-40">
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  默认
-                </button>
-              </div>
             </div>
           )
         })}
         {!loading && payload && payload.models.length === 0 && (
-          <div className="rounded-lg border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
             暂无可配置模型
           </div>
         )}
@@ -2082,19 +2203,19 @@ function AdminAssistantCallbacksPanel() {
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>管理员小莫配置</h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>管理员小莫配置</h3>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             当前管理员的小莫可接收其他用户 Session 完成与失败信号
           </div>
         </div>
         <button type="button" onClick={load} disabled={loading || saving}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           刷新
         </button>
       </div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -2112,10 +2233,10 @@ function AdminAssistantCallbacksPanel() {
           border: `1px solid ${enabled ? 'rgba(16,185,129,0.36)' : 'var(--input-border)'}`,
         }}>
         <span className="block min-w-0">
-          <span className="block text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
+          <span className="block text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>
             接收全站 Session 回调
           </span>
-          <span className="block truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <span className="block truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             小莫 48 小时内活跃时，接收其他用户的完成/失败通知
           </span>
         </span>
@@ -2222,7 +2343,7 @@ function DoubaoFieldInput({
   const showValue = isSecret ? (revealed || showLocal) : true
   return (
     <label className="block" htmlFor={`doubao-${fieldKey}`}>
-      <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>{label}</span>
+      <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{label}</span>
       <div className="relative">
         <input
           id={`doubao-${fieldKey}`}
@@ -2232,7 +2353,7 @@ function DoubaoFieldInput({
           onChange={e => onChange(e.target.value)}
           autoComplete="off"
           spellCheck={false}
-          className="h-8 w-full rounded-md px-2.5 text-[12px]"
+          className="h-8 w-full rounded-md px-2.5 text-[length:var(--fs-md)]"
           style={{
             background: 'var(--input-bg)',
             border: '1px solid var(--input-border)',
@@ -2364,14 +2485,14 @@ function DoubaoSubCard({
     <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
       <div className="mb-3 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <h4 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</h4>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{description}</div>
+          <h4 className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>{title}</h4>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{description}</div>
         </div>
         {!revealed && (
           <button
             type="button"
             onClick={onReveal}
-            className="inline-flex h-7 items-center gap-1 rounded-md border border-[var(--border-color)] px-2 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-[var(--border-color)] px-2 text-[length:var(--fs-sm)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
           >
             <Eye className="h-3 w-3" />
             查看明文
@@ -2380,7 +2501,7 @@ function DoubaoSubCard({
       </div>
 
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-sm)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3 w-3 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -2391,13 +2512,13 @@ function DoubaoSubCard({
           if (isTts && key === 'voiceType') {
             return (
               <label key={key} className="block">
-                <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                   {DOUBAO_FIELD_LABELS[key]}
                 </span>
                 <select
                   value={form.voiceType}
                   onChange={e => update('voiceType')(e.target.value)}
-                  className="h-8 w-full rounded-md px-2 text-[12px]"
+                  className="h-8 w-full rounded-md px-2 text-[length:var(--fs-md)]"
                   style={{
                     background: 'var(--input-bg)',
                     border: '1px solid var(--input-border)',
@@ -2439,7 +2560,7 @@ function DoubaoSubCard({
           type="button"
           onClick={save}
           disabled={saving || testing}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-[12px] font-medium text-white disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-md)] font-medium text-white disabled:opacity-60"
           style={{ background: 'var(--accent, #2563eb)' }}
         >
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
@@ -2449,14 +2570,14 @@ function DoubaoSubCard({
           type="button"
           onClick={test}
           disabled={saving || testing}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
         >
           {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
           测试连接 (记得先保存)
         </button>
         {testResult && (
           <span
-            className="text-[11px]"
+            className="text-[length:var(--fs-sm)]"
             style={{ color: testResult.ok ? '#10b981' : '#f87171' }}
           >
             {testResult.ok ? '✓ ' : '✗ '}{testResult.message}
@@ -2527,7 +2648,7 @@ function AdminDoubaoVoiceCard() {
   if (!masked) {
     return (
       <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
-        <div className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           {loading ? '加载豆包语音配置…' : (error || '暂无数据')}
         </div>
       </section>
@@ -2538,26 +2659,26 @@ function AdminDoubaoVoiceCard() {
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>豆包 ASR / TTS</h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>豆包 ASR / TTS</h3>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             管理中心保存的值优先于环境变量；保存后点击「测试连接」验证
           </div>
         </div>
         <div className="flex items-center gap-2">
           {revealed && (
-            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               明文显示中（{Math.max(0, Math.ceil((revealUntil - Date.now()) / 1000))}s）
             </span>
           )}
           <button type="button" onClick={load} disabled={loading}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
             刷新
           </button>
         </div>
       </div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -2741,21 +2862,21 @@ function AdminLightModelApiCard() {
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             特殊轻模型调用 API
           </h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             仅保存配置; 点击「测试连接」用 add 工具验证 (计算 7+35)
           </div>
         </div>
         <div className="flex items-center gap-2">
           {revealedKey && (
-            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               明文显示中（{Math.max(0, Math.ceil((revealUntil - Date.now()) / 1000))}s）
             </span>
           )}
           <button type="button" onClick={load} disabled={loading}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
             刷新
           </button>
@@ -2763,7 +2884,7 @@ function AdminLightModelApiCard() {
       </div>
 
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -2771,11 +2892,11 @@ function AdminLightModelApiCard() {
 
       <div className="grid gap-3 md:grid-cols-2">
         <label className="block md:col-span-2">
-          <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>类型</span>
+          <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>类型</span>
           <select
             value={type}
             onChange={e => setType(e.target.value as LightModelApiType)}
-            className="h-8 w-full rounded-md px-2 text-[12px]"
+            className="h-8 w-full rounded-md px-2 text-[length:var(--fs-md)]"
             style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
           >
             {LIGHT_MODEL_API_TYPE_OPTIONS.map(opt => (
@@ -2785,7 +2906,7 @@ function AdminLightModelApiCard() {
         </label>
 
         <label className="block md:col-span-2">
-          <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>base_url</span>
+          <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>base_url</span>
           <input
             type="text"
             value={baseUrl}
@@ -2793,13 +2914,13 @@ function AdminLightModelApiCard() {
             placeholder="https://open.bigmodel.cn/api/paas/v4"
             autoComplete="off"
             spellCheck={false}
-            className="h-8 w-full rounded-md px-2.5 text-[12px]"
+            className="h-8 w-full rounded-md px-2.5 text-[length:var(--fs-md)]"
             style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
           />
         </label>
 
         <label className="block md:col-span-2">
-          <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>model</span>
+          <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>model</span>
           <input
             type="text"
             value={model}
@@ -2807,13 +2928,13 @@ function AdminLightModelApiCard() {
             placeholder={LIGHT_MODEL_API_DEFAULT_MODEL}
             autoComplete="off"
             spellCheck={false}
-            className="h-8 w-full rounded-md px-2.5 text-[12px]"
+            className="h-8 w-full rounded-md px-2.5 text-[length:var(--fs-md)]"
             style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
           />
         </label>
 
         <label className="block md:col-span-2">
-          <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>api_key</span>
+          <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>api_key</span>
           <div className="relative">
             <input
               type={revealedKey || apiKeyInput ? 'text' : 'password'}
@@ -2822,7 +2943,7 @@ function AdminLightModelApiCard() {
               placeholder={apiKeyPlaceholder}
               autoComplete="off"
               spellCheck={false}
-              className="h-8 w-full rounded-md px-2.5 pr-9 text-[12px]"
+              className="h-8 w-full rounded-md px-2.5 pr-9 text-[length:var(--fs-md)]"
               style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
             />
             {!revealedKey && (
@@ -2844,7 +2965,7 @@ function AdminLightModelApiCard() {
           type="button"
           onClick={save}
           disabled={saving || loading}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--accent-color)] px-3 text-[12px] text-white hover:opacity-90 disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--accent-color)] px-3 text-[length:var(--fs-md)] text-white hover:opacity-90 disabled:opacity-60"
         >
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
           {savedFlash ? '已保存' : '保存'}
@@ -2856,14 +2977,14 @@ function AdminLightModelApiCard() {
           type="button"
           onClick={test}
           disabled={testing || saving}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
         >
           {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
           测试连接
         </button>
         {testResult && (
           <span
-            className="text-[11px] break-all"
+            className="text-[length:var(--fs-sm)] break-all"
             style={{ color: testResult.ok ? '#10b981' : '#f87171' }}
           >
             {testResult.ok ? '✓ ' : '✗ '}{testResult.message}
@@ -3048,22 +3169,22 @@ function AdminProxyFilesCard() {
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             模型代理
           </h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             模型级代理的两份配置: proxychains (网络层拦截) 与 环境变量代理 (http/https_proxy)
           </div>
         </div>
         <button type="button" onClick={load} disabled={loading}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           刷新
         </button>
       </div>
 
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -3074,11 +3195,11 @@ function AdminProxyFilesCard() {
         <div className="flex flex-col rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
           <div className="mb-2 flex items-center justify-between">
             <div>
-              <div className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>proxychains 配置</div>
-              <div className="break-all text-[11px]" style={{ color: 'var(--text-muted)' }}>{meta?.modelPath || '~/proxychains_config_for_llm_models.conf'}</div>
+              <div className="text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>proxychains 配置</div>
+              <div className="break-all text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{meta?.modelPath || '~/proxychains_config_for_llm_models.conf'}</div>
             </div>
             {meta && !meta.modelWritable && (
-              <span className="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] text-amber-300">
+              <span className="rounded border border-amber-500/40 px-1.5 py-0.5 text-[length:var(--fs-xs)] text-amber-300">
                 无写权限
               </span>
             )}
@@ -3088,17 +3209,17 @@ function AdminProxyFilesCard() {
             onChange={e => { setModelText(e.target.value); setModelDirty(true) }}
             spellCheck={false}
             placeholder={'strict_chain\nproxy_dns\n[ProxyList]\nsocks5 127.0.0.1 1080'}
-            className="h-56 w-full resize-y rounded-md p-2 font-mono text-[11px] leading-[1.5]"
+            className="h-56 w-full resize-y rounded-md p-2 font-mono text-[length:var(--fs-sm)] leading-[1.5]"
             style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }}
           />
           <div className="mt-2 flex items-center gap-2">
             <button type="button" onClick={saveModel} disabled={savingModel || loading || !modelDirty}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--accent-color)] px-3 text-[12px] text-white hover:opacity-90 disabled:opacity-60">
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--accent-color)] px-3 text-[length:var(--fs-md)] text-white hover:opacity-90 disabled:opacity-60">
               {savingModel ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
               {savedModelFlash ? '已确认' : '确认'}
             </button>
             {modelDirty && (
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>有未保存的改动</span>
+              <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>有未保存的改动</span>
             )}
           </div>
         </div>
@@ -3107,20 +3228,20 @@ function AdminProxyFilesCard() {
         <div className="flex flex-col rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
           <div className="mb-2 flex items-center justify-between">
             <div>
-              <div className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>环境变量代理 (http_proxy / https_proxy)</div>
-              <div className="break-all text-[11px]" style={{ color: 'var(--text-muted)' }}>{meta?.envsPath || '~/proxy_envs.conf'}</div>
+              <div className="text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>环境变量代理 (http_proxy / https_proxy)</div>
+              <div className="break-all text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{meta?.envsPath || '~/proxy_envs.conf'}</div>
             </div>
             {meta && !meta.envsWritable && (
-              <span className="rounded border border-amber-500/40 px-1.5 py-0.5 text-[10px] text-amber-300">
+              <span className="rounded border border-amber-500/40 px-1.5 py-0.5 text-[length:var(--fs-xs)] text-amber-300">
                 无写权限
               </span>
             )}
           </div>
           <div className="grid grid-cols-[100px_1fr_90px] gap-2">
             <label>
-              <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>协议</div>
+              <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>协议</div>
               <select value={scheme} onChange={e => { setScheme(e.target.value); setEnvsDirty(true) }}
-                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-1.5 text-[12px]"
+                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-1.5 text-[length:var(--fs-md)]"
                 style={{ color: 'var(--text-primary)' }}>
                 <option value="http">http</option>
                 <option value="https">https</option>
@@ -3128,63 +3249,63 @@ function AdminProxyFilesCard() {
               </select>
             </label>
             <label>
-              <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>地址</div>
+              <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>地址</div>
               <input value={host} onChange={e => { setHost(e.target.value); setEnvsDirty(true) }}
-                placeholder="111.36.208.22" spellCheck={false}
-                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                placeholder="<host>" spellCheck={false}
+                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                 style={{ color: 'var(--text-primary)' }} />
             </label>
             <label>
-              <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>端口</div>
+              <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>端口</div>
               <input value={port} onChange={e => { setPort(e.target.value.replace(/[^\d]/g, '')); setEnvsDirty(true) }}
                 placeholder="12321" inputMode="numeric" maxLength={5}
-                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                 style={{ color: 'var(--text-primary)' }} />
             </label>
           </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <label>
-              <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>用户名 (可选)</div>
+              <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>用户名 (可选)</div>
               <input value={username} onChange={e => { setUsername(e.target.value); setEnvsDirty(true) }}
                 placeholder="代理认证用户名" spellCheck={false} autoComplete="off"
-                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                 style={{ color: 'var(--text-primary)' }} />
             </label>
             <label>
-              <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>密码 (可选)</div>
+              <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>密码 (可选)</div>
               <input type="password" value={password} onChange={e => { setPassword(e.target.value); setEnvsDirty(true) }}
                 placeholder="代理认证密码" autoComplete="new-password"
-                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                 style={{ color: 'var(--text-primary)' }} />
             </label>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button type="button" onClick={saveEnvs} disabled={savingEnvs || loading || !envsFormValid}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--accent-color)] px-3 text-[12px] text-white hover:opacity-90 disabled:opacity-60">
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[var(--accent-color)] px-3 text-[length:var(--fs-md)] text-white hover:opacity-90 disabled:opacity-60">
               {savingEnvs ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
               {savedEnvsFlash ? '已保存' : '保存'}
             </button>
             <button type="button" onClick={testEnvs} disabled={testing || !envsFormValid}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
               {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
               测试 (访问 cip.cc)
             </button>
             {envsDirty && (
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>有未保存的改动 (测试用当前输入值, 无需先保存)</span>
+              <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>有未保存的改动 (测试用当前输入值, 无需先保存)</span>
             )}
           </div>
           {testResult && (
-            <div className={`mt-2 rounded-md border px-3 py-2 text-[11px] ${testResult.ok
+            <div className={`mt-2 rounded-md border px-3 py-2 text-[length:var(--fs-sm)] ${testResult.ok
               ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
               : 'border-red-500/25 bg-red-500/10 text-red-400'}`}>
               <div className="mb-0.5 font-medium">{testResult.ok ? '✓ 代理可用' : '✗ 代理不可用'}</div>
               <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono">{testResult.text}</pre>
             </div>
           )}
-          <div className="mt-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="mt-2 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
             保存写入 {meta?.envsPath || '~/proxy_envs.conf'}; 模型代理模式选「环境变量代理」或「环境变量+proxychains」的模型启动时加载. 当前文件内容:
           </div>
-          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] p-2 font-mono text-[10px]"
+          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] p-2 font-mono text-[length:var(--fs-xs)]"
             style={{ color: 'var(--text-secondary)' }}>{envsText || '(空)'}</pre>
         </div>
       </div>
@@ -3453,7 +3574,7 @@ const WIZARD_STEP_META_SUBSCRIPTION: { title: string; hint: string }[] = [
   { title: '模型显示名称', hint: '该名称会展示给你和你的同事 (列表/选择器), 不一定是模型真名' },
   { title: '选择 Harness', hint: '向导暂不支持 DeepSeek Harness, 需要时请用文件配置模式' },
   { title: '配置代理网络', hint: 'Codex 订阅需要访问 OpenAI 网络; 按需编辑模型代理配置, 完成后点下一步' },
-  { title: '选择模型', hint: '选择 ChatGPT 订阅内的 GPT-5.6 家族模型' },
+  { title: '选择模型', hint: '选择 ChatGPT 订阅内的 GPT-6 或 GPT-5.6 家族模型' },
   { title: '选择认证方式', hint: '设备码在线登录, 或直接上传本地已登录的 Codex 认证文件' },
   { title: '登录认证', hint: '在下方终端完成 ChatGPT 设备码登录, 成功后点击"我已登录"' },
   { title: '注册', hint: '把订阅渠道注册进 mobius 模型列表' },
@@ -3461,8 +3582,8 @@ const WIZARD_STEP_META_SUBSCRIPTION: { title: string; hint: string }[] = [
 
 // 订阅路径认证方式: 设备码在线登录 | 上传本地 ~/.codex/auth.json.
 type SubAuthMethod = 'device-code' | 'upload-auth'
-// 订阅渠道可选的 Codex 订阅模型 (ChatGPT 付费计划内的 GPT-5.6 家族).
-const CODEX_SUBSCRIPTION_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
+// 订阅渠道可选的 Codex 订阅模型 (ChatGPT 付费计划内的 GPT-6 / GPT-5.6 家族).
+const CODEX_SUBSCRIPTION_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
 
 const WIZARD_TOTAL_STEPS = 5
 const WIZARD_TOTAL_STEPS_SUBSCRIPTION = 7
@@ -3511,10 +3632,10 @@ function BestApiInjectedModels({ models }: { models: BestApiManagedModel[] }) {
   return (
     <div className="border-t border-blue-500/15 px-3.5 pb-3.5 pt-2.5">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-        <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+        <span className="text-[length:var(--fs-sm)] font-medium" style={{ color: 'var(--text-secondary)' }}>
           已注入系统配置的模型 · {models.length} 个
         </span>
-        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+        <span className="text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
           已持久写入模型配置，会话模型选择器中以「名称 · BestAPI」长期可用，选择即用
         </span>
       </div>
@@ -3525,19 +3646,19 @@ function BestApiInjectedModels({ models }: { models: BestApiManagedModel[] }) {
             ? `兼容 Harness: ${(model.supported_harnesses || []).join(' / ')}` : ''
           return (
             <div key={`${model.backend}:${model.key}`}
-              className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-[var(--border-color)] px-2.5 py-1.5 text-[11px] last:border-b-0">
-              <span className={`flex-shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${badge.className}`}>{badge.label}</span>
+              className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-[var(--border-color)] px-2.5 py-1.5 text-[length:var(--fs-sm)] last:border-b-0">
+              <span className={`flex-shrink-0 rounded border px-1.5 py-0.5 text-[length:var(--fs-xs)] ${badge.className}`}>{badge.label}</span>
               <span className="min-w-0 max-w-[240px] truncate font-medium" title={model.display_name}
                 style={{ color: 'var(--text-primary)' }}>{model.display_name}</span>
-              <span className="min-w-0 max-w-[220px] truncate font-mono text-[10px]" title={model.id}
+              <span className="min-w-0 max-w-[220px] truncate font-mono text-[length:var(--fs-xs)]" title={model.id}
                 style={{ color: 'var(--text-muted)' }}>{model.id}</span>
-              <span className="ml-auto flex-shrink-0 font-mono text-[10px]" title={`会话模型选择器标识: ${model.session_model}`}
+              <span className="ml-auto flex-shrink-0 font-mono text-[length:var(--fs-xs)]" title={`会话模型选择器标识: ${model.session_model}`}
                 style={{ color: 'var(--text-secondary)' }}>{model.session_model}</span>
               {model.configured === false
-                ? <span className="flex-shrink-0 rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300"
+                ? <span className="flex-shrink-0 rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[length:var(--fs-xs)] text-amber-300"
                     title="该模型不在当前系统配置中（可能被手动删除），点击「立即同步全部模型」可恢复">配置缺失</span>
                 : model.configured
-                  ? <span className="flex-shrink-0 rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                  ? <span className="flex-shrink-0 rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 text-[length:var(--fs-xs)] text-emerald-300"
                       title={harnessNote || '已在系统配置中，会话模型选择器可用'}>已注入</span>
                   : null}
             </div>
@@ -3545,7 +3666,7 @@ function BestApiInjectedModels({ models }: { models: BestApiManagedModel[] }) {
         })}
       </div>
       {missingCount > 0 && (
-        <div className="mt-1.5 text-[10px] text-amber-300">
+        <div className="mt-1.5 text-[length:var(--fs-xs)] text-amber-300">
           {missingCount} 个模型不在当前系统配置中（可能被手动删除），点击「立即同步全部模型」可恢复。
         </div>
       )}
@@ -3560,7 +3681,7 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
   const [showApiKey, setShowApiKey] = useState(false)
   const [reconfigure, setReconfigure] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [working, setWorking] = useState<'connect' | 'sync' | null>(null)
+  const [working, setWorking] = useState<'connect' | 'sync' | 'remove' | null>(null)
   const [error, setError] = useState('')
   const catalogVersionRef = useRef<string | null>(null)
 
@@ -3628,6 +3749,24 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
     }
   }
 
+  // 一键删除: 清空该连接注入的全部模型并断开连接 (否则自动同步会立刻把模型加回来).
+  const removeAll = async () => {
+    const count = connection.model_count || (connection.models || []).length
+    if (!window.confirm(`确定删除 BestAPI 注入的全部 ${count} 个模型吗？\n\n这些模型会从 Mobius 模型配置中移除，连接状态一并清除（不再自动同步）。手动创建的模型不受影响。`)) return
+    setWorking('remove')
+    try {
+      await api('/api/admin/model-access/bestapi/models', { method: 'DELETE' })
+      setConnection({ connected: false })
+      catalogVersionRef.current = null
+      setError('')
+      onSynced()
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    } finally {
+      setWorking(null)
+    }
+  }
+
   const counts = connection.counts || { codex: 0, claude_code: 0, deepseek_harness: 0 }
   const supportedHarnesses = new Set(
     (connection.models || []).flatMap((model) => model.supported_harnesses || []),
@@ -3636,7 +3775,7 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
   const deployedHttpAlias = /^http:\/\/8\.130\.13\.45:3333(?:\/|$)/i.test(baseUrl.trim())
   const insecureRemoteHttp = /^http:\/\//i.test(baseUrl.trim())
     && !/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(baseUrl.trim())
-  const inputClass = 'h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none'
+  const inputClass = 'h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none'
   const connectedView = connection.connected && !reconfigure
 
   return (
@@ -3648,10 +3787,10 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h4 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>BestAPI 订阅</h4>
-              {connectedView && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400">已连接</span>}
+              <h4 className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>BestAPI 订阅</h4>
+              {connectedView && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[length:var(--fs-xs)] text-emerald-400">已连接</span>}
             </div>
-            <div className="truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               使用 API Key 读取全部可用模型与 Harness 契约，并自动配置到 Mobius
             </div>
           </div>
@@ -3660,7 +3799,7 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
       </div>
 
       {error && (
-        <div className="mx-3.5 mt-3 flex items-start gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mx-3.5 mt-3 flex items-start gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -3670,7 +3809,7 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
         <>
         <div className={`grid gap-3 p-3.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center ${(connection.models || []).length ? 'pb-2' : ''}`}>
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[length:var(--fs-md)]">
               {connection.account_username && <span style={{ color: 'var(--text-primary)' }}>
                 <span style={{ color: 'var(--text-muted)' }}>Key 身份：</span>
                 {connection.account_display_name || connection.account_username}
@@ -3678,7 +3817,7 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
               <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{connection.base_url}</span>
               <span style={{ color: 'var(--text-muted)' }}>Key {connection.key_prefix || '已配置'}…</span>
             </div>
-            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[length:var(--fs-xs)]">
               <span className="rounded border border-blue-500/20 bg-blue-500/5 px-2 py-1 text-blue-300">全部 {connection.model_count || 0}</span>
               {connection.integration_schema_version === 1 && (
                 <span className="rounded border border-emerald-500/20 bg-emerald-500/5 px-2 py-1 text-emerald-300">
@@ -3698,29 +3837,35 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
                   服务支持 {Array.from(supportedHarnesses).join(' / ')}
                 </span>
               )}
-              {connection.synced_at && <span className="px-1 py-1" style={{ color: 'var(--text-muted)' }}>上次同步 {formatCstDateTimeShort(connection.synced_at)}</span>}
+              {connection.synced_at && <span className="px-1 py-1" style={{ color: 'var(--text-muted)' }}>上次同步 {new Date(connection.synced_at).toLocaleString()}</span>}
               {autoSync?.last_checked_at && (
                 <span className="px-1 py-1" style={{ color: 'var(--text-muted)' }}>
-                  上次目录检查 {formatCstDateTimeShort(autoSync.last_checked_at)}
+                  上次目录检查 {new Date(autoSync.last_checked_at).toLocaleString()}
                 </span>
               )}
             </div>
             {autoSync?.last_error && (
-              <div className="mt-2 rounded border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
+              <div className="mt-2 rounded border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[length:var(--fs-sm)] text-amber-300">
                 自动同步失败，将在下个周期重试：{autoSync.last_error}
               </div>
             )}
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => { setApiKey(''); setShowApiKey(false); setReconfigure(true) }} disabled={!!working}
-              className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[12px] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-60"
+              className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-60"
               style={{ color: 'var(--text-secondary)' }}>
               重新配置 Key
             </button>
             <button type="button" onClick={sync} disabled={!!working}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+              className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
               {working === 'sync' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               立即同步全部模型
+            </button>
+            <button type="button" onClick={removeAll} disabled={!!working || !(connection.model_count || (connection.models || []).length)}
+              title="删除 BestAPI 注入的全部模型并断开连接"
+              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-red-500/40 px-3 text-[length:var(--fs-md)] font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-60">
+              {working === 'remove' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+              删除全部模型
             </button>
           </div>
         </div>
@@ -3730,11 +3875,11 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
         <div className="p-3.5">
           <div className="grid gap-2 md:grid-cols-[1.1fr_1.4fr_auto] md:items-end">
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>BestAPI 服务地址</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>BestAPI 服务地址</div>
               <input className={inputClass} value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://8.130.13.45:3333" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>BestAPI API Key</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>BestAPI API Key</div>
               <div className="relative">
                 <input className={`${inputClass} pr-9`} type={showApiKey ? 'text' : 'password'} value={apiKey}
                   onChange={e => setApiKey(e.target.value)} autoComplete="new-password" placeholder="sk-..." />
@@ -3745,22 +3890,22 @@ function BestApiSubscriptionPanel({ onSynced }: { onSynced: () => void }) {
               </div>
             </label>
             <button type="button" onClick={connect} disabled={!!working || !baseUrl.trim() || !apiKey.trim()}
-              className="inline-flex h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+              className="inline-flex h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-blue-600 px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
               {working === 'connect' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
               验证并同步
             </button>
           </div>
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
             <span>验证成功后立即导入全部模型，后台默认每分钟检查目录版本并自动同步；API Key 仅保存到 Mobius 服务端本地模型配置。</span>
             {connection.connected && <button type="button" onClick={() => { setApiKey(''); setShowApiKey(false); setReconfigure(false) }} className="text-blue-400 hover:text-blue-300">取消重新配置</button>}
           </div>
           {deployedHttpAlias && (
-            <div className="mt-2 rounded border border-blue-500/25 bg-blue-500/10 px-2.5 py-1.5 text-[10px] text-blue-300">
+            <div className="mt-2 rounded border border-blue-500/25 bg-blue-500/10 px-2.5 py-1.5 text-[length:var(--fs-xs)] text-blue-300">
               该部署端口实际使用 HTTPS；提交时会自动转换为 https://8.130.13.45:3333。
             </div>
           )}
           {insecureRemoteHttp && !deployedHttpAlias && (
-            <div className="mt-2 rounded border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[10px] text-amber-300">
+            <div className="mt-2 rounded border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[length:var(--fs-xs)] text-amber-300">
               公网 HTTP 会明文传输 API Key，建议改用 HTTPS。
             </div>
           )}
@@ -3866,8 +4011,8 @@ function SubscriptionProxyStep({ prepared, onPrepared }: { prepared: boolean; on
       <div className="flex flex-col rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
         <div className="mb-2 flex items-center justify-between">
           <div>
-            <div className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>模型代理 · 环境变量 (http_proxy / https_proxy)</div>
-            <div className="break-all text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>模型代理 · 环境变量 (http_proxy / https_proxy)</div>
+            <div className="break-all text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               {meta?.envsPath || '~/proxy_envs.conf'}; Codex 订阅走环境变量代理 (proxychains 对 codex 无效)
             </div>
           </div>
@@ -3883,9 +4028,9 @@ function SubscriptionProxyStep({ prepared, onPrepared }: { prepared: boolean; on
           <>
             <div className="grid grid-cols-[100px_1fr_90px] gap-2">
               <label>
-                <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>协议</div>
+                <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>协议</div>
                 <select value={scheme} onChange={e => { setScheme(e.target.value); setTouched(true) }}
-                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-1.5 text-[12px]"
+                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-1.5 text-[length:var(--fs-md)]"
                   style={{ color: 'var(--text-primary)' }}>
                   <option value="http">http</option>
                   <option value="https">https</option>
@@ -3893,46 +4038,46 @@ function SubscriptionProxyStep({ prepared, onPrepared }: { prepared: boolean; on
                 </select>
               </label>
               <label>
-                <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>地址</div>
+                <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>地址</div>
                 <input value={host} onChange={e => { setHost(e.target.value); setTouched(true) }}
-                  placeholder="111.36.208.22" spellCheck={false}
-                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                  placeholder="<host>" spellCheck={false}
+                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                   style={{ color: 'var(--text-primary)' }} />
               </label>
               <label>
-                <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>端口</div>
+                <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>端口</div>
                 <input value={port} onChange={e => { setPort(e.target.value.replace(/[^\d]/g, '')); setTouched(true) }}
                   placeholder="12321" inputMode="numeric" maxLength={5}
-                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                   style={{ color: 'var(--text-primary)' }} />
               </label>
             </div>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <label>
-                <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>用户名 (可选)</div>
+                <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>用户名 (可选)</div>
                 <input value={username} onChange={e => { setUsername(e.target.value); setTouched(true) }}
                   placeholder="代理认证用户名" spellCheck={false} autoComplete="off"
-                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                   style={{ color: 'var(--text-primary)' }} />
               </label>
               <label>
-                <div className="mb-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>密码 (可选)</div>
+                <div className="mb-1 text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>密码 (可选)</div>
                 <input type="password" value={password} onChange={e => { setPassword(e.target.value); setTouched(true) }}
                   placeholder="代理认证密码" autoComplete="new-password"
-                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[12px]"
+                  className="h-8 w-full rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-2 font-mono text-[length:var(--fs-md)]"
                   style={{ color: 'var(--text-primary)' }} />
               </label>
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button type="button" onClick={testEnvs} disabled={testing || !envsFormValid}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
                 {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
                 测试 (访问 cip.cc)
               </button>
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>测试用当前输入值, 无需先保存</span>
+              <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>测试用当前输入值, 无需先保存</span>
             </div>
             {testResult && (
-              <div className={`mt-2 rounded-md border px-3 py-2 text-[11px] ${testResult.ok
+              <div className={`mt-2 rounded-md border px-3 py-2 text-[length:var(--fs-sm)] ${testResult.ok
                 ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                 : 'border-red-500/25 bg-red-500/10 text-red-400'}`}>
                 <div className="mb-0.5 font-medium">{testResult.ok ? '✓ 代理可用' : '✗ 代理不可用'}</div>
@@ -3941,34 +4086,34 @@ function SubscriptionProxyStep({ prepared, onPrepared }: { prepared: boolean; on
             )}
           </>
         )}
-        <div className="mt-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="mt-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
           {proxyOn
             ? '保存后自动把本订阅渠道的代理模式设为「环境变量代理」, 并写入全局 proxy_envs.conf (系统设置-模型代理 同一份文件).'
             : '关闭时保存会把本订阅渠道的代理模式设为「直连」.'}
         </div>
       </div>
-      <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+      <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
         <div className="flex items-center gap-2">
           {prepared ? <CircleCheck className="h-4 w-4 text-emerald-400" /> : <FileText className="h-4 w-4 text-[var(--text-muted)]" />}
-          <span className="font-mono text-[11px]">~/.codex/{CODEX_SUBSCRIPTION_CHANNEL}.config.toml</span>
+          <span className="font-mono text-[length:var(--fs-sm)]">~/.codex/{CODEX_SUBSCRIPTION_CHANNEL}.config.toml</span>
           {prepared
-            ? <span className="text-[11px] text-emerald-400">已创建</span>
-            : <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>点"下一步"时自动创建</span>}
+            ? <span className="text-[length:var(--fs-sm)] text-emerald-400">已创建</span>
+            : <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>点"下一步"时自动创建</span>}
         </div>
       </div>
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
       )}
       <div className="flex items-center gap-2">
         <button type="button" onClick={save} disabled={saving || loading}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white hover:bg-blue-500 disabled:opacity-60">
+          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[length:var(--fs-md)] font-medium text-white hover:bg-blue-500 disabled:opacity-60">
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
           {savedFlash ? '已保存' : '保存代理配置'}
         </button>
-        {touched && <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>有未保存的改动</span>}
+        {touched && <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>有未保存的改动</span>}
       </div>
     </div>
   )
@@ -3992,7 +4137,7 @@ function SubscriptionAuthMethodStep({
   ]
   return (
     <div className="space-y-3">
-      <div className="mb-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>选择认证方式</div>
+      <div className="mb-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>选择认证方式</div>
       <div className="grid gap-2 sm:grid-cols-2">
         {options.map(opt => {
           const active = method === opt.k
@@ -4003,17 +4148,17 @@ function SubscriptionAuthMethodStep({
                 borderColor: active ? 'rgba(59,130,246,0.55)' : 'var(--border-color)',
                 background: active ? 'rgba(59,130,246,0.08)' : 'var(--bg-card)',
               }}>
-              <div className="flex items-center gap-2 text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
+              <div className="flex items-center gap-2 text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>
                 {opt.icon}{opt.name}
                 {active && <Check className="h-3.5 w-3.5 text-blue-400" />}
               </div>
-              <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>{opt.desc}</div>
+              <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{opt.desc}</div>
             </button>
           )
         })}
       </div>
       {method === 'upload-auth' && (
-        <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
           上传后凭据写入服务器 <span className="font-mono">~/.codex/auth.json</span>; 本地文件路径:
           <div className="mt-1 font-mono" style={{ color: 'var(--text-secondary)' }}>Windows: %USERPROFILE%\.codex\auth.json</div>
           <div className="font-mono" style={{ color: 'var(--text-secondary)' }}>macOS / Linux: ~/.codex/auth.json</div>
@@ -4024,17 +4169,18 @@ function SubscriptionAuthMethodStep({
 }
 
 // ── 订阅路径第4步: 选择订阅模型 ─────────────────────────────────────────
-// GPT-5.6 家族三选一; 注册后仍可在文件配置 Tab 改 codex_model.
+// GPT-6 / GPT-5.6 家族四选一; 注册后仍可在文件配置 Tab 改 codex_model.
 function SubscriptionModelStep({ model, onModelChange }: { model: string; onModelChange: (m: string) => void }) {
   const descs: Record<string, string> = {
+    'gpt-6-astra': '最强型 · 复杂任务与高难度编码',
     'gpt-5.6-sol': '均衡型 · 日常编码首选',
     'gpt-5.6-terra': '强力型 · 复杂任务推理',
     'gpt-5.6-luna': '轻快型 · 低延迟会话',
   }
   return (
     <div className="space-y-3">
-      <div className="mb-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>选择订阅模型</div>
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="mb-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>选择订阅模型</div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {CODEX_SUBSCRIPTION_MODELS.map(m => {
           const active = model === m
           return (
@@ -4045,16 +4191,16 @@ function SubscriptionModelStep({ model, onModelChange }: { model: string; onMode
                 background: active ? 'rgba(59,130,246,0.08)' : 'var(--bg-card)',
               }}>
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>{m}</span>
+                <span className="font-mono text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>{m}</span>
                 {active && <Check className="h-3.5 w-3.5 text-blue-400" />}
               </div>
-              <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>{descs[m] || ''}</div>
+              <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{descs[m] || ''}</div>
             </button>
           )
         })}
       </div>
-      <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-        ChatGPT 付费订阅内的 GPT-5.6 家族模型; 注册后可在"文件配置"Tab 修改 codex_model.
+      <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
+        ChatGPT 付费订阅内的 GPT-6 / GPT-5.6 家族模型; 注册后可在"文件配置"Tab 修改 codex_model.
       </div>
     </div>
   )
@@ -4096,9 +4242,9 @@ function SubscriptionUploadAuthStep({ onUploaded }: { onUploaded: () => void }) 
 
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-blue-500/30 bg-blue-500/8 px-3 py-2.5 text-[12px]" style={{ color: 'var(--text-primary)' }}>
+      <div className="rounded-lg border border-blue-500/30 bg-blue-500/8 px-3 py-2.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-primary)' }}>
         <div className="font-medium">上传本地 Codex 认证文件</div>
-        <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
           在本地已 <span className="font-mono">codex login</span> 的机器上找到{' '}
           <span className="font-mono">~/.codex/auth.json</span>, 上传到服务器完成认证。
           文件包含访问令牌, 请勿通过聊天工具传输。
@@ -4112,18 +4258,18 @@ function SubscriptionUploadAuthStep({ onUploaded }: { onUploaded: () => void }) 
         }} />
       <div className="flex items-center gap-2">
         <button type="button" onClick={() => inputRef.current?.click()} disabled={uploading}
-          className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+          className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
           {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
           {uploading ? '上传中…' : '选择 auth.json 上传'}
         </button>
         {done && (
-          <span className="inline-flex items-center gap-1 text-[12px] text-emerald-400">
+          <span className="inline-flex items-center gap-1 text-[length:var(--fs-md)] text-emerald-400">
             <CircleCheck className="h-3.5 w-3.5" />已上传 {fileInfo}
           </span>
         )}
       </div>
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -4348,23 +4494,23 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
     }
   }
 
-  const wizardInputCls = 'h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2.5 text-[12px] text-[var(--text-primary)] outline-none focus:border-blue-500/60'
+  const wizardInputCls = 'h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2.5 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none focus:border-blue-500/60'
 
   const renderWizardBody = () => {
     if (created) {
       return (
         <div className="flex flex-col items-center gap-3 py-8 text-center">
           <CircleCheck className="h-10 w-10 text-emerald-400" />
-          <div className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <div className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             模型创建成功
           </div>
-          <div className="space-y-1 text-[12px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="space-y-1 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
             <div>模型 Key: <span className="font-mono">{created.key}</span></div>
             <div>会话模型: <span className="font-mono">{created.session_model}</span></div>
             <div>现在可在新建 Session 时选择该模型, 也可切换到"文件配置"Tab 继续微调.</div>
           </div>
           <button type="button" onClick={reset}
-            className="mt-2 inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-[12px] font-medium text-white transition-colors hover:bg-blue-500">
+            className="mt-2 inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500">
             <Plus className="h-3.5 w-3.5" />
             再接入一个模型
           </button>
@@ -4376,10 +4522,10 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
         return (
           <div className="space-y-3">
             <label className="block">
-              <div className="mb-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>模型显示名称</div>
+              <div className="mb-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>模型显示名称</div>
               <input autoFocus value={wizard.label} onChange={e => patch({ label: e.target.value })}
                 placeholder="例如: MiniMax 旗舰 (展示给团队成员看)" maxLength={80} className={wizardInputCls} />
-              <div className="mt-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="mt-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 展示给你和你的同事, 不一定是模型的真名
               </div>
             </label>
@@ -4388,7 +4534,7 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
       case 2:
         return (
           <div className="space-y-3">
-            <div className="mb-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>选择使用的 Harness</div>
+            <div className="mb-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>选择使用的 Harness</div>
             <div className="grid gap-2 sm:grid-cols-3">
               {([
                 { k: 'claude-code' as WizardHarness, name: 'Claude Code', desc: 'Anthropic 兼容接口, 走 --settings 直连', icon: <Terminal className="h-4 w-4 text-cyan-400" /> },
@@ -4403,16 +4549,16 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
                       borderColor: active ? 'rgba(59,130,246,0.55)' : 'var(--border-color)',
                       background: active ? 'rgba(59,130,246,0.08)' : 'var(--bg-card)',
                     }}>
-                    <div className="flex items-center gap-2 text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                    <div className="flex items-center gap-2 text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>
                       {opt.icon}{opt.name}
                       {active && <Check className="h-3.5 w-3.5 text-blue-400" />}
                     </div>
-                    <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>{opt.desc}</div>
+                    <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{opt.desc}</div>
                   </button>
                 )
               })}
             </div>
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               DSH (DeepSeek Harness) 暂不支持向导, 需要时请切换到"文件配置"Tab 添加
             </div>
           </div>
@@ -4430,11 +4576,11 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
         return (
           <div className="space-y-3">
             <label className="block">
-              <div className="mb-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>模型真名</div>
+              <div className="mb-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>模型真名</div>
               <input autoFocus value={wizard.modelName} onChange={e => patch({ modelName: e.target.value })}
                 placeholder={wizard.harness === 'claude-code' ? '例如: MiniMax-M3' : '例如: gpt-5.5'}
                 maxLength={160} className={`${wizardInputCls} font-mono`} />
-              <div className="mt-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="mt-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 {wizard.harness === 'claude-code'
                   ? '将写入 settings JSON 的 model 与 ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL'
                   : '将写入 config TOML 顶层 model, 启动时经 -m 传给 Codex'}
@@ -4444,24 +4590,24 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
         )
       case 4:
         if (sub) {
-          // 订阅路径第4步: 选择订阅模型 (GPT-5.6 家族三选一).
+          // 订阅路径第4步: 选择订阅模型 (GPT-6 / GPT-5.6 家族四选一).
           return <SubscriptionModelStep model={wizard.subModel} onModelChange={m => patch({ subModel: m })} />
         }
         return (
           <div className="space-y-3">
             <label className="block">
-              <div className="mb-1.5 flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+              <div className="mb-1.5 flex items-center gap-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
                 <Globe className="h-3.5 w-3.5" />接入地址 (Base URL)
               </div>
               <input autoFocus value={wizard.baseUrl} onChange={e => patch({ baseUrl: e.target.value })}
                 placeholder={wizard.harness === 'claude-code' ? 'https://api.example.com/anthropic' : 'https://api.example.com/codex/v1'}
                 className={`${wizardInputCls} font-mono`} />
-              <div className="mt-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="mt-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 {wizard.harness === 'claude-code' ? '对应 ANTHROPIC_BASE_URL' : '对应 config TOML 的 base_url'}
               </div>
             </label>
             <label className="block">
-              <div className="mb-1.5 flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+              <div className="mb-1.5 flex items-center gap-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
                 <KeyRound className="h-3.5 w-3.5" />秘钥 (API Key)
               </div>
               <div className="relative">
@@ -4473,7 +4619,7 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
                   {revealSecret ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                 </button>
               </div>
-              <div className="mt-1.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="mt-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 {wizard.harness === 'claude-code' ? '对应 ANTHROPIC_AUTH_TOKEN (Bearer)' : '对应秘钥值 / config TOML 的 api_key'}
               </div>
             </label>
@@ -4499,12 +4645,12 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
               ['接入地址', wizard.baseUrl.trim()],
               ['秘钥', wizard.secret.trim() ? `${wizard.secret.trim().slice(0, 6)}${'•'.repeat(Math.max(4, Math.min(20, wizard.secret.trim().length - 6)))}` : ''],
             ] as Array<[string, string]>).map(([k, v]) => (
-              <div key={k} className="flex items-start justify-between gap-3 rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2 text-[12px]">
+              <div key={k} className="flex items-start justify-between gap-3 rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2 text-[length:var(--fs-md)]">
                 <span className="flex-shrink-0" style={{ color: 'var(--text-muted)' }}>{k}</span>
                 <span className="min-w-0 break-all text-right font-mono" style={{ color: 'var(--text-primary)' }}>{v}</span>
               </div>
             ))}
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               {wizard.harness === 'codex' && (
                 <>Codex 渠道默认使用 responses 协议 (wire_api), 兼容 OpenAI chat-completions 的网关请创建后在"文件配置"Tab 修改.<br /></>
               )}
@@ -4521,9 +4667,9 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
           // 设备码方式: 内嵌 Web 终端自动执行 codex login --device-auth, 旁边提示引导用户操作.
           return (
             <div className="space-y-3">
-              <div className="rounded-lg border border-blue-500/30 bg-blue-500/8 px-3 py-2.5 text-[12px]" style={{ color: 'var(--text-primary)' }}>
+              <div className="rounded-lg border border-blue-500/30 bg-blue-500/8 px-3 py-2.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-primary)' }}>
                 <div className="font-medium">请在下方终端中完成登录</div>
-                <div className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                <div className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                   终端已自动运行 <span className="font-mono">codex login --device-auth</span>。
                   请选择 <span className="font-medium">Sign in with Device Code</span>，跟随提示完成认证；
                   认证成功后点击下方「我已登录」按钮。
@@ -4543,12 +4689,12 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
               ['接入地址', wizard.baseUrl.trim()],
               ['秘钥', wizard.secret.trim() ? `${wizard.secret.trim().slice(0, 6)}${'•'.repeat(Math.max(4, Math.min(20, wizard.secret.trim().length - 6)))}` : ''],
             ] as Array<[string, string]>).map(([k, v]) => (
-              <div key={k} className="flex items-start justify-between gap-3 rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2 text-[12px]">
+              <div key={k} className="flex items-start justify-between gap-3 rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2 text-[length:var(--fs-md)]">
                 <span className="flex-shrink-0" style={{ color: 'var(--text-muted)' }}>{k}</span>
                 <span className="min-w-0 break-all text-right font-mono" style={{ color: 'var(--text-primary)' }}>{v}</span>
               </div>
             ))}
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               {wizard.harness === 'codex' && (
                 <>Codex 渠道默认使用 responses 协议 (wire_api), 兼容 OpenAI chat-completions 的网关请创建后在"文件配置"Tab 修改.<br /></>
               )}
@@ -4568,12 +4714,12 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
                 ['默认模型', wizard.subModel],
                 ['凭据', '~/.codex/auth.json (订阅登录产物)'],
               ] as Array<[string, string]>).map(([k, v]) => (
-                <div key={k} className="flex items-start justify-between gap-3 rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2 text-[12px]">
+                <div key={k} className="flex items-start justify-between gap-3 rounded-md border border-[var(--border-color)] bg-[var(--input-bg)] px-3 py-2 text-[length:var(--fs-md)]">
                   <span className="flex-shrink-0" style={{ color: 'var(--text-muted)' }}>{k}</span>
                   <span className="min-w-0 break-all text-right font-mono" style={{ color: 'var(--text-primary)' }}>{v}</span>
                 </div>
               ))}
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 注册后立即在模型选择器可用; 模型名等参数可在"文件配置"Tab 继续调整.
               </div>
             </div>
@@ -4588,7 +4734,7 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
   return (
     <div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -4606,7 +4752,7 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
                 <div className="h-px flex-1" style={{ background: done ? 'rgba(59,130,246,0.5)' : 'var(--border-color)' }} />
               )}
               <div className="flex items-center gap-1.5">
-                <div className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-[10px]"
+                <div className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-[length:var(--fs-xs)]"
                   style={{
                     borderColor: active ? 'rgba(59,130,246,0.7)' : done ? 'rgba(16,185,129,0.6)' : 'var(--border-color)',
                     background: active ? 'rgba(59,130,246,0.12)' : done ? 'rgba(16,185,129,0.10)' : 'transparent',
@@ -4614,7 +4760,7 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
                   }}>
                   {done ? <Check className="h-3 w-3" /> : n}
                 </div>
-                <span className={`hidden text-[11px] sm:inline ${active ? 'font-medium' : ''}`}
+                <span className={`hidden text-[length:var(--fs-sm)] sm:inline ${active ? 'font-medium' : ''}`}
                   style={{ color: active ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                   {meta.title}
                 </span>
@@ -4627,10 +4773,10 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
       <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-4">
         {!created && (
           <div className="mb-3">
-            <div className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            <div className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>
               第 {wizard.step} 步 · {stepMeta.title}
             </div>
-            <div className="mt-0.5 text-[11px]" style={{ color: 'var(--text-muted)' }}>{stepMeta.hint}</div>
+            <div className="mt-0.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{stepMeta.hint}</div>
           </div>
         )}
         {renderWizardBody()}
@@ -4638,26 +4784,26 @@ function ModelAccessWizard({ onCreated }: { onCreated?: () => void }) {
 
       {!created && (
         <div className="mt-3 flex items-center justify-between gap-2">
-          <div className="min-w-0 flex-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="min-w-0 flex-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             {stepError && <span className="text-amber-400">{stepError}</span>}
           </div>
           <div className="flex flex-shrink-0 gap-2">
             {wizard.step > 1 && (
               <button type="button" onClick={prevStep} disabled={creating}
-                className="inline-flex h-9 items-center gap-1 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
+                className="inline-flex h-9 items-center gap-1 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60">
                 <ChevronLeft className="h-3.5 w-3.5" />上一步
               </button>
             )}
             {wizard.step < totalSteps && (
               <button type="button" onClick={nextStep} disabled={!stepValid || !!stepError || creating}
-                className="inline-flex h-9 items-center gap-1 rounded-md bg-blue-600 px-4 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                className="inline-flex h-9 items-center gap-1 rounded-md bg-blue-600 px-4 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
                 {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (sub && wizard.step === 6 ? <CircleCheck className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />)}
                 {sub && wizard.step === 6 ? (wizard.subAuthMethod === 'upload-auth' ? '下一步' : '我已登录') : '下一步'}
               </button>
             )}
             {wizard.step === totalSteps && (
               <button type="button" onClick={createModel} disabled={creating}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
                 {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandSparkles className="h-3.5 w-3.5" />}
                 {sub ? '注册到 mobius' : '创建模型'}
               </button>
@@ -4681,10 +4827,10 @@ function AdminModelsPanel() {
   return (
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4" data-tour="admin-section-models">
       <div className="mb-3">
-        <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+        <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
           模型接入
         </h3>
-        <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
           {mode === 'wizard'
             ? '向导模式: 依次填写显示名称 / Harness / 模型真名 / 接入地址与秘钥, 自动生成配置文件'
             : mode === 'bestapi'
@@ -4715,9 +4861,9 @@ function AdminModelsPanel() {
               }`}>
               <Icon className={`h-[18px] w-[18px] flex-shrink-0 ${active ? 'text-blue-400' : 'text-[var(--text-muted)]'}`} />
               <span className="min-w-0">
-                <span className={`block text-[13px] font-semibold ${active ? 'text-blue-300' : ''}`}
+                <span className={`block text-[length:var(--fs-lg)] font-semibold ${active ? 'text-blue-300' : ''}`}
                   style={active ? undefined : { color: 'var(--text-primary)' }}>{label}</span>
-                <span className="block truncate text-[10px]" style={{ color: 'var(--text-muted)' }}>{desc}</span>
+                <span className="block truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>{desc}</span>
               </span>
             </button>
           )
@@ -4736,7 +4882,7 @@ function AdminModelsPanel() {
         <div>
           {/* 二级 sub-tab: Claude Code / Codex / DeepSeek Harness (原有文件配置模式原样保留) */}
           <div className="mb-3 flex justify-start">
-            <div className="inline-flex rounded-md border border-[var(--border-color)] p-0.5 text-[12px]"
+            <div className="inline-flex rounded-md border border-[var(--border-color)] p-0.5 text-[length:var(--fs-md)]"
               style={{ background: 'var(--input-bg)' }} data-tour="admin-models-backend-tabs">
               {([
                 ['claude-code', 'Claude Code'],
@@ -4885,7 +5031,7 @@ function ClaudeCodeModelsSubPanel() {
   return (
     <div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -4894,11 +5040,11 @@ function ClaudeCodeModelsSubPanel() {
       <div className="grid gap-4 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.28fr)]">
         <div className="min-h-[240px] rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-2">
           <div className="mb-2 flex items-center justify-between px-1">
-            <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>已导入模型</span>
+            <span className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>已导入模型</span>
             {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--text-muted)]" />}
           </div>
           {models.length === 0 && !loading && (
-            <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
               暂无导入模型
             </div>
           )}
@@ -4913,14 +5059,14 @@ function ClaudeCodeModelsSubPanel() {
                     borderColor: active ? 'rgba(59,130,246,0.35)' : 'var(--border-color)',
                   }}>
                   <button type="button" onClick={() => editModel(row.key)} className="min-w-0 flex-1 text-left">
-                    <div className="flex items-center gap-1.5 text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                    <div className="flex items-center gap-1.5 text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
                       <Terminal className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400" />
                       <span className="truncate">{row.label}</span>
                     </div>
-                    <div className="mt-0.5 truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    <div className="mt-0.5 truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                       {row.session_model}
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+                    <div className="mt-1 flex flex-wrap gap-1.5 text-[length:var(--fs-xs)]">
                       <span className="rounded border px-1.5 py-0.5" style={{ color: row.enabled ? '#16a34a' : 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
                         {row.enabled ? '启用' : '禁用'}
                       </span>
@@ -4944,10 +5090,10 @@ function ClaudeCodeModelsSubPanel() {
         <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-3">
           <div className="mb-3 flex items-center justify-between">
             <div>
-              <h4 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{editingKey ? '编辑模型' : '新增模型'}</h4>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{settingsFilePreview}</div>
+              <h4 className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>{editingKey ? '编辑模型' : '新增模型'}</h4>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{settingsFilePreview}</div>
             </div>
-            <label className="inline-flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+            <label className="inline-flex items-center gap-2 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
               <input type="checkbox" checked={form.enabled} onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))} />
               启用
             </label>
@@ -4955,55 +5101,55 @@ function ClaudeCodeModelsSubPanel() {
 
           <div className="grid gap-2 md:grid-cols-3">
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>模型 Key</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>模型 Key</div>
               <input value={form.key} disabled={!!editingKey}
                 onChange={e => setForm(f => ({ ...f, key: e.target.value }))}
                 placeholder="minimax-m3"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none disabled:opacity-60" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none disabled:opacity-60" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>显示名称</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>显示名称</div>
               <input value={form.label}
                 onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
                 placeholder="MiniMax-M3"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>Claude 模型名</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>Claude 模型名</div>
               <input value={form.claude_model}
                 onChange={e => setForm(f => ({ ...f, claude_model: e.target.value }))}
                 placeholder="MiniMax-M3"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none" />
             </label>
           </div>
 
           <label className="mt-3 block">
             <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>settings JSON</span>
+              <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>settings JSON</span>
               <button type="button" onClick={() => setForm(f => ({ ...f, settings_json: defaultClaudeSettings(f.claude_model || 'MiniMax-M3') }))}
-                className="text-[11px] text-blue-400 hover:text-blue-300">
+                className="text-[length:var(--fs-sm)] text-blue-400 hover:text-blue-300">
                 填入 MiniMax 模板
               </button>
             </div>
             <textarea value={form.settings_json}
               onChange={e => setForm(f => ({ ...f, settings_json: e.target.value }))}
               spellCheck={false}
-              className="h-[360px] w-full resize-y rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-3 py-2 font-mono text-[12px] leading-5 text-[var(--text-primary)] outline-none"
+              className="h-[360px] w-full resize-y rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-3 py-2 font-mono text-[length:var(--fs-md)] leading-5 text-[var(--text-primary)] outline-none"
             />
           </label>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               保存后可在新建 Session 弹窗选择该模型。导入模型固定直连。
             </div>
             <div className="flex gap-2">
               <button type="button" onClick={startNew}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
                 <Plus className="h-3.5 w-3.5" />
                 新增
               </button>
               <button type="button" onClick={save} disabled={saving}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                 保存
               </button>
@@ -5131,7 +5277,7 @@ function CodexModelsSubPanel() {
   return (
     <div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -5140,11 +5286,11 @@ function CodexModelsSubPanel() {
       <div className="grid gap-4 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.28fr)]">
         <div className="min-h-[240px] rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-2">
           <div className="mb-2 flex items-center justify-between px-1">
-            <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>已导入模型</span>
+            <span className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>已导入模型</span>
             {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--text-muted)]" />}
           </div>
           {models.length === 0 && !loading && (
-            <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
               暂无导入模型
             </div>
           )}
@@ -5159,14 +5305,14 @@ function CodexModelsSubPanel() {
                     borderColor: active ? 'rgba(59,130,246,0.35)' : 'var(--border-color)',
                   }}>
                   <button type="button" onClick={() => editModel(row.key)} className="min-w-0 flex-1 text-left">
-                    <div className="flex items-center gap-1.5 text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                    <div className="flex items-center gap-1.5 text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
                       <Terminal className="h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
                       <span className="truncate">{row.label}</span>
                     </div>
-                    <div className="mt-0.5 truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    <div className="mt-0.5 truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                       {row.session_model} · {row.channel || row.key}
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+                    <div className="mt-1 flex flex-wrap gap-1.5 text-[length:var(--fs-xs)]">
                       <span className="rounded border px-1.5 py-0.5" style={{ color: row.enabled ? '#16a34a' : 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
                         {row.enabled ? '启用' : '禁用'}
                       </span>
@@ -5199,10 +5345,10 @@ function CodexModelsSubPanel() {
         <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-3">
           <div className="mb-3 flex items-center justify-between">
             <div>
-              <h4 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{editingKey ? '编辑模型' : '新增模型'}</h4>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{configFilePreview}</div>
+              <h4 className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>{editingKey ? '编辑模型' : '新增模型'}</h4>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{configFilePreview}</div>
             </div>
-            <div className="flex items-center gap-3 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+            <div className="flex items-center gap-3 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
               <label className="inline-flex items-center gap-2">
                 <input type="checkbox" checked={form.enabled} onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))} />
                 启用
@@ -5212,69 +5358,69 @@ function CodexModelsSubPanel() {
 
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>渠道 (纯英文字母)</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>渠道 (纯英文字母)</div>
               <input value={form.key} disabled={!!editingKey}
                 onChange={e => setForm(f => ({ ...f, key: e.target.value }))}
                 placeholder="mobiusdefault"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none disabled:opacity-60" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none disabled:opacity-60" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>显示名称</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>显示名称</div>
               <input value={form.label}
                 onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
                 placeholder="GPT-5.5 (Codex)"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>Codex 模型名 (-m)</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>Codex 模型名 (-m)</div>
               <input value={form.codex_model}
                 onChange={e => setForm(f => ({ ...f, codex_model: e.target.value }))}
                 placeholder="gpt-5.5"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>秘钥名 (env_key)</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>秘钥名 (env_key)</div>
               <input value={form.secret_env_key}
                 onChange={e => setForm(f => ({ ...f, secret_env_key: e.target.value }))}
                 placeholder="RIGHTCODE_API_KEY"
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none" />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>{editingKey ? '秘钥值 (留空不改)' : '秘钥值'}</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{editingKey ? '秘钥值 (留空不改)' : '秘钥值'}</div>
               <input type="password" value={form.secret_value}
                 onChange={e => setForm(f => ({ ...f, secret_value: e.target.value }))}
                 placeholder={editingKey ? '已保存则可留空' : 'sk-...'}
-                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none" />
+                className="h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none" />
             </label>
           </div>
 
           <label className="mt-3 block">
             <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>config TOML (写到 $CODEX_HOME/&lt;渠道&gt;.config.toml; 有 env_key 时 api_key 会被 export 到该秘钥名)</span>
+              <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>config TOML (写到 $CODEX_HOME/&lt;渠道&gt;.config.toml; 有 env_key 时 api_key 会被 export 到该秘钥名)</span>
               <button type="button" onClick={() => setForm(f => ({ ...f, config_toml: defaultCodexToml(f.codex_model || 'gpt-5.5', f.key || 'mobiusdefault', f.secret_env_key || 'RIGHTCODE_API_KEY') }))}
-                className="text-[11px] text-blue-400 hover:text-blue-300">
+                className="text-[length:var(--fs-sm)] text-blue-400 hover:text-blue-300">
                 填入渠道模板
               </button>
             </div>
             <textarea value={form.config_toml}
               onChange={e => setForm(f => ({ ...f, config_toml: e.target.value }))}
               spellCheck={false}
-              className="h-[280px] w-full resize-y rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-3 py-2 font-mono text-[12px] leading-5 text-[var(--text-primary)] outline-none"
+              className="h-[280px] w-full resize-y rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-3 py-2 font-mono text-[length:var(--fs-md)] leading-5 text-[var(--text-primary)] outline-none"
             />
           </label>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               保存后可在新建 Session 弹窗选择该模型。Codex 启动时一律使用 <code>codex --profile &lt;渠道&gt;</code> 并 export 秘钥名。
             </div>
             <div className="flex gap-2">
               <button type="button" onClick={startNew}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
                 <Plus className="h-3.5 w-3.5" />
                 新增
               </button>
               <button type="button" onClick={save} disabled={saving}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                 保存
               </button>
@@ -5393,12 +5539,12 @@ function HarnessModelsSubPanel() {
     }
   }
 
-  const inputClass = 'h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[12px] text-[var(--text-primary)] outline-none disabled:opacity-60'
+  const inputClass = 'h-9 w-full rounded-md border border-[var(--input-border)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-md)] text-[var(--text-primary)] outline-none disabled:opacity-60'
 
   return (
     <div>
       {error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -5407,11 +5553,11 @@ function HarnessModelsSubPanel() {
       <div className="grid gap-4 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.28fr)]">
         <div className="min-h-[240px] rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-2">
           <div className="mb-2 flex items-center justify-between px-1">
-            <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>Harness 模型</span>
+            <span className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>Harness 模型</span>
             {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--text-muted)]" />}
           </div>
           {models.length === 0 && !loading && (
-            <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[12px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-8 text-center text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
               暂无 Harness 模型
             </div>
           )}
@@ -5425,14 +5571,14 @@ function HarnessModelsSubPanel() {
                     borderColor: active ? 'rgba(59,130,246,0.35)' : 'var(--border-color)',
                   }}>
                   <button type="button" onClick={() => editModel(row.key)} className="min-w-0 flex-1 text-left">
-                    <div className="flex items-center gap-1.5 text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                    <div className="flex items-center gap-1.5 text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
                       <Server className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
                       <span className="truncate">{row.label}</span>
                     </div>
-                    <div className="mt-0.5 truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    <div className="mt-0.5 truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                       {row.session_model} · {row.model}
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+                    <div className="mt-1 flex flex-wrap gap-1.5 text-[length:var(--fs-xs)]">
                       <span className="rounded border px-1.5 py-0.5" style={{ color: row.enabled ? '#16a34a' : 'var(--text-muted)', borderColor: 'var(--border-color)' }}>
                         {row.enabled ? '启用' : '禁用'}
                       </span>
@@ -5457,10 +5603,10 @@ function HarnessModelsSubPanel() {
         <div className="rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <h4 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>{editingKey ? '编辑 Harness 模型' : '新增 Harness 模型'}</h4>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Runtime 0.0.1-rc.5 · Node 22</div>
+              <h4 className="text-[length:var(--fs-lg)] font-semibold" style={{ color: 'var(--text-primary)' }}>{editingKey ? '编辑 Harness 模型' : '新增 Harness 模型'}</h4>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>Runtime 0.0.1-rc.5 · Node 22</div>
             </div>
-            <label className="inline-flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+            <label className="inline-flex items-center gap-2 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
               <input type="checkbox" checked={form.enabled} onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))} />
               启用
             </label>
@@ -5468,49 +5614,49 @@ function HarnessModelsSubPanel() {
 
           <div className="grid gap-2 md:grid-cols-2">
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>模型 Key</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>模型 Key</div>
               <input value={form.key} disabled={!!editingKey} onChange={e => setForm(f => ({ ...f, key: e.target.value }))} placeholder="deepseek" className={inputClass} />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>显示名称</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>显示名称</div>
               <input value={form.label} onChange={e => setForm(f => ({ ...f, label: e.target.value }))} placeholder="DeepSeek Harness" className={inputClass} />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>Provider</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>Provider</div>
               <input value={form.provider} onChange={e => setForm(f => ({ ...f, provider: e.target.value }))} placeholder="deepseek-official" className={inputClass} />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>模型名</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>模型名</div>
               <input value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} placeholder="deepseek-chat" className={inputClass} />
             </label>
             <label className="min-w-0 md:col-span-2">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>Base URL</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>Base URL</div>
               <input value={form.base_url} onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))} placeholder="https://api.deepseek.com" className={inputClass} />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>{editingKey ? 'API Key（留空不改）' : 'API Key'}</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{editingKey ? 'API Key（留空不改）' : 'API Key'}</div>
               <input type="password" value={form.secret_value} onChange={e => setForm(f => ({ ...f, secret_value: e.target.value }))}
                 placeholder={editingKey ? '已保存则可留空' : 'sk-...'} autoComplete="new-password" className={inputClass} />
             </label>
             <label className="min-w-0">
-              <div className="mb-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>Max Tokens</div>
+              <div className="mb-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>Max Tokens</div>
               <input type="number" min="1" step="1" value={form.max_tokens} onChange={e => setForm(f => ({ ...f, max_tokens: e.target.value }))} placeholder="8192" className={inputClass} />
             </label>
           </div>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <label className="inline-flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+            <label className="inline-flex items-center gap-2 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
               <input type="checkbox" checked={form.use_proxy} onChange={e => setForm(f => ({ ...f, use_proxy: e.target.checked }))} />
               使用系统模型代理
             </label>
             <div className="flex gap-2">
               <button type="button" onClick={startNew}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]">
                 <Plus className="h-3.5 w-3.5" />
                 新增
               </button>
               <button type="button" onClick={save} disabled={saving}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[12px] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
+                className="inline-flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-60">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                 保存
               </button>
@@ -5594,10 +5740,10 @@ function HiddenExtensionsCard() {
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4" data-tour="admin-section-extensions">
       <div className="mb-2 flex items-center justify-between">
         <div>
-          <h3 className="text-[14px] font-semibold flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
             <EyeOff className="h-3.5 w-3.5" /> 已隐藏的拓展
           </h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             用户在项目页"隐藏"了拓展卡片. 管理员可「撤销隐藏」(恢复卡片、保留数据) 或「彻底删除」该用户在此拓展的数据 (不可恢复、卡片仍隐藏).
           </div>
         </div>
@@ -5608,13 +5754,13 @@ function HiddenExtensionsCard() {
         </button>
       </div>
       {error && (
-        <div className="mb-2 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="mb-2 flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
       )}
       {rows.length === 0 ? (
-        <div className="text-[12px] py-3 text-center" style={{ color: 'var(--text-muted)' }}>
+        <div className="text-[length:var(--fs-md)] py-3 text-center" style={{ color: 'var(--text-muted)' }}>
           {loading ? '加载中...' : '无隐藏记录'}
         </div>
       ) : (
@@ -5627,27 +5773,27 @@ function HiddenExtensionsCard() {
             return (
               <div key={key} className="flex items-center gap-3 px-3 py-2 rounded-lg border" style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)' }}>
                 <div className="min-w-0 flex-1">
-                  <div className="text-[13px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+                  <div className="text-[length:var(--fs-lg)] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
                     {row.project_name}
                     {row.extension_name && (
-                      <span className="ml-1.5 text-[11px] font-normal" style={{ color: 'var(--text-muted)' }}>
+                      <span className="ml-1.5 text-[length:var(--fs-sm)] font-normal" style={{ color: 'var(--text-muted)' }}>
                         ({row.extension_name})
                       </span>
                     )}
                   </div>
-                  <div className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+                  <div className="text-[length:var(--fs-sm)] truncate" style={{ color: 'var(--text-muted)' }}>
                     用户 {row.user_display_name || row.user_id} · 隐藏于 {formatAbsolute(row.hidden_at)}
                   </div>
                 </div>
                 <button onClick={() => restore(row)} disabled={rowBusy}
-                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 border"
+                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[length:var(--fs-sm)] font-medium transition-colors disabled:opacity-50 border"
                   style={{ background: 'var(--bg-primary)', borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>
                   {isRestoring ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
                   撤销隐藏
                 </button>
                 <button onClick={() => purge(row)} disabled={rowBusy}
                   title="彻底删除该用户在此拓展的数据 (不可恢复)"
-                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 border"
+                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[length:var(--fs-sm)] font-medium transition-colors disabled:opacity-50 border"
                   style={{ background: 'rgba(239,68,68,0.06)', borderColor: 'rgba(239,68,68,0.35)', color: '#f87171' }}>
                   {isPurging ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                   彻底删除
@@ -5755,14 +5901,14 @@ function ChecklistRow({
         <div className="flex items-center gap-1.5">
           {badge && (
             <span
-              className="rounded px-1 py-px text-[10px] font-medium"
+              className="rounded px-1 py-px text-[length:var(--fs-xs)] font-medium"
               style={{ background: 'var(--bg-hover)', color: 'var(--text-muted)' }}
             >
               {badge}
             </span>
           )}
           <span
-            className="truncate text-[12.5px] font-medium"
+            className="truncate text-[length:var(--fs-md)] font-medium"
             style={{ color: 'var(--text-primary)' }}
           >
             {title}
@@ -5770,7 +5916,7 @@ function ChecklistRow({
         </div>
         {subtitle && (
           <div
-            className="mt-0.5 truncate text-[11px]"
+            className="mt-0.5 truncate text-[length:var(--fs-sm)]"
             style={{ color: 'var(--text-muted)' }}
           >
             {subtitle}
@@ -5783,22 +5929,25 @@ function ChecklistRow({
 
 function SkillMemoryMigrationPanel() {
   const [mode, setMode] = useState<'manage' | 'export' | 'import'>('manage')
+  const isAdmin = useStore((s) => s.user?.role === 'admin')
   return (
     <section className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             Skill 与 Memory 管理
           </h3>
-          <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-            管理、备份和迁移自己的用户级 / 项目级 Skill 与 Memory; 他人创建的条目仅可查看.
+          <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
+            {isAdmin
+              ? '管理、备份和迁移自己的用户级 / 项目级 Skill 与 Memory; 他人创建的条目仅可查看.'
+              : '管理、备份和迁移你自己的用户级 Skill 与 Memory, 以及你能看到的项目级条目; 他人的条目仅可查看.'}
           </div>
         </div>
         <div className="flex rounded-md border border-[var(--border-color)] p-0.5">
           <button
             type="button"
             onClick={() => setMode('manage')}
-            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[12px] font-medium transition-colors"
+            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[length:var(--fs-md)] font-medium transition-colors"
             style={{
               background: mode === 'manage' ? 'var(--bg-hover)' : 'transparent',
               color: mode === 'manage' ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -5810,7 +5959,7 @@ function SkillMemoryMigrationPanel() {
           <button
             type="button"
             onClick={() => setMode('export')}
-            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[12px] font-medium transition-colors"
+            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[length:var(--fs-md)] font-medium transition-colors"
             style={{
               background: mode === 'export' ? 'var(--bg-hover)' : 'transparent',
               color: mode === 'export' ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -5822,7 +5971,7 @@ function SkillMemoryMigrationPanel() {
           <button
             type="button"
             onClick={() => setMode('import')}
-            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[12px] font-medium transition-colors"
+            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[length:var(--fs-md)] font-medium transition-colors"
             style={{
               background: mode === 'import' ? 'var(--bg-hover)' : 'transparent',
               color: mode === 'import' ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -6044,14 +6193,14 @@ function MigrationManageTab() {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <span
-              className="rounded px-1 py-px text-[10px] font-medium"
+              className="rounded px-1 py-px text-[length:var(--fs-xs)] font-medium"
               style={{ background: 'var(--bg-hover)', color: 'var(--text-muted)' }}
             >
               {kind === 'memory' ? 'MEM' : 'SKILL'}
             </span>
             {item.visibility && (
               <span
-                className="rounded px-1 py-px text-[10px] font-medium"
+                className="rounded px-1 py-px text-[length:var(--fs-xs)] font-medium"
                 style={{
                   background: item.visibility === 'public' ? 'rgba(16,185,129,0.14)' : 'rgba(148,163,184,0.12)',
                   color: item.visibility === 'public' ? '#34d399' : 'var(--text-muted)',
@@ -6065,19 +6214,19 @@ function MigrationManageTab() {
                   : item.visibility}
               </span>
             )}
-            <span className="truncate text-[12.5px] font-medium" style={{ color: 'var(--text-primary)' }}>
+            <span className="truncate text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
               {item.name}
             </span>
             {!canManage && (
               <span
-                className="rounded px-1 py-px text-[10px]"
+                className="rounded px-1 py-px text-[length:var(--fs-xs)]"
                 style={{ background: 'rgba(148,163,184,0.16)', color: 'var(--text-muted)' }}
               >
                 只读
               </span>
             )}
           </div>
-          <div className="mt-0.5 truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="mt-0.5 truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             {migrationItemSubtitle(item, kind)}
           </div>
         </div>
@@ -6142,9 +6291,9 @@ function MigrationManageTab() {
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>{title}</span>
+              <span className="text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>{title}</span>
               <span
-                className="rounded px-1.5 py-px text-[10px]"
+                className="rounded px-1.5 py-px text-[length:var(--fs-xs)]"
                 style={{
                   background: editable ? 'rgba(59,130,246,0.16)' : 'rgba(148,163,184,0.16)',
                   color: editable ? '#60a5fa' : 'var(--text-muted)',
@@ -6153,13 +6302,13 @@ function MigrationManageTab() {
                 {editable ? '可编辑' : '只读'}
               </span>
             </div>
-            <div className="truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>{subtitle}</div>
+            <div className="truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{subtitle}</div>
           </div>
           {editable && ids.length > 0 && (
             <button
               type="button"
               onClick={() => selectMany(ids, !allSelected)}
-              className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+              className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
             >
               {allSelected ? '取消全选' : '全选当前分组'}
             </button>
@@ -6167,7 +6316,7 @@ function MigrationManageTab() {
         </div>
         {totalCount === 0 ? (
           <div
-            className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-3 text-center text-[11.5px]"
+            className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-3 text-center text-[length:var(--fs-sm)]"
             style={{ color: 'var(--text-muted)' }}
           >
             暂无内容
@@ -6188,7 +6337,7 @@ function MigrationManageTab() {
           type="button"
           onClick={refresh}
           disabled={loading}
-          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           刷新
@@ -6196,7 +6345,7 @@ function MigrationManageTab() {
         <button
           type="button"
           onClick={() => setCreating({ kind: 'memory', scope: 'user' })}
-          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
         >
           <Plus className="h-3.5 w-3.5" />
           新建我的 Memory
@@ -6204,7 +6353,7 @@ function MigrationManageTab() {
         <button
           type="button"
           onClick={() => setCreating({ kind: 'skill', scope: 'user' })}
-          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
         >
           <Plus className="h-3.5 w-3.5" />
           新建我的 Skill
@@ -6213,12 +6362,12 @@ function MigrationManageTab() {
           <button
             type="button"
             onClick={() => selectMany(allSelfIds, !allSelfIds.every((id) => selectedIds.has(id)))}
-            className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+            className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
           >
             {allSelfIds.every((id) => selectedIds.has(id)) ? '取消全选我的' : '全选我的'}
           </button>
         )}
-        <span className="ml-auto text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <span className="ml-auto text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           已选 {selectedManageable.length} 条 (可管理)
         </span>
       </div>
@@ -6227,13 +6376,13 @@ function MigrationManageTab() {
         <div
           className="flex flex-wrap items-center gap-2 rounded-md border border-cyan-500/30 bg-cyan-500/10 px-3 py-2"
         >
-          <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+          <span className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
             批量操作 ({selectedManageable.length} 条):
           </span>
           <button
             type="button"
             onClick={() => setBatchAccessOpen(true)}
-            className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] bg-[var(--bg-card)] px-2 text-[11.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+            className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
           >
             <Eye className="h-3.5 w-3.5" />
             批量修改权限
@@ -6241,7 +6390,7 @@ function MigrationManageTab() {
           <button
             type="button"
             onClick={() => setBatchMoveOpen(true)}
-            className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] bg-[var(--bg-card)] px-2 text-[11.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+            className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] bg-[var(--bg-card)] px-2 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
           >
             <FolderOpen className="h-3.5 w-3.5" />
             批量转移
@@ -6249,7 +6398,7 @@ function MigrationManageTab() {
           <button
             type="button"
             onClick={handleBatchDelete}
-            className="inline-flex h-7 items-center gap-1 rounded border border-red-500/30 bg-red-500/10 px-2 text-[11.5px] text-red-300 transition-colors hover:bg-red-500/15"
+            className="inline-flex h-7 items-center gap-1 rounded border border-red-500/30 bg-red-500/10 px-2 text-[length:var(--fs-sm)] text-red-300 transition-colors hover:bg-red-500/15"
           >
             <Trash2 className="h-3.5 w-3.5" />
             批量删除
@@ -6257,7 +6406,7 @@ function MigrationManageTab() {
           <button
             type="button"
             onClick={() => setSelectedIds(new Set())}
-            className="ml-auto inline-flex h-7 items-center rounded px-2 text-[11.5px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+            className="ml-auto inline-flex h-7 items-center rounded px-2 text-[length:var(--fs-sm)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
           >
             取消选择
           </button>
@@ -6265,21 +6414,21 @@ function MigrationManageTab() {
       )}
 
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
       )}
 
       {notice && (
-        <div className="inline-flex items-center gap-1.5 self-start rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1.5 text-[12px] text-emerald-300">
+        <div className="inline-flex items-center gap-1.5 self-start rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1.5 text-[length:var(--fs-md)] text-emerald-300">
           <Check className="h-3.5 w-3.5" />
           {notice}
         </div>
       )}
 
       {loading && !inventory && (
-        <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="flex items-center gap-2 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           加载中…
         </div>
@@ -6319,7 +6468,7 @@ function MigrationManageTab() {
 
           {/* 规则 4: 他人用户级 — 只读 */}
           {othersUserScopes.length > 0 && (
-            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               以下为他人用户级 Skill / Memory, 仅可查看, 不可添加、修改权限、移动或删除.
             </div>
           )}
@@ -6335,7 +6484,7 @@ function MigrationManageTab() {
 
           {/* 规则 5: 他人项目的项目级 — 只读 */}
           {othersProjects.length > 0 && (
-            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               以下为他人项目的项目级 Skill / Memory, 仅可查看, 不可添加、修改权限、移动或删除.
             </div>
           )}
@@ -6501,7 +6650,7 @@ function MigrationItemEditModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3">
-          <h4 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h4 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             {isCreate ? `新建 ${kind === 'memory' ? 'Memory' : 'Skill'}` : `编辑 ${kind === 'memory' ? 'Memory' : 'Skill'}`}
           </h4>
           <div className="flex items-center gap-2">
@@ -6509,50 +6658,50 @@ function MigrationItemEditModal({
             <button
               type="button"
               onClick={onClose}
-              className="text-[12px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+              className="text-[length:var(--fs-md)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
             >
               关闭
             </button>
           </div>
         </div>
         {error && (
-          <div className="rounded-md border border-red-500/25 bg-red-500/10 px-2.5 py-1.5 text-[12px] text-red-300">
+          <div className="rounded-md border border-red-500/25 bg-red-500/10 px-2.5 py-1.5 text-[length:var(--fs-md)] text-red-300">
             {error}
           </div>
         )}
         <label className="flex flex-col gap-1">
-          <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>名称</span>
+          <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>名称</span>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="h-9 rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-[13px]"
+            className="h-9 rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-[length:var(--fs-lg)]"
             style={{ color: 'var(--text-primary)' }}
           />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>描述</span>
+          <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>描述</span>
           <input
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="一句话描述 (可空)"
-            className="h-9 rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-[13px]"
+            className="h-9 rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] px-3 text-[length:var(--fs-lg)]"
             style={{ color: 'var(--text-primary)' }}
           />
         </label>
         {kind === 'memory' && (
           <label className="flex min-h-0 flex-1 flex-col gap-1">
-            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>正文 (Markdown)</span>
+            <span className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>正文 (Markdown)</span>
             <textarea
               value={body}
               onChange={(e) => setBody(e.target.value)}
               rows={12}
-              className="min-h-[200px] w-full flex-1 resize-y rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] p-2 font-mono text-[12px]"
+              className="min-h-[200px] w-full flex-1 resize-y rounded-md border border-[var(--input-border)] bg-[var(--input-bg)] p-2 font-mono text-[length:var(--fs-md)]"
               style={{ color: 'var(--text-primary)' }}
             />
           </label>
         )}
         {kind === 'skill' && (
-          <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+          <div className="rounded-md border border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             Skill 的多文件结构不在面板内编辑. 创建会调用 npx 安装; 已存在的 Skill 可改名称与描述, body 请在文件系统中编辑.
           </div>
         )}
@@ -6560,7 +6709,7 @@ function MigrationItemEditModal({
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[12.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
           >
             取消
           </button>
@@ -6568,7 +6717,7 @@ function MigrationItemEditModal({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[12.5px] font-medium text-white transition-colors disabled:opacity-50"
+            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors disabled:opacity-50"
             style={{ background: '#2563eb' }}
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
@@ -6601,15 +6750,11 @@ function MigrationItemAccessModal({
     ? [
         { value: 'inherit', label: '继承项目', description: '跟随所属项目的可见性。' },
         { value: 'private', label: '仅自己', description: '只有创建者和管理员可见。' },
-        { value: 'team', label: '同组', description: '同一群组用户可见。' },
         { value: 'public', label: '公开', description: '所有登录用户可见。' },
-        { value: 'allowlist', label: '指定用户', description: '只有创建者、管理员和允许名单中的用户可见。' },
       ]
     : [
         { value: 'private', label: '仅自己', description: '只有创建者和管理员可见。' },
-        { value: 'team', label: '同组', description: '同一群组用户可见。' },
         { value: 'public', label: '公开', description: '所有登录用户可见。' },
-        { value: 'allowlist', label: '指定用户', description: '只有创建者、管理员和允许名单中的用户可见。' },
       ]
 
   const handleSave = async () => {
@@ -6635,22 +6780,22 @@ function MigrationItemAccessModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h4 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h4 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             修改权限 · {kindLabel}
           </h4>
           <button
             type="button"
             onClick={onClose}
-            className="text-[12px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+            className="text-[length:var(--fs-md)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
           >
             关闭
           </button>
         </div>
-        <div className="truncate text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="truncate text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           目标: {item.name} ({item.id})
         </div>
         {error && (
-          <div className="rounded-md border border-red-500/25 bg-red-500/10 px-2.5 py-1.5 text-[12px] text-red-300">
+          <div className="rounded-md border border-red-500/25 bg-red-500/10 px-2.5 py-1.5 text-[length:var(--fs-md)] text-red-300">
             {error}
           </div>
         )}
@@ -6673,8 +6818,8 @@ function MigrationItemAccessModal({
                 className="mt-0.5 h-3.5 w-3.5"
               />
               <div className="min-w-0">
-                <div className="text-[12.5px] font-medium" style={{ color: 'var(--text-primary)' }}>{opt.label}</div>
-                <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{opt.description}</div>
+                <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>{opt.label}</div>
+                <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{opt.description}</div>
               </div>
             </label>
           ))}
@@ -6683,7 +6828,7 @@ function MigrationItemAccessModal({
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[12.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
           >
             取消
           </button>
@@ -6691,7 +6836,7 @@ function MigrationItemAccessModal({
             type="button"
             onClick={handleSave}
             disabled={saving}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[12.5px] font-medium text-white transition-colors disabled:opacity-50"
+            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors disabled:opacity-50"
             style={{ background: '#2563eb' }}
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
@@ -6715,9 +6860,7 @@ function MigrationBatchAccessModal({
   const [visibility, setVisibility] = useState<string>('private')
   const options = [
     { value: 'private', label: '仅自己', description: '只有创建者和管理员可见' },
-    { value: 'team', label: '同组', description: '同一群组用户可见' },
     { value: 'public', label: '公开', description: '所有登录用户可见' },
-    { value: 'allowlist', label: '指定用户', description: '只允许指定用户列表可见' },
   ]
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
@@ -6726,18 +6869,18 @@ function MigrationBatchAccessModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h4 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h4 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             批量修改权限
           </h4>
           <button
             type="button"
             onClick={onClose}
-            className="text-[12px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+            className="text-[length:var(--fs-md)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
           >
             关闭
           </button>
         </div>
-        <div className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           将对选中的 <span style={{ color: 'var(--text-primary)' }}>{count}</span> 条 Skill / Memory 应用统一的可见性. 项目级条目同时支持「继承项目」.
         </div>
         <div className="flex flex-col gap-1.5">
@@ -6759,8 +6902,8 @@ function MigrationBatchAccessModal({
                 className="mt-0.5 h-3.5 w-3.5"
               />
               <div className="min-w-0">
-                <div className="text-[12.5px] font-medium" style={{ color: 'var(--text-primary)' }}>{opt.label}</div>
-                <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{opt.description}</div>
+                <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>{opt.label}</div>
+                <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{opt.description}</div>
               </div>
             </label>
           ))}
@@ -6769,14 +6912,14 @@ function MigrationBatchAccessModal({
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[12.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
           >
             取消
           </button>
           <button
             type="button"
             onClick={() => onConfirm(visibility)}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[12.5px] font-medium text-white transition-colors"
+            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors"
             style={{ background: '#2563eb' }}
           >
             <Save className="h-3.5 w-3.5" />
@@ -6819,18 +6962,18 @@ function MigrationMoveTargetModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h4 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h4 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>
             {batchCount ? '批量转移' : `${copiesSource ? '复制' : '移动'} · ${kindLabel}`}
           </h4>
           <button
             type="button"
             onClick={onClose}
-            className="text-[12px] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+            className="text-[length:var(--fs-md)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
           >
             关闭
           </button>
         </div>
-        <div className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           目标: {targetLabel}. {batchCount
             ? 'Skill 会复制并保留来源，Memory 会移动；目标只能选择自己拥有的位置。'
             : copiesSource
@@ -6853,8 +6996,8 @@ function MigrationMoveTargetModal({
               className="mt-0.5 h-3.5 w-3.5"
             />
             <div>
-              <div className="text-[12.5px] font-medium" style={{ color: 'var(--text-primary)' }}>用户级</div>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>用户级</div>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 {copiesSource ? '复制到' : '移动到'}我的用户级 ({inventory?.current_user_id})
               </div>
             </div>
@@ -6874,13 +7017,13 @@ function MigrationMoveTargetModal({
               className="mt-0.5 h-3.5 w-3.5"
             />
             <div className="min-w-0 flex-1">
-              <div className="text-[12.5px] font-medium" style={{ color: 'var(--text-primary)' }}>我创建的项目</div>
-              <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>项目级 (继承项目可见性)</div>
+              <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>我创建的项目</div>
+              <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>项目级 (继承项目可见性)</div>
               <select
                 value={projectId}
                 onChange={(e) => setProjectId(e.target.value)}
                 disabled={targetScope !== 'project' || ownProjects.length === 0}
-                className="mt-1.5 h-8 w-full rounded border border-[var(--input-border)] bg-[var(--input-bg)] px-2 text-[12px]"
+                className="mt-1.5 h-8 w-full rounded border border-[var(--input-border)] bg-[var(--input-bg)] px-2 text-[length:var(--fs-md)]"
                 style={{ color: 'var(--text-primary)' }}
               >
                 <option value="">{ownProjects.length === 0 ? '(没有可写入的项目)' : '请选择项目'}</option>
@@ -6895,7 +7038,7 @@ function MigrationMoveTargetModal({
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[12.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+            className="inline-flex h-9 items-center rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
           >
             取消
           </button>
@@ -6906,7 +7049,7 @@ function MigrationMoveTargetModal({
               onConfirm(targetScope, targetScope === 'project' ? projectId : undefined)
             }}
             disabled={targetScope === 'project' && !projectId}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[12.5px] font-medium text-white transition-colors disabled:opacity-50"
+            className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-md)] font-medium text-white transition-colors disabled:opacity-50"
             style={{ background: '#2563eb' }}
           >
             {copiesSource ? <Copy className="h-3.5 w-3.5" /> : <FolderOpen className="h-3.5 w-3.5" />}
@@ -7017,7 +7160,7 @@ function MigrationExportTab() {
           type="button"
           onClick={refresh}
           disabled={loading}
-          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[12px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-color)] px-2.5 text-[length:var(--fs-md)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           刷新清单
@@ -7026,7 +7169,7 @@ function MigrationExportTab() {
           <button
             type="button"
             onClick={() => setScopeView('self')}
-            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[12px] font-medium transition-colors"
+            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[length:var(--fs-md)] font-medium transition-colors"
             style={{
               background: scopeView === 'self' ? 'var(--bg-hover)' : 'transparent',
               color: scopeView === 'self' ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -7037,7 +7180,7 @@ function MigrationExportTab() {
           <button
             type="button"
             onClick={() => setScopeView('all')}
-            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[12px] font-medium transition-colors"
+            className="inline-flex h-7 items-center gap-1 rounded px-2.5 text-[length:var(--fs-md)] font-medium transition-colors"
             style={{
               background: scopeView === 'all' ? 'var(--bg-hover)' : 'transparent',
               color: scopeView === 'all' ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -7046,20 +7189,20 @@ function MigrationExportTab() {
             显示全部
           </button>
         </div>
-        <span className="text-[12px] ml-auto" style={{ color: 'var(--text-muted)' }}>
+        <span className="text-[length:var(--fs-md)] ml-auto" style={{ color: 'var(--text-muted)' }}>
           已勾选 {totalSelected} 条 (Memory {selectedMemoryIds.size} / Skill {selectedSkillIds.size})
         </span>
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
       )}
 
       {loading && !inventory && (
-        <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="flex items-center gap-2 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           加载清单中…
         </div>
@@ -7100,14 +7243,14 @@ function MigrationExportTab() {
               type="button"
               onClick={handleExport}
               disabled={exporting || totalSelected === 0}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
+              className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-lg)] font-medium text-white transition-colors disabled:opacity-50"
               style={{ background: '#2563eb' }}
             >
               {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
               生成 base64 字符串
             </button>
             {bundleSummary && (
-              <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+              <span className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
                 共 {bundleSummary.total} 条 (Memory {bundleSummary.memories} / Skill {bundleSummary.skills}) · {bundleSummary.bytes} bytes
               </span>
             )}
@@ -7116,13 +7259,13 @@ function MigrationExportTab() {
           {bundle && (
             <div className="flex flex-col gap-2 rounded-lg border border-[var(--border-color)] bg-[var(--input-bg)] p-2">
               <div className="flex items-center justify-between">
-                <span className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                <span className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
                   备份字符串 (base64)
                 </span>
                 <button
                   type="button"
                   onClick={copyToClipboard}
-                  className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] px-2 text-[11.5px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                  className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-color)] px-2 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
                 >
                   {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                   {copied ? '已复制' : '复制'}
@@ -7132,7 +7275,7 @@ function MigrationExportTab() {
                 readOnly
                 value={bundle}
                 rows={6}
-                className="w-full resize-y rounded border border-[var(--input-border)] bg-[var(--bg-secondary)] p-2 font-mono text-[11px]"
+                className="w-full resize-y rounded border border-[var(--input-border)] bg-[var(--bg-secondary)] p-2 font-mono text-[length:var(--fs-sm)]"
                 style={{ color: 'var(--text-primary)' }}
               />
             </div>
@@ -7173,11 +7316,11 @@ function MigrationScopeBlock({
     <div className="rounded-lg border border-[var(--border-color)] p-3" style={{ background: 'var(--bg-secondary)' }}>
       <div className="mb-2 flex items-center justify-between">
         <div className="min-w-0">
-          <div className="truncate text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
+          <div className="truncate text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>
             {title}
           </div>
           {subtitle && (
-            <div className="truncate text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               {subtitle}
             </div>
           )}
@@ -7187,7 +7330,7 @@ function MigrationScopeBlock({
             <button
               type="button"
               onClick={() => onBulkMemory(memories.map((m) => m.id), !allMemSelected)}
-              className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+              className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
             >
               {allMemSelected ? '取消 Memory' : '全选 Memory'}
             </button>
@@ -7196,7 +7339,7 @@ function MigrationScopeBlock({
             <button
               type="button"
               onClick={() => onBulkSkill(skills.map((s) => s.id), !allSkSelected)}
-              className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
+              className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]"
             >
               {allSkSelected ? '取消 Skill' : '全选 Skill'}
             </button>
@@ -7204,18 +7347,18 @@ function MigrationScopeBlock({
         </div>
       </div>
       {isEmpty ? (
-        <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-3 text-center text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+        <div className="rounded-md border border-dashed border-[var(--border-color)] px-3 py-3 text-center text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
           这个 scope 下没有 Skill / Memory.
         </div>
       ) : (
         <div className="grid gap-2 md:grid-cols-2">
           <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-1.5 text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="flex items-center gap-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               <FileText className="h-3.5 w-3.5" />
               Memory ({memories.length})
             </div>
             {memories.length === 0 ? (
-              <div className="rounded-md border border-dashed border-[var(--border-color)] px-2 py-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="rounded-md border border-dashed border-[var(--border-color)] px-2 py-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 无
               </div>
             ) : memories.map((m) => (
@@ -7230,12 +7373,12 @@ function MigrationScopeBlock({
             ))}
           </div>
           <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-1.5 text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="flex items-center gap-1.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               <Sparkles className="h-3.5 w-3.5" />
               Skill ({skills.length})
             </div>
             {skills.length === 0 ? (
-              <div className="rounded-md border border-dashed border-[var(--border-color)] px-2 py-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              <div className="rounded-md border border-dashed border-[var(--border-color)] px-2 py-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
                 无
               </div>
             ) : skills.map((s) => (
@@ -7365,7 +7508,7 @@ function MigrationImportTab() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-1">
-        <label className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+        <label className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
           1. 粘贴 base64 备份字符串
         </label>
         <textarea
@@ -7373,19 +7516,19 @@ function MigrationImportTab() {
           onChange={(e) => setBundleInput(e.target.value)}
           placeholder="把上一步导出得到的 base64 字符串粘贴到这里"
           rows={5}
-          className="w-full resize-y rounded border border-[var(--input-border)] bg-[var(--input-bg)] p-2 font-mono text-[11px]"
+          className="w-full resize-y rounded border border-[var(--input-border)] bg-[var(--input-bg)] p-2 font-mono text-[length:var(--fs-sm)]"
           style={{ color: 'var(--text-primary)' }}
         />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <label className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
+        <label className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
           2. 选择导入目标
         </label>
         <select
           value={targetValue}
           onChange={(e) => onTargetChange(e.target.value)}
-          className="h-8 rounded border border-[var(--input-border)] bg-[var(--input-bg)] px-2 text-[12px]"
+          className="h-8 rounded border border-[var(--input-border)] bg-[var(--input-bg)] px-2 text-[length:var(--fs-md)]"
           style={{ color: 'var(--text-primary)' }}
         >
           <option value="__user__">用户级 (当前管理员)</option>
@@ -7402,7 +7545,7 @@ function MigrationImportTab() {
           type="button"
           onClick={handlePreview}
           disabled={previewing || !bundleInput.trim()}
-          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[13px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
+          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-lg)] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-50"
         >
           {previewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
           3. 预览备份内容
@@ -7410,7 +7553,7 @@ function MigrationImportTab() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[length:var(--fs-md)] text-red-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           <span className="break-all">{error}</span>
         </div>
@@ -7419,30 +7562,30 @@ function MigrationImportTab() {
       {previewItems && (
         <div className="rounded-lg border border-[var(--border-color)] p-3" style={{ background: 'var(--bg-secondary)' }}>
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-[12.5px] font-medium" style={{ color: 'var(--text-primary)' }}>
+            <div className="text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>
               4. 勾选要导入的条目 ({selectedIndexes.size} / {previewItems.length})
             </div>
             <div className="flex flex-wrap gap-1.5">
               <button type="button" onClick={() => bulkSelect(true)}
-                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
+                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
                 全选
               </button>
               <button type="button" onClick={() => bulkSelect(false)}
-                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
+                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
                 清空
               </button>
               <button type="button" onClick={() => bulkSelect(true, (it) => it.kind === 'memory')}
-                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
+                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
                 仅选 Memory
               </button>
               <button type="button" onClick={() => bulkSelect(true, (it) => it.kind === 'skill')}
-                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
+                className="rounded border border-[var(--border-color)] px-1.5 py-0.5 text-[length:var(--fs-sm)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)]">
                 仅选 Skill
               </button>
             </div>
           </div>
           {previewMeta && (previewMeta.exported_at || previewMeta.exported_by) && (
-            <div className="mb-2 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="mb-2 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               来源: {previewMeta.exported_by || '(未知)'} · 导出时间: {formatAbsolute(previewMeta.exported_at) || '(未知)'}
             </div>
           )}
@@ -7468,7 +7611,7 @@ function MigrationImportTab() {
               type="button"
               onClick={handleImport}
               disabled={importing || selectedIndexes.size === 0}
-              className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
+              className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-lg)] font-medium text-white transition-colors disabled:opacity-50"
               style={{ background: '#16a34a' }}
             >
               {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
@@ -7480,18 +7623,18 @@ function MigrationImportTab() {
 
       {result && (
         <div className="rounded-lg border border-[var(--border-color)] p-3" style={{ background: 'var(--bg-secondary)' }}>
-          <div className="mb-2 flex items-center gap-2 text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>
+          <div className="mb-2 flex items-center gap-2 text-[length:var(--fs-lg)] font-medium" style={{ color: 'var(--text-primary)' }}>
             <FolderOpen className="h-4 w-4" />
             导入结果
           </div>
-          <div className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+          <div className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
             成功 {result.imported.length} 条, 跳过 {result.skipped.length} 条
           </div>
           {result.imported.length > 0 && (
-            <ul className="mt-2 space-y-0.5 text-[11.5px]" style={{ color: 'var(--text-primary)' }}>
+            <ul className="mt-2 space-y-0.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-primary)' }}>
               {result.imported.map((it, i) => (
                 <li key={i}>
-                  <span className="mr-1 rounded bg-[var(--bg-hover)] px-1 py-px text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                  <span className="mr-1 rounded bg-[var(--bg-hover)] px-1 py-px text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>
                     {it.kind === 'memory' ? 'MEM' : 'SKILL'}
                   </span>
                   {it.name}
@@ -7500,10 +7643,10 @@ function MigrationImportTab() {
             </ul>
           )}
           {result.skipped.length > 0 && (
-            <ul className="mt-2 space-y-0.5 text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            <ul className="mt-2 space-y-0.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               {result.skipped.map((it, i) => (
                 <li key={i}>
-                  <span className="mr-1 rounded bg-[var(--bg-hover)] px-1 py-px text-[10px]">
+                  <span className="mr-1 rounded bg-[var(--bg-hover)] px-1 py-px text-[length:var(--fs-xs)]">
                     {it.kind === 'memory' ? 'MEM' : 'SKILL'}
                   </span>
                   {it.name} — {it.reason}
@@ -7514,6 +7657,261 @@ function MigrationImportTab() {
         </div>
       )}
     </div>
+  )
+}
+
+function AdminCustomLogoCard() {
+  const customLogo = useCustomLogo()
+  const hideLogo = useStore((s) => s.branding.hideLogo)
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    if (!notice && !error) return undefined
+    const timer = window.setTimeout(() => { setNotice(''); setError('') }, 4000)
+    return () => window.clearTimeout(timer)
+  }, [notice, error])
+
+  const pickFile = async (file: File) => {
+    setNotice('')
+    setError('')
+    try {
+      const dataUrl = await importCustomLogoFile(file)
+      writeCustomLogo(dataUrl)
+      setNotice(`已替换为「${file.name}」，仅保存在当前浏览器`)
+    } catch (e: any) {
+      setError(e?.message || '图片处理失败，请换一张图片')
+    }
+  }
+
+  const restoreDefault = () => {
+    if (!window.confirm('恢复为默认 Logo？自定义图片会从当前浏览器移除。')) return
+    writeCustomLogo(null)
+    setError('')
+    setNotice('已恢复默认 Logo')
+  }
+
+  const maxSizeMb = Math.round(CUSTOM_LOGO_MAX_FILE_BYTES / 1024 / 1024)
+
+  return (
+    <section
+      data-text-redaction-ignore="true"
+      data-tour="admin-section-custom-logo"
+      className="overflow-hidden rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)]"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-color)] px-4 py-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <ImagePlus className="h-4 w-4 text-cyan-400" />
+            <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>自定义 Logo</h3>
+          </div>
+          <p className="mt-1 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
+            上传一张图片替换莫比乌斯默认 Logo，作用于顶栏、登录页、欢迎页以及浏览器标签页图标。图片只保存在当前浏览器，不会上传到服务器。
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-3 text-[length:var(--fs-md)] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/15"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            {customLogo ? '更换图片' : '选择图片'}
+          </button>
+          <button
+            type="button"
+            onClick={restoreDefault}
+            disabled={!customLogo}
+            title={customLogo ? undefined : '当前使用的就是默认 Logo'}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            恢复默认
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-4 px-4 py-4">
+        <div
+          className="flex h-20 w-20 shrink-0 items-center justify-center rounded-lg border border-[var(--border-color)]"
+          style={{ background: 'var(--bg-secondary)' }}
+        >
+          <img
+            src={customLogo || '/logo.png'}
+            alt="Logo 预览"
+            className="max-h-14 max-w-14 object-contain"
+            draggable={false}
+          />
+        </div>
+        <div className="min-w-0 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
+          <div style={{ color: 'var(--text-primary)' }}>
+            {customLogo ? '当前：自定义 Logo' : '当前：默认 Logo'}
+          </div>
+          <div className="mt-1">支持 PNG / JPG / SVG / WebP，不超过 {maxSizeMb}MB；过大的图片会自动等比缩小。</div>
+          <div className="mt-1">换浏览器或清除浏览器数据后需要重新上传。</div>
+          {hideLogo && (
+            <div className="mt-1 text-amber-400">
+              当前系统配置已关闭 Logo 展示（MOBIUS_ADVANCED_HIDE_LOGO），自定义 Logo 暂不会显示。
+            </div>
+          )}
+        </div>
+      </div>
+
+      {(notice || error) && (
+        <div className="border-t border-[var(--border-color)] px-4 py-2 text-[length:var(--fs-md)]" style={{ color: error ? '#f87171' : 'var(--text-secondary)' }}>
+          {error || notice}
+        </div>
+      )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          // 同一文件二次选择也要触发 change, 因此每次都清空 value.
+          event.target.value = ''
+          if (file) void pickFile(file)
+        }}
+      />
+    </section>
+  )
+}
+
+function AdminBrandNameCard() {
+  const branding = useStore((s) => s.branding)
+  const override = useBrandNameOverride()
+  const [zh, setZh] = useState(override.zh)
+  const [en, setEn] = useState(override.en)
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+
+  // 其他标签页改了自定义名 (storage 事件) 时把输入框同步过来.
+  useEffect(() => {
+    setZh(override.zh)
+    setEn(override.en)
+  }, [override.zh, override.en])
+
+  useEffect(() => {
+    if (!notice && !error) return undefined
+    const timer = window.setTimeout(() => { setNotice(''); setError('') }, 4000)
+    return () => window.clearTimeout(timer)
+  }, [notice, error])
+
+  const hasOverride = !!(override.zh || override.en)
+  const maxLength = 40
+
+  const save = () => {
+    setNotice('')
+    setError('')
+    const nextZh = zh.trim()
+    const nextEn = en.trim()
+    if (nextZh.length > maxLength || nextEn.length > maxLength) {
+      setError(`名称不能超过 ${maxLength} 个字符`)
+      return
+    }
+    try {
+      writeBrandNameOverride({ zh: nextZh, en: nextEn })
+      setNotice(nextZh || nextEn ? '已保存，仅对当前浏览器生效' : '已清除自定义名称，恢复服务端下发名称')
+    } catch {
+      setError('浏览器存储空间不足，保存失败')
+    }
+  }
+
+  const restoreDefault = () => {
+    if (!hasOverride) return
+    if (!window.confirm('恢复为服务端下发的系统名称？自定义名称会从当前浏览器移除。')) return
+    writeBrandNameOverride({ zh: '', en: '' })
+    setZh('')
+    setEn('')
+    setError('')
+    setNotice('已恢复服务端下发名称')
+  }
+
+  return (
+    <section
+      data-text-redaction-ignore="true"
+      data-tour="admin-section-brand-name"
+      className="overflow-hidden rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)]"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-color)] px-4 py-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Type className="h-4 w-4 text-cyan-400" />
+            <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>自定义系统名称</h3>
+          </div>
+          <p className="mt-1 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
+            替换系统名称，作用于浏览器标签标题、登录页等位置。只保存在当前浏览器，不会上传到服务器。
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={save}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-3 text-[length:var(--fs-md)] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/15"
+          >
+            <Save className="h-3.5 w-3.5" />
+            保存名称
+          </button>
+          <button
+            type="button"
+            onClick={restoreDefault}
+            disabled={!hasOverride}
+            title={hasOverride ? undefined : '当前使用的就是服务端下发的名称'}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            恢复默认
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 px-4 py-4 md:grid-cols-2">
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>中文名称</span>
+          <input
+            type="text"
+            value={zh}
+            maxLength={maxLength}
+            onChange={(event) => setZh(event.target.value)}
+            placeholder={`默认：${SERVER_BRAND_NAME.zh}`}
+            className="h-9 w-full rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-lg)] outline-none transition-colors focus:border-cyan-500/60"
+            style={{ background: 'var(--input-bg)', color: 'var(--text-primary)' }}
+          />
+        </label>
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>英文名称</span>
+          <input
+            type="text"
+            value={en}
+            maxLength={maxLength}
+            onChange={(event) => setEn(event.target.value)}
+            placeholder={`默认：${SERVER_BRAND_NAME.en}`}
+            className="h-9 w-full rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-lg)] outline-none transition-colors focus:border-cyan-500/60"
+            style={{ background: 'var(--input-bg)', color: 'var(--text-primary)' }}
+          />
+        </label>
+      </div>
+
+      <div className="px-4 pb-4 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
+        <div>
+          当前生效：{branding.systemNameZh || '（空）'}
+          {branding.systemNameEn ? ` / ${branding.systemNameEn}` : ''}
+          {hasOverride ? '（含本机自定义）' : '（服务端下发）'}
+        </div>
+        <div className="mt-1">留空表示该项不覆盖；换浏览器或清除浏览器数据后需要重新设置。</div>
+      </div>
+
+      {(notice || error) && (
+        <div className="border-t border-[var(--border-color)] px-4 py-2 text-[length:var(--fs-md)]" style={{ color: error ? '#f87171' : 'var(--text-secondary)' }}>
+          {error || notice}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -7702,9 +8100,9 @@ function AdminTextRedactionPanel() {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <EyeOff className="h-4 w-4 text-cyan-400" />
-            <h3 className="text-[14px] font-semibold" style={{ color: 'var(--text-primary)' }}>文字替换隐藏</h3>
+            <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>文字替换隐藏</h3>
           </div>
-          <p className="mt-1 text-[12px]" style={{ color: 'var(--text-muted)' }}>
+          <p className="mt-1 text-[length:var(--fs-md)]" style={{ color: 'var(--text-muted)' }}>
             临时用于录屏隐藏敏感文字，规则只保存在当前浏览器，可随时清空。关闭后全部规则都会保留，不会被删除。
           </p>
         </div>
@@ -7715,7 +8113,7 @@ function AdminTextRedactionPanel() {
             aria-checked={globallyEnabled}
             onClick={toggleGlobalEnabled}
             disabled={rules.length === 0}
-            className="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--border-color)] px-2.5 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--border-color)] px-2.5 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
             style={{ color: 'var(--text-primary)' }}
             title={rules.length === 0 ? '请先添加至少一条规则' : undefined}
           >
@@ -7738,14 +8136,14 @@ function AdminTextRedactionPanel() {
               />
             </span>
           </button>
-          <span className="rounded-md border border-[var(--border-color)] px-2 py-1 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+          <span className="rounded-md border border-[var(--border-color)] px-2 py-1 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
             规则 {rules.length} 条{globallyEnabled ? `（启用 ${activeCount}）` : ''}
           </span>
           <button
             type="button"
             onClick={() => downloadRules('json')}
             disabled={rules.length === 0}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Download className="h-3.5 w-3.5" />
@@ -7754,7 +8152,7 @@ function AdminTextRedactionPanel() {
           <button
             type="button"
             onClick={() => persistRules(rules, '规则已保存并立即生效')}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-3 text-[12px] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/15"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-500/35 bg-cyan-500/10 px-3 text-[length:var(--fs-md)] font-medium text-cyan-300 transition-colors hover:bg-cyan-500/15"
           >
             <Save className="h-3.5 w-3.5" />
             保存规则
@@ -7765,7 +8163,7 @@ function AdminTextRedactionPanel() {
               onClick={pushGlobalRules}
               disabled={pushing || rules.length === 0}
               title="把当前规则推送到后端，所有用户登录后会同步覆盖本地"
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-500/45 bg-amber-500/15 px-3 text-[12px] font-semibold text-amber-200 transition-colors hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-500/45 bg-amber-500/15 px-3 text-[length:var(--fs-md)] font-semibold text-amber-200 transition-colors hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
               强制所有人替换
@@ -7775,7 +8173,7 @@ function AdminTextRedactionPanel() {
             type="button"
             onClick={clearRules}
             disabled={rules.length === 0}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
             style={{ color: 'var(--text-secondary)' }}
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -7785,13 +8183,13 @@ function AdminTextRedactionPanel() {
       </div>
 
       <div className="space-y-4 p-4">
-        <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-[12px] leading-5 text-cyan-100">
+        <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-[length:var(--fs-md)] leading-5 text-cyan-100">
           替换会立即作用于页面里的普通文本、标题提示和占位提示；不会改写输入框内容，避免误保存真实数据。
           命中关键词的文本框会整体模糊（不改 value，仅视觉遮蔽）。
         </div>
 
         {isAdmin && globalUpdatedAt && (
-          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-100">
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[length:var(--fs-md)] leading-5 text-amber-100">
             全员规则最后更新：{formatAbsolute(globalUpdatedAt)}{globalUpdatedBy ? ` · 由 ${globalUpdatedBy}` : ''}
             <span className="ml-1 text-amber-200/70">（其他用户下次进入应用时同步）</span>
           </div>
@@ -7805,28 +8203,28 @@ function AdminTextRedactionPanel() {
           }}
         >
           <label className="min-w-0">
-            <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>关键词</span>
+            <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>关键词</span>
             <input
               value={newKeyword}
               onChange={(event) => setNewKeyword(event.target.value)}
               placeholder="例如真实姓名、项目名、地址"
-              className="h-9 w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 text-[13px] outline-none focus:border-cyan-500/60"
+              className="h-9 w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 text-[length:var(--fs-lg)] outline-none focus:border-cyan-500/60"
               style={{ color: 'var(--text-primary)' }}
             />
           </label>
           <label className="min-w-0">
-            <span className="mb-1 block text-[11px]" style={{ color: 'var(--text-muted)' }}>替换为</span>
+            <span className="mb-1 block text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>替换为</span>
             <input
               value={newReplacement}
               onChange={(event) => setNewReplacement(event.target.value)}
               placeholder="例如用户A；留空表示直接隐藏"
-              className="h-9 w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 text-[13px] outline-none focus:border-cyan-500/60"
+              className="h-9 w-full rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 text-[length:var(--fs-lg)] outline-none focus:border-cyan-500/60"
               style={{ color: 'var(--text-primary)' }}
             />
           </label>
           <button
             type="submit"
-            className="mt-5 inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-cyan-500 px-3 text-[12px] font-semibold text-slate-950 transition-colors hover:bg-cyan-400"
+            className="mt-5 inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-cyan-500 px-3 text-[length:var(--fs-md)] font-semibold text-slate-950 transition-colors hover:bg-cyan-400"
           >
             <Plus className="h-3.5 w-3.5" />
             添加规则
@@ -7835,25 +8233,25 @@ function AdminTextRedactionPanel() {
 
         <div className="grid gap-3 rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3 lg:grid-cols-[minmax(0,1fr)_260px]">
           <label className="min-w-0">
-            <span className="mb-1 block text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>批量导入</span>
+            <span className="mb-1 block text-[length:var(--fs-sm)] font-medium" style={{ color: 'var(--text-muted)' }}>批量导入</span>
             <textarea
               value={importDraft}
               onChange={(event) => setImportDraft(event.target.value)}
               placeholder={'每行一条：关键词 => 替换词\n也支持 CSV：keyword,replacement,enabled\n或粘贴导出的 JSON'}
               rows={5}
-              className="min-h-[118px] w-full resize-y rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-[12px] leading-5 outline-none focus:border-cyan-500/60"
+              className="min-h-[118px] w-full resize-y rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-[length:var(--fs-md)] leading-5 outline-none focus:border-cyan-500/60"
               style={{ color: 'var(--text-primary)' }}
             />
           </label>
           <div className="flex min-w-0 flex-col justify-between gap-3">
-            <p className="text-[12px] leading-5" style={{ color: 'var(--text-muted)' }}>
+            <p className="text-[length:var(--fs-md)] leading-5" style={{ color: 'var(--text-muted)' }}>
               导入时按关键词合并：已存在的关键词会更新替换词，新关键词会追加。替换词留空表示直接隐藏。
             </p>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => importRulesFromText(importDraft)}
-                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan-500 px-3 text-[12px] font-semibold text-slate-950 transition-colors hover:bg-cyan-400"
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md bg-cyan-500 px-3 text-[length:var(--fs-md)] font-semibold text-slate-950 transition-colors hover:bg-cyan-400"
               >
                 <Upload className="h-3.5 w-3.5" />
                 导入文本
@@ -7861,7 +8259,7 @@ function AdminTextRedactionPanel() {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)]"
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)]"
                 style={{ color: 'var(--text-secondary)' }}
               >
                 <FileText className="h-3.5 w-3.5" />
@@ -7871,7 +8269,7 @@ function AdminTextRedactionPanel() {
                 type="button"
                 onClick={() => downloadRules('json')}
                 disabled={rules.length === 0}
-                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 style={{ color: 'var(--text-secondary)' }}
               >
                 <Download className="h-3.5 w-3.5" />
@@ -7881,7 +8279,7 @@ function AdminTextRedactionPanel() {
                 type="button"
                 onClick={() => downloadRules('csv')}
                 disabled={rules.length === 0}
-                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[12px] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] px-3 text-[length:var(--fs-md)] font-medium transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 style={{ color: 'var(--text-secondary)' }}
               >
                 <Download className="h-3.5 w-3.5" />
@@ -7903,14 +8301,14 @@ function AdminTextRedactionPanel() {
         </div>
 
         {notice && (
-          <div className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1.5 text-[12px] text-emerald-300">
+          <div className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1.5 text-[length:var(--fs-md)] text-emerald-300">
             <Check className="h-3.5 w-3.5" />
             {notice}
           </div>
         )}
 
         <div className="overflow-hidden rounded-lg border border-[var(--border-color)]">
-          <div className="grid grid-cols-[80px_minmax(0,1fr)_minmax(0,1fr)_80px] gap-2 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
+          <div className="grid grid-cols-[80px_minmax(0,1fr)_minmax(0,1fr)_80px] gap-2 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] px-3 py-2 text-[length:var(--fs-sm)] font-medium" style={{ color: 'var(--text-muted)' }}>
             <div>状态</div>
             <div>关键词</div>
             <div>替换词</div>
@@ -7918,14 +8316,14 @@ function AdminTextRedactionPanel() {
           </div>
 
           {rules.length === 0 ? (
-            <div className="px-3 py-8 text-center text-[13px]" style={{ color: 'var(--text-muted)' }}>
+            <div className="px-3 py-8 text-center text-[length:var(--fs-lg)]" style={{ color: 'var(--text-muted)' }}>
               暂无规则。添加后，页面中匹配到的文字会被替换。
             </div>
           ) : (
             <div className="divide-y divide-[var(--border-color)]">
               {rules.map((rule) => (
                 <div key={rule.id} className="grid grid-cols-[80px_minmax(0,1fr)_minmax(0,1fr)_80px] items-center gap-2 px-3 py-2">
-                  <label className="inline-flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                  <label className="inline-flex items-center gap-1.5 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
                     <input
                       type="checkbox"
                       checked={rule.enabled}
@@ -7937,13 +8335,13 @@ function AdminTextRedactionPanel() {
                   <input
                     value={rule.keyword}
                     onChange={(event) => updateRule(rule.id, { keyword: event.target.value })}
-                    className="h-8 min-w-0 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 text-[12px] outline-none focus:border-cyan-500/60"
+                    className="h-8 min-w-0 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 text-[length:var(--fs-md)] outline-none focus:border-cyan-500/60"
                     style={{ color: 'var(--text-primary)' }}
                   />
                   <input
                     value={rule.replacement}
                     onChange={(event) => updateRule(rule.id, { replacement: event.target.value })}
-                    className="h-8 min-w-0 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 text-[12px] outline-none focus:border-cyan-500/60"
+                    className="h-8 min-w-0 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 text-[length:var(--fs-md)] outline-none focus:border-cyan-500/60"
                     style={{ color: 'var(--text-primary)' }}
                   />
                   <div className="text-right">
@@ -7963,7 +8361,7 @@ function AdminTextRedactionPanel() {
         </div>
 
         {rules.length > 0 && (
-          <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          <p className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
             修改已有规则后点击“保存规则”生效；空关键词会在保存时自动移除。
           </p>
         )}
@@ -7972,22 +8370,243 @@ function AdminTextRedactionPanel() {
   )
 }
 
-export type AdminPanelTab = 'users' | 'runtime' | 'redaction' | 'settings' | 'assistant' | 'models' | 'extensions' | 'migration'
+type AdminPermissionProject = {
+  id: string
+  name: string
+  kind?: string
+  bind_path?: string | null
+  created_by?: string
+  created_by_name?: string
+}
+
+type AdminPermissionMember = {
+  user_id: string
+  display_name: string
+  role: 'owner' | 'developer' | 'viewer' | 'none' | string
+  is_active?: boolean
+}
+
+function AdminProjectPermissionsPanel() {
+  const [projects, setProjects] = useState<AdminPermissionProject[]>([])
+  const [selectedId, setSelectedId] = useState('')
+  const [members, setMembers] = useState<AdminPermissionMember[]>([])
+  const [membersLoaded, setMembersLoaded] = useState(false)
+  const [candidates, setCandidates] = useState<Array<{ id: string; display_name: string; already_member?: boolean }>>([])
+  const [candidateId, setCandidateId] = useState('')
+  const [role, setRole] = useState<'developer' | 'viewer' | 'none'>('viewer')
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  // 当前登录用户: 决定头部是否给出"把自己加入该项目"的入口
+  // Current login user: decides whether the header offers the "add myself" shortcut
+  const currentUser = useStore((s) => s.user)
+
+  const selectedProject = projects.find((p) => p.id === selectedId) || null
+  // 自己在项目中的角色; 角色 none 表示"不显示", 等同于不在项目内
+  // Own role in the project; a 'none' role means hidden, i.e. treated as outside
+  const selfRole = currentUser ? members.find((m) => m.user_id === currentUser.id)?.role || null : null
+  // 已在项目内: 创建者即为负责人, 成员列表里可能没有 owner 行
+  // Already inside: the creator is the owner and may have no row in the member list
+  const selfInProject = Boolean(currentUser && (selectedProject?.created_by === currentUser.id || (selfRole && selfRole !== 'none')))
+  const visibleProjects = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return projects
+    return projects.filter((p) => `${p.name || ''} ${p.id} ${p.created_by || ''}`.toLowerCase().includes(q))
+  }, [projects, query])
+
+  const loadProjects = async () => {
+    setLoading(true)
+    try {
+      const data = await api('/api/projects?all=true')
+      const list = Array.isArray(data) ? data : (data?.projects || [])
+      setProjects(list)
+      if (!selectedId && list[0]?.id) setSelectedId(list[0].id)
+      setError('')
+    } catch (e: any) {
+      setError(friendlyApiError(e, '加载项目失败'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadMembers = async (projectId: string) => {
+    if (!projectId) { setMembers([]); setMembersLoaded(false); return }
+    // 重新加载期间先收起入口, 避免成员列表未就绪时误判"自己不在项目内"
+    // Hide the shortcut while reloading so a not-yet-loaded list cannot misjudge membership
+    setMembersLoaded(false)
+    try {
+      const data = await api(`/api/projects/${encodeURIComponent(projectId)}/members`)
+      setMembers(Array.isArray(data?.members) ? data.members : [])
+      setMembersLoaded(true)
+      setError('')
+    } catch (e: any) {
+      setMembers([])
+      setError(friendlyApiError(e, '加载项目成员失败'))
+    }
+  }
+
+  useEffect(() => { void loadProjects() }, [])
+  useEffect(() => { void loadMembers(selectedId); setCandidates([]); setCandidateId('') }, [selectedId])
+
+  const findCandidates = async () => {
+    if (!selectedId) return
+    try {
+      const data = await api(`/api/projects/${encodeURIComponent(selectedId)}/member-candidates?q=${encodeURIComponent(candidateId)}`)
+      setCandidates(Array.isArray(data) ? data : [])
+    } catch (e: any) {
+      setError(friendlyApiError(e, '加载候选用户失败'))
+    }
+  }
+
+  const addMember = async () => {
+    if (!selectedId || !candidateId) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api(`/api/projects/${encodeURIComponent(selectedId)}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ user_ids: [candidateId], role }),
+      })
+      await loadMembers(selectedId)
+      setNotice('已添加项目成员')
+      setCandidateId('')
+      setCandidates([])
+    } catch (e: any) {
+      setError(friendlyApiError(e, '添加项目成员失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // 一键把当前登录用户以项目开发者身份加入当前项目
+  // Add the current login user to the selected project as a developer in one click
+  const joinSelf = async () => {
+    if (!selectedId || !currentUser) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      // ✨ 核心代码行: 复用成员接口把"自己"作为 developer 加进去
+      // ✨ Core line: reuse the member API to add "myself" as a developer
+      await api(`/api/projects/${encodeURIComponent(selectedId)}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ user_ids: [currentUser.id], role: 'developer' }),
+      })
+      await loadMembers(selectedId)
+      setNotice('已把自己加入该项目（项目开发者）')
+    } catch (e: any) {
+      setError(friendlyApiError(e, '加入项目失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const updateRole = async (userId: string, nextRole: string) => {
+    if (!selectedId || !nextRole) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api(`/api/projects/${encodeURIComponent(selectedId)}/members/${encodeURIComponent(userId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role: nextRole }),
+      })
+      await loadMembers(selectedId)
+      setNotice('项目权限已更新')
+    } catch (e: any) {
+      setError(friendlyApiError(e, '更新项目权限失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(260px,360px)_1fr]">
+      <section className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>项目权限</h3>
+            <p className="mt-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>管理员可在这里管理任意项目的成员角色。</p>
+          </div>
+          <button type="button" onClick={() => void loadProjects()} disabled={loading} title="刷新项目" className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-secondary)] disabled:opacity-50"><RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} /></button>
+        </div>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索项目名称或 ID" className="mb-3 h-8 w-full rounded-md border px-2.5 text-[length:var(--fs-md)]" style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }} />
+        <div className="max-h-[540px] overflow-y-auto space-y-1">
+          {visibleProjects.map((project) => (
+            <button key={project.id} type="button" onClick={() => setSelectedId(project.id)} className="w-full rounded-md border px-3 py-2 text-left transition-colors" style={{ borderColor: selectedId === project.id ? 'rgba(96,165,250,0.55)' : 'transparent', background: selectedId === project.id ? 'rgba(59,130,246,0.12)' : 'transparent' }}>
+              <div className="truncate text-[length:var(--fs-md)] font-medium" style={{ color: 'var(--text-primary)' }}>{project.name || project.id}</div>
+              <div className="mt-0.5 truncate text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>{project.kind || 'default'} · {project.created_by_name || project.created_by || '未知创建者'}</div>
+            </button>
+          ))}
+          {!visibleProjects.length && <div className="py-6 text-center text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>暂无可管理项目</div>}
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-4">
+        {selectedProject ? (
+          <>
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0"><h3 className="truncate text-[length:var(--fs-xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>{selectedProject.name || selectedProject.id}</h3><div className="mt-1 truncate text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>{selectedProject.bind_path || '未绑定路径'} · 创建者 {selectedProject.created_by_name || selectedProject.created_by || '未知'}</div>
+                {membersLoaded && currentUser && !selfInProject && <button type="button" onClick={() => void joinSelf()} disabled={busy} title="把自己加为项目开发者" className="mt-1 text-[length:var(--fs-xs)] hover:underline disabled:opacity-50" style={{ color: 'var(--accent-primary)' }}>把{currentUser.display_name || currentUser.id}自己加入该项目</button>}
+              </div>
+            </div>
+            {(error || notice) && <div className={`mb-3 rounded-md border px-3 py-2 text-[length:var(--fs-sm)] ${error ? 'border-red-500/25 bg-red-500/10 text-red-400' : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-400'}`}>{error || notice}</div>}
+            <div className="mb-4 flex flex-wrap items-end gap-2 rounded-md border p-3" style={{ borderColor: 'var(--input-border)', background: 'var(--input-bg)' }}>
+              <label className="min-w-[220px] flex-1 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>添加用户<input value={candidateId} onChange={(e) => setCandidateId(e.target.value)} onBlur={() => void findCandidates()} placeholder="输入用户 ID 或姓名" className="mt-1 h-8 w-full rounded-md border px-2 text-[length:var(--fs-md)]" style={{ background: 'var(--modal-bg)', borderColor: 'var(--input-border)', color: 'var(--text-primary)' }} /></label>
+              <select value={role} onChange={(e) => setRole(e.target.value as typeof role)} className="h-8 rounded-md border px-2 text-[length:var(--fs-sm)]" style={{ background: 'var(--modal-bg)', borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}><option value="viewer">项目访客</option><option value="developer">项目开发者</option><option value="none">不显示</option></select>
+              <button type="button" onClick={() => void addMember()} disabled={busy || !candidateId} className="h-8 rounded-md px-3 text-[length:var(--fs-sm)] btn-primary disabled:opacity-50">添加成员</button>
+            </div>
+            {candidates.length > 0 && <div className="mb-3 flex flex-wrap gap-1.5">{candidates.filter((c) => !c.already_member).slice(0, 8).map((c) => <button key={c.id} type="button" onClick={() => setCandidateId(c.id)} className="rounded border px-2 py-1 text-[length:var(--fs-xs)]" style={{ borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}>{c.display_name} ({c.id})</button>)}</div>}
+            <div className="overflow-x-auto rounded-md border" style={{ borderColor: 'var(--input-border)' }}><table className="w-full border-collapse text-left text-[length:var(--fs-sm)]"><thead><tr style={{ background: 'var(--input-bg)' }}><th className="px-3 py-2" style={{ color: 'var(--text-muted)' }}>成员</th><th className="px-3 py-2" style={{ color: 'var(--text-muted)' }}>角色</th></tr></thead><tbody>{members.map((member) => <tr key={member.user_id} className="border-t" style={{ borderColor: 'var(--input-border)' }}><td className="px-3 py-2"><div style={{ color: 'var(--text-primary)' }}>{member.display_name || member.user_id}</div><div className="font-mono text-[length:var(--fs-xs)]" style={{ color: 'var(--text-muted)' }}>{member.user_id}</div></td><td className="px-3 py-2">{member.role === 'owner' ? <span style={{ color: '#60a5fa' }}>项目所有者</span> : <select value={member.role} disabled={busy} onChange={(e) => void updateRole(member.user_id, e.target.value)} className="h-7 rounded border px-1.5" style={{ background: 'var(--input-bg)', borderColor: 'var(--input-border)', color: 'var(--text-secondary)' }}><option value="developer">项目开发者</option><option value="viewer">项目访客</option><option value="none">不显示</option></select>}</td></tr>)}</tbody></table>{!members.length && <div className="py-6 text-center" style={{ color: 'var(--text-muted)' }}>暂无项目成员</div>}</div>
+          </>
+        ) : <div className="py-10 text-center" style={{ color: 'var(--text-muted)' }}>请先选择项目</div>}
+      </section>
+    </div>
+  )
+}
+
+export type AdminPanelTab = 'users' | 'project-permissions' | 'runtime' | 'others' | 'settings' | 'assistant' | 'models' | 'migration' | 'sandboxes'
 
 const ADMIN_PANEL_TABS: { key: AdminPanelTab; label: string; icon: ReactNode }[] = [
   { key: 'users', label: '用户管理', icon: <UsersIcon className="h-3.5 w-3.5" /> },
+  { key: 'project-permissions', label: '项目权限', icon: <Shield className="h-3.5 w-3.5" /> },
   { key: 'runtime', label: '运行监控', icon: <LayoutDashboard className="h-3.5 w-3.5" /> },
-  { key: 'redaction', label: '文字替换隐藏', icon: <EyeOff className="h-3.5 w-3.5" /> },
   { key: 'settings', label: '系统设置', icon: <Settings className="h-3.5 w-3.5" /> },
-  { key: 'assistant', label: '管理员小莫配置', icon: <Sparkles className="h-3.5 w-3.5" /> },
   { key: 'models', label: '模型接入', icon: <Terminal className="h-3.5 w-3.5" /> },
-  { key: 'extensions', label: '拓展管理', icon: <Puzzle className="h-3.5 w-3.5" /> },
   { key: 'migration', label: 'Skill与Memory管理', icon: <Package className="h-3.5 w-3.5" /> },
+  { key: 'assistant', label: '管理员小莫配置', icon: <Sparkles className="h-3.5 w-3.5" /> },
+  { key: 'others', label: '其他设置', icon: <SlidersHorizontal className="h-3.5 w-3.5" /> },
+  { key: 'sandboxes', label: '容器管理', icon: <Container className="h-3.5 w-3.5" /> },
 ]
 
+// 普通用户能进的 tab: 「Skill与Memory管理」只管自己的用户级条目与自己做主的项目,
+// 「其他设置」是浏览器本地设置 (Logo / 名称 / 文本遮蔽规则), 都不涉及全站数据.
+// 其余 tab 全是全站管理面, 对普通用户既不显示也不可达.
+const NON_ADMIN_PANEL_TAB_KEYS: readonly AdminPanelTab[] = ['migration', 'others']
+
 export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initialTab?: AdminPanelTab }) {
-  // 初次渲染时取 initialTab (外部 openAdminOverlay(tab) 传入, 通常用于「监控」按钮直接落在「运行监控」tab)
-  const [activeTab, setActiveTab] = useState<AdminPanelTab>(initialTab || 'users')
+  const isAdmin = useStore((s) => s.user?.role === 'admin')
+  // docker 用户隔离才显示「容器管理」tab: 挂载时探一次 method (landlock 模式静默隐藏)
+  const [sbxDocker, setSbxDocker] = useState(false)
+  useEffect(() => {
+    if (!isAdmin) return
+    let alive = true
+    api('/api/admin/sandboxes').then((d: { method?: string }) => { if (alive) setSbxDocker(d?.method === 'docker') }).catch(() => {})
+    return () => { alive = false }
+  }, [isAdmin])
+  const tabs = useMemo(
+    () => {
+      const base = isAdmin ? ADMIN_PANEL_TABS : ADMIN_PANEL_TABS.filter((tab) => NON_ADMIN_PANEL_TAB_KEYS.includes(tab.key))
+      return isAdmin && !sbxDocker ? base.filter((tab) => tab.key !== 'sandboxes') : base
+    },
+    [isAdmin, sbxDocker],
+  )
+  // 初次渲染时取 initialTab (外部 openAdminOverlay(tab) 传入, 通常用于「监控」按钮直接落在「运行监控」tab);
+  // 普通用户拿到不可达的 initialTab (如引导脚本传 'runtime') 时回落到自己的首个 tab.
+  const [activeTab, setActiveTab] = useState<AdminPanelTab>(() => {
+    const first = isAdmin ? 'users' : 'migration'
+    if (!initialTab) return first
+    const allowed = isAdmin || NON_ADMIN_PANEL_TAB_KEYS.includes(initialTab)
+    return allowed ? initialTab : first
+  })
   const [data, setData] = useState<AdminTmuxPayload | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -8002,18 +8621,20 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
       setError('')
     } catch (e: any) {
       if (e?.name === 'AbortError') return // 轮询超时/卸载放弃, 不算错误
-      setError(e?.message || String(e))
+      setError(friendlyApiError(e, '加载用户列表失败'))
     } finally {
       if (!quiet) setLoading(false)
     }
   }
 
   useEffect(() => {
+    // 运行监控接口仅管理员可读; 普通用户开这页只为 Skill/Memory 与其他设置, 不发这次请求.
+    if (!isAdmin) return undefined
     refresh()
     // 自递归轮询: 上一次返回(或超时放弃)后才排下一次, 10s 超时主动 abort, 卡顿时不堆积.
     const stop = pollRecursive((signal) => refresh(true, signal), 5_000, 10_000, { startImmediately: false })
     return () => stop()
-  }, [])
+  }, [isAdmin])
 
   const totals = useMemo(() => ({
     questions: data?.question_count ?? 0,
@@ -8048,7 +8669,7 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
     }
   }
 
-  const activeTabLabel = ADMIN_PANEL_TABS.find((tab) => tab.key === activeTab)?.label || '管理中心'
+  const activeTabLabel = tabs.find((tab) => tab.key === activeTab)?.label || '管理中心'
 
   return (
     <div className="flex h-screen min-w-0 flex-1 flex-col" style={{ background: 'var(--bg-secondary)' }}>
@@ -8063,29 +8684,44 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div className="min-w-0" data-tour="admin-center-header">
-            <h2 className="truncate text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>管理中心</h2>
-            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <h2 className="truncate text-[length:var(--fs-2xl)] font-semibold" style={{ color: 'var(--text-primary)' }}>管理中心</h2>
+            <div className="text-[length:var(--fs-sm)]" style={{ color: 'var(--text-muted)' }}>
               {activeTabLabel}{activeTab === 'runtime' ? ` · 5s 刷新 · 统计窗口 ${data?.window_hours || 5} 小时` : ''}
             </div>
           </div>
         </div>
-        {activeTab === 'runtime' && (
-          <button
-            type="button"
-            title="刷新运行监控"
-            onClick={() => refresh()}
-            disabled={loading}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {/* 全项目仅剩的引导路线: 在这里手动重温管理中心各模块讲解 (首触时由 TourController 自动启动).
+              讲解覆盖的是全站管理面, 普通用户的这一页只有两个 tab, 不提供入口. */}
+          {isAdmin && (
+            <button
+              type="button"
+              title="重温管理中心引导"
+              aria-label="重温管理中心引导"
+              onClick={() => { void startSceneTour('admin-center') }}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+            >
+              <CircleQuestionMark className="h-4 w-4" />
+            </button>
+          )}
+          {activeTab === 'runtime' && (
+            <button
+              type="button"
+              title="刷新运行监控"
+              onClick={() => refresh()}
+              disabled={loading}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border-color)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-60"
+            >
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-5 py-5">
         <div className="mx-auto flex max-w-7xl flex-col gap-4">
           <div className="flex flex-wrap gap-2 rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] p-2" data-tour="admin-tab-bar">
-            {ADMIN_PANEL_TABS.map((tab) => {
+            {tabs.map((tab) => {
               const active = activeTab === tab.key
               return (
                 <button
@@ -8093,7 +8729,7 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
                   type="button"
                   data-tour={`admin-tab-${tab.key}`}
                   onClick={() => setActiveTab(tab.key)}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[12px] font-medium transition-colors"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-md px-3 text-[length:var(--fs-md)] font-medium transition-colors"
                   style={{
                     background: active ? 'var(--bg-hover)' : 'transparent',
                     color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -8109,7 +8745,21 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
 
           {activeTab === 'users' && <AdminUsersPanel />}
 
-          {activeTab === 'redaction' && <AdminTextRedactionPanel />}
+          {/* 原「拓展管理」tab 已并入「项目权限」: 已隐藏的拓展同样按 项目×用户 维度管理. */}
+          {activeTab === 'project-permissions' && (
+            <div className="flex flex-col gap-3">
+              <AdminProjectPermissionsPanel />
+              <HiddenExtensionsCard />
+            </div>
+          )}
+
+          {activeTab === 'others' && (
+            <div className="flex flex-col gap-3">
+              <AdminCustomLogoCard />
+              <AdminBrandNameCard />
+              <AdminTextRedactionPanel />
+            </div>
+          )}
 
           {activeTab === 'settings' && (
             <div className="flex flex-col gap-3">
@@ -8128,12 +8778,11 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
             </div>
           )}
 
-          {activeTab === 'extensions' && <HiddenExtensionsCard />}
-
           {activeTab === 'migration' && <SkillMemoryMigrationPanel />}
+          {activeTab === 'sandboxes' && <AdminSandboxesPanel />}
 
           {activeTab === 'runtime' && error && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-4 py-3 text-[13px] text-red-400">
+            <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-4 py-3 text-[length:var(--fs-lg)] text-red-400">
               <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
               <span className="break-all">{error}</span>
             </div>
@@ -8217,10 +8866,10 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-3 py-2">
-                <div className="flex min-w-0 items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                <div className="flex min-w-0 items-center gap-2 text-[length:var(--fs-md)]" style={{ color: 'var(--text-secondary)' }}>
                   {showClosedWindows ? <Eye className="h-3.5 w-3.5 text-sky-400" /> : <EyeOff className="h-3.5 w-3.5 text-[var(--text-muted)]" />}
                   <span>已关闭实例</span>
-                  <span className="rounded-md border border-[var(--border-color)] px-2 py-0.5 text-[11px]" style={{ color: 'var(--text-primary)' }}>
+                  <span className="rounded-md border border-[var(--border-color)] px-2 py-0.5 text-[length:var(--fs-sm)]" style={{ color: 'var(--text-primary)' }}>
                     {totals.closed}
                   </span>
                 </div>
@@ -8229,7 +8878,7 @@ export function AdminPanel({ onClose, initialTab }: { onClose: () => void; initi
                   onChange={setShowClosedWindows}
                   switchPosition="end"
                   activeColor="#0ea5e9"
-                  className="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2.5 text-[12px] transition-colors hover:bg-[var(--bg-hover)]"
+                  className="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-2.5 text-[length:var(--fs-md)] transition-colors hover:bg-[var(--bg-hover)]"
                   style={{ color: 'var(--text-secondary)' }}
                   title="显示或隐藏已关闭的 Agent 运行实例">
                   显示已关闭

@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { parseFrontmatter } from './skill-loader';
+import { isWithin } from './file-access';
 import { CORE_DATA_PATH } from '../config';
 import {
   MAX_SKILL_UPLOAD_BYTES,
@@ -239,7 +240,8 @@ function getSourceDir(id: any): string | null {
   if (parsed.scope === 'builtin') {
     const dir = path.resolve(BUILTIN_ROOT, parsed.dirName);
     const root = path.resolve(BUILTIN_ROOT);
-    if (dir !== root && dir.startsWith(root + path.sep)) return dir;
+    // dir === root 时不是某个 skill 的目录; 越界判断统一走 file-access.isWithin
+    if (dir !== root && isWithin(root, dir)) return dir;
     return null;
   }
   if (parsed.scope === 'user') return path.join(userDefaultDir(parsed.userId), parsed.dirName);
@@ -537,11 +539,40 @@ function deleteById(id: any): boolean {
   else if (parsed.scope === 'project') dir = path.join(userProjectDir(parsed.userId, parsed.projectId), parsed.dirName);
   else return false;
   const resolved = path.resolve(dir);
-  // 安全护栏: 必须落在 ROOT 之下, 防止 ../ 之类
+  // 安全护栏: 必须落在 ROOT 之下, 防止 ../ 之类.
+  // 刻意严于 file-access.isWithin: 连 ROOT 自身也拒 (下面会 rmSync 递归删除).
   if (!resolved.startsWith(path.resolve(ROOT) + path.sep)) return false;
   if (!fs.existsSync(resolved)) return false;
   fs.rmSync(resolved, { recursive: true, force: true });
   return true;
+}
+
+// 覆盖 SKILL.md 正文 (不动目录内其它资源文件). 用于前端「编辑 Skill Markdown」.
+// 权限由路由层把关; 这里只做路径安全 + 写文件 + 缓存失效.
+// 内置 skill 不可编辑.
+function updateBody(id: any, body: any): { ok: boolean; skill?: any; error?: string } {
+  const parsed = parseSkillId(id);
+  if (!parsed) return { ok: false, error: 'id 非法' };
+  if (parsed.scope === 'builtin') return { ok: false, error: '内置 skill 不可编辑' };
+  let dir: string | null = null;
+  if (parsed.scope === 'user') dir = path.join(userDefaultDir(parsed.userId), parsed.dirName);
+  else if (parsed.scope === 'project') dir = path.join(userProjectDir(parsed.userId, parsed.projectId), parsed.dirName);
+  if (!dir) return { ok: false, error: '无法定位 skill 目录' };
+  const resolved = path.resolve(dir);
+  // 安全护栏: 必须落在 ROOT 之下, 防止 ../ 越权.
+  // 刻意严于 file-access.isWithin: 连 ROOT 自身也拒 (写 SKILL.md 的目标必须是子目录).
+  if (!resolved.startsWith(path.resolve(ROOT) + path.sep)) return { ok: false, error: '路径越界' };
+  const skillMd = path.join(resolved, 'SKILL.md');
+  if (!fs.existsSync(skillMd)) return { ok: false, error: 'SKILL.md 不存在' };
+  const content = typeof body === 'string' ? body : '';
+  fs.writeFileSync(skillMd, content, 'utf8');
+  skillFileCache.delete(skillMd);
+  const sk = readSkillFromDir(resolved);
+  if (!sk) return { ok: false, error: '写入后无法读取 skill' };
+  const shaped = parsed.scope === 'user'
+    ? shapeUser(sk, parsed.userId)
+    : shapeProject(sk, parsed.userId, parsed.projectId);
+  return { ok: true, skill: shaped };
 }
 
 function deleteForProject(projectId: any): number {
@@ -764,6 +795,7 @@ export {
   findById,
   deleteById,
   deleteForProject,
+  updateBody,
   install,
   importFromLocalPath,
   copyToScope,

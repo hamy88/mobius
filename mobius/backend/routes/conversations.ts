@@ -3,7 +3,7 @@ import { auth, authOrQuery } from '../middleware/auth';
 import { Conversations } from '../repositories/conversations';
 import type { MemberInput, MemberType } from '../repositories/conversations';
 import { runSessionMessage } from '../services/session-message-runner';
-import { detectAndEncrypt, maskEncryptedForDisplay } from '../services/secret-guard';
+import { MOBIUS_KIND } from '../services/mobius-kinds';
 // 群消息推送: 给离线(无 SSE)成员远程推送
 import { pushToUser as pushToUserExt } from '../services/extension-push';
 import { Sessions } from '../repositories/sessions';
@@ -198,6 +198,7 @@ function findOwnerCurrentAssistantSession(ownerId: string): any {
 async function triggerAgentMentions(params: {
   conversationId: string;
   conversationName: string;
+  senderId: string;
   senderName: string;
   rawContent: string;
   mentions: any[];
@@ -208,6 +209,8 @@ async function triggerAgentMentions(params: {
     if (!memberId) continue;
     const member = Conversations.findMember(params.conversationId, 'agent', memberId);
     if (!member) continue; // 不在群里 = 未授权, 忽略
+    // 只有 Agent 的拥有者本人可以驱动该 Agent；群成员身份不再构成跨用户执行授权。
+    if (String(member.agent_owner_id || '') !== String(params.senderId)) continue;
     const agentSessionId = member.agent_session_id || memberId;
     const ownerId = member.agent_owner_id;
     if (!ownerId) continue;
@@ -243,6 +246,7 @@ async function triggerAgentMentions(params: {
         inputText: taskPrompt,
         hasInputText: true,
         source: 'group.mention',
+        kind: MOBIUS_KIND.com,   // 群聊 @agent 跑在全新分身 session 里, 是本会话第一条消息: 必须开轮
       } as any);
       watchAgentReply({
         conversationId: params.conversationId,
@@ -401,10 +405,7 @@ router.post('/:id/messages', auth, (req: express.Request, res: express.Response)
     res.status(403).json({ error: '你不是该群成员' });
     return;
   }
-  // 隐秘数据自动加密: 群消息中的密码/密钥/token 落库前替换为 AES-256-GCM 占位符,
-  // 库表与后续 agent 转发只见密文; 远程推送文案额外做尾4位遮罩 (连密文都不出)。
-  const guarded = detectAndEncrypt(String(req.body?.content || '').trim());
-  const content = guarded.text;
+  const content = String(req.body?.content || '').trim();
   if (!content) {
     res.status(400).json({ error: '内容不能为空' });
     return;
@@ -437,7 +438,7 @@ router.post('/:id/messages', auth, (req: express.Request, res: express.Response)
       void pushToUserExt({
         username: String(m.member_id),
         title: convName,
-        body: maskEncryptedForDisplay(`${senderName}: ${content}`),
+        body: `${senderName}: ${content}`,
         deepLink: `momo://group/${id}`,
       });
     }
@@ -449,6 +450,7 @@ router.post('/:id/messages', auth, (req: express.Request, res: express.Response)
     void triggerAgentMentions({
       conversationId: id,
       conversationName: (Conversations.findById(id) as { name?: string } | undefined)?.name || '群聊',
+      senderId: user.id,
       senderName: user.display_name || user.id,
       rawContent: content,
       mentions,

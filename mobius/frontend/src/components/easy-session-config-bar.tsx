@@ -57,7 +57,7 @@ export const EMPTY_EASY_SESSION_SELECTION: EasySessionSelection = {
   projectName: '',
 }
 
-type ProjectLite = { id: string; name?: string; default_model?: string | null }
+type ProjectLite = { id: string; name?: string; default_model?: string | null; can_create_session?: boolean }
 
 /** 近期活跃任务的数据源: /api/tasks/recent 返回的会话行 */
 type RecentSessionLite = {
@@ -261,10 +261,16 @@ export function EasySessionConfigBar({ selection, onChange, projects, recentSess
       }))
   ), [projectId, projectIssues, recentTasks, selectedProjectName])
 
+  // 后端在每个项目上带 can_create_session (按项目成员角色判定): 只读项目选进去也建不了
+  // 会话, 会在提交时拿到 403「无权在此 Issue 创建 Session」, 所以这里直接置灰并说明原因,
+  // 让"能不能在这个项目里对话"在选之前就看得见.
   const projectOptions: DropdownOption[] = useMemo(() => projects.map(p => ({
     value: String(p.id),
     label: String(p.name || p.id),
-    description: p.default_model ? `默认模型 ${p.default_model}` : undefined,
+    description: p.can_create_session === false
+      ? '只读项目 · 无创建会话权限'
+      : (p.default_model ? `默认模型 ${p.default_model}` : undefined),
+    disabled: p.can_create_session === false,
   })), [projects])
 
   const modelSelectOptions: DropdownOption[] = useMemo(() => modelOptions.map(o => ({
@@ -278,6 +284,17 @@ export function EasySessionConfigBar({ selection, onChange, projects, recentSess
     const key = kind === 'skill' ? 'excludedSkills' : 'excludedMemories'
     const list = latest[key]
     emit({ ...latest, [key]: list.includes(id) ? list.filter(x => x !== id) : [...list, id] })
+  }
+
+  // 全选 / 全不选: 一次性 emit 整批, 循环里连调 toggleExcluded 会因 ref 未及时更新而互相覆盖.
+  // Select-all / select-none emits the whole batch at once; a loop of toggleExcluded would
+  // clobber itself because latestRef only refreshes on the next render.
+  const bulkExcluded = (kind: 'skill' | 'memory', ids: string[], excluded: boolean) => {
+    const { selection: latest, onChange: emit } = latestRef.current
+    const key = kind === 'skill' ? 'excludedSkills' : 'excludedMemories'
+    const next = new Set(latest[key])
+    for (const id of ids) { if (excluded) next.add(id); else next.delete(id) }
+    emit({ ...latest, [key]: Array.from(next) })
   }
 
   return (
@@ -394,6 +411,7 @@ export function EasySessionConfigBar({ selection, onChange, projects, recentSess
         excludedMemories={new Set(selection.excludedMemories)}
         onToggleSkill={id => toggleExcluded('skill', id)}
         onToggleMemory={id => toggleExcluded('memory', id)}
+        onBulkToggle={bulkExcluded}
         disabled={!createProject && !issueId}
         emptySkillText={createProject ? '暂无用户级或内置 Skill' : '该任务未启用 Skill'}
       />

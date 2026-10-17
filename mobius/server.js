@@ -98,6 +98,7 @@ const adminRoutes = require('./backend/routes/admin');
 const designerEyeRoutes = require('./backend/routes/designer-eye/router');
 const extRoutes = require('./backend/routes/ext');
 const aimuxRoutes = require('./backend/routes/aimux');
+const { router: scheduledWakeupsRoutes } = require('./backend/routes/scheduled-wakeups');
 const aimuxBridgeProxy = require('./backend/routes/aimux-bridge-proxy');
 // 黑客帝国数字雨: /api/token_stream 反代到本机 token-proxy (server.ts).
 const { router: tokenStreamProxyRouter } = require('./backend/routes/token-stream-proxy');
@@ -107,13 +108,18 @@ app.use('/api/auth', authRoutes);
 // 微信式群聊: 用户列表 + 群(conversations). tsx 即时转译 .ts, 无同名 .js 故 require 解析到 .ts.
 app.use('/api/users', require('./backend/routes/users'));
 app.use('/api/conversations', require('./backend/routes/conversations'));
-app.use('/api/assistant', assistantRoutes);
-// Mobius Mobile OTA 公开 endpoint: 翻译 mobile-builds/manifest.json → OtaManifest schema.
-// 客户端 Android App 优先访问本服务器 (CORS / no-cache), 失败 fallback 到 GitHub Releases.
-app.use('/api/mobile/ota', require('./backend/routes/mobile-ota'));
-// SEO 看板 Google OAuth 公开回调: 接收 Google 重定向回的 code, 转发到 :33330 exchange-code.
-// 解决云机内部 127.0.0.1:33330 用户浏览器跳不进来的问题 (见 :33330 platforms/google/index.js REDIRECT_URI_DEFAULT).
-app.use('/api/seo/oauth-callback', require('./backend/routes/seo-oauth-callback'));
+// 小莫助理 (「小莫光点」) 闸门 —— 临时措施 (2026-10-13 用户要求): 仅 admin 可用,
+// 普通用户对 /api/assistant/* 的一切访问 403. 开关见 backend/services/user-isolation
+// 的 ASSISTANT_NORMAL_USER_BLOCKED. 前端入口由 assistant-availability.ts 同步隐藏.
+function assistantAccessGuard(req, res, next) {
+  // 例外: 语音转文字是普通会话输入框也在用的通用能力 (frontend/src/components/chat.tsx),
+  // 不属于「小莫」本体, 不随这次临时屏蔽一起关掉.
+  const p = req.path || '';
+  if (p === '/transcribe' || p.startsWith('/transcribe/')) return next();
+  if (require('./backend/services/user-isolation').assistantAllowedFor(req.user)) return next();
+  res.status(403).json({ error: '小莫助理暂时不可用', code: 'ASSISTANT_DISABLED' });
+}
+app.use('/api/assistant', require('./backend/middleware/auth').auth, assistantAccessGuard, assistantRoutes);
 // 用户个人维度偏好: GET/POST /api/profile/tour-first-login-seen (普通 auth, 跨设备生效).
 app.use('/api/profile', profileRoutes);
 app.use('/api/tasks', tasksRoutes);
@@ -137,7 +143,10 @@ app.use('/api/skills', skillsRoutes);
 app.use('/api/memories', memoryJsonParser, memoriesRoutes);
 app.use('/api/admin/designer-eye', designerEyeRoutes);
 app.use('/api/admin', adminRoutes);
+// 用户隔离 (docker 模式) 的沙箱运维面: 列表 / 强制重建 / 停止 (adminAuth 由路由内部? 否 — 挂在 admin 前缀下, 由 adminRoutes 同款 adminAuth 保护)
+app.use('/api/admin/sandboxes', require('./backend/middleware/auth').adminAuth, require('./backend/services/user-isolation/admin-routes'));
 app.use('/api/aimux', aimuxRoutes);
+app.use('/api/scheduled-wake-ups', scheduledWakeupsRoutes);
 // /api/token_stream → 本机 token-proxy (数字雨 token 环形缓冲, SSE live tail).
 app.use('/api/token_stream', tokenStreamProxyRouter);
 // /aimux_bridge/* → 内置 aimux bridge broker (127.0.0.1:AIMUX_BRIDGE_PORT).
@@ -300,7 +309,9 @@ const { startForgottenFlagScanner } = require('./backend/services/forgotten-flag
 const { startInactiveTmuxCleaner } = require('./backend/services/inactive-tmux-cleaner');
 const { startResearchBlackboardDeliveryScanner } = require('./backend/services/research-blackboard');
 const { startExtensionScheduler } = require('./backend/services/extension-scheduler');
+const { startScheduledWakeupScheduler } = require('./backend/services/scheduled-wakeup-scheduler');
 const { startAgentStatusSyncer } = require('./backend/services/agent-status-syncer');
+const { startSessionStatusRefresher } = require('./backend/services/session-status-refresher');
 const { startSessionTitleSyncer } = require('./backend/services/session-title-syncer');
 const { startSessionTitleGenerator } = require('./backend/services/session-title-generator');
 const { startBestApiAutoSync } = require('./backend/services/bestapi-integration');
@@ -340,10 +351,15 @@ function startDesktopBuildsSyncer() {
       if (r.downloaded > 0) {
         console.log(`[mobius/desktop-sync] ${r.tag}: ${r.downloaded} downloaded, ${r.skipped} cached → ${r.dest}`);
       }
-      // 移动端 APK 与桌面端同源同构, 一并同步 (无 mobile Release 时内部静默跳过)
-      const m = await syncMobileBuilds({
-        log: (...args) => console.log('[mobius/mobile-sync]', ...args),
-      });
+      // 移动端 APK 与桌面端同源同构, 一并同步 (无 mobile Release 时内部静默跳过)。
+      // MOBILE_SYNC_ENABLED=0 可单独关闭(本机构建机直接部署 mobile-builds/, 避免同步器
+      // 用 GitHub Release 的旧版本覆盖本地新部署并清理非 Release APK)。
+      let m = null;
+      if (!/^(0|false|no)$/i.test(process.env.MOBILE_SYNC_ENABLED || '')) {
+        m = await syncMobileBuilds({
+          log: (...args) => console.log('[mobius/mobile-sync]', ...args),
+        });
+      }
       if (m && m.downloaded > 0) {
         console.log(`[mobius/mobile-sync] ${m.tag}: ${m.downloaded} downloaded, ${m.skipped} cached → ${m.dest}`);
       }
@@ -392,6 +408,11 @@ server.listen(PORT, () => {
   // 启动即确保 agent 专用 tmux server (tmux -L mobius-agent) 存在: 不存在则创建,
   // 并固定 default-terminal=tmux-256color, 使所有 detached agent pane 的 $TERM 一致.
   try {
+    require('./backend/services/user-isolation').onBackendStart();
+  } catch (e) {
+    console.warn('[mobius] user-isolation onBackendStart failed:', e.message);
+  }
+  try {
     require('./backend/agents/tmux-operation-log').ensureAgentTmuxServer();
   } catch (e) {
     console.warn(`[mobius] tmux agent server 启动初始化失败 (socket=${AGENT_TMUX_SOCKET}, 将在首次使用时重试):`, e.message);
@@ -415,8 +436,15 @@ server.listen(PORT, () => {
   // 拓展通用定时器: 扫描 protected_data/extension/<name>/schedules/*.json,
   // 到点后以对应用户身份触发该拓展 handler.
   startExtensionScheduler();
-  // agent_status 单一真相源: 每 60s 用与 /api/sessions/:id/status 相同的判定重算
+  // Mobius 定时唤醒: 扫描 SQLite 中到期任务，通过标准 Session 消息链路投递提醒
+  // Mobius scheduled wake-ups scan durable SQLite tasks and deliver through the normal Session message path
+  startScheduledWakeupScheduler();
+  // agent_status 快查字段的热点刷新: 每 2s 只重算「近 15 分钟有活动」∪「当前 alive」的
+  // 那一小撮会话 (实测 5~15 行 vs 全表 2664 行), 侧栏读到的新鲜度由此保证.
+  startSessionStatusRefresher();
+  // agent_status 全表兜底: 每 60s 用与 /api/sessions/:id/status 相同的判定重算
   // 活跃态 session 的 agent_status 并写回; 终态(failed/stale)每小时扫一次.
+  // 热点之外的冷行变化极慢, 由这一层兜底即可.
   startAgentStatusSyncer();
   // 自动生成 Session 标题: 订阅 agent shared watcher 的 raw_entry 事件; 功能默认关闭,
   // 开启后仅在 agent 明确产出 type=ai-title 时更新, 不走前端/SSE 回灌/状态轮询.

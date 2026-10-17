@@ -32,19 +32,6 @@ type AttributeState = {
 
 const REDACTED_ATTRIBUTES = ['title', 'aria-label', 'placeholder', 'alt']
 
-// ── 内置规则: 后端 secret-guard 密文占位符 → 🔒已加密 ──
-// ⚠️ 加密层已关闭 (2026-10-14, 用户授权 #108), 保留函数但 no-op.
-// 历史: 与用户自定义关键词规则不同, 这条内置遮罩始终生效 (不受脱敏开关控制):
-// 占位符本身虽是密文, 但裸露展示既难看又可能泄露长度信息, 统一遮为徽标文案。
-// 当前: 用户已要求取消加密, 占位符一律原样展示, 不再遮罩.
-const ENC_SECRET_PLACEHOLDER_RE = /<MOBIUS-ENC:v1:[A-Za-z0-9_-]+>/g
-
-export function maskEncryptedPlaceholders(value: string): string {
-  // 加密层已关闭: 直接返回原值. 保留 if (!value) 早退以兼容历史调用.
-  if (!value) return value
-  return value
-}
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -297,10 +284,9 @@ export function exportTextRedactionRulesCsv(rules: TextRedactionRule[]) {
 }
 
 function redactValue(value: string, rules: TextRedactionRule[]) {
-  if (!value) return value
-  // 内置: 密文占位符遮罩不依赖用户规则, 始终应用 (含 rules 为空/开关关闭时)
-  let next = maskEncryptedPlaceholders(value)
-  if (rules.length === 0) return next
+  if (!value || rules.length === 0) return value
+
+  let next = value
   for (const rule of rules) {
     if (!rule.keyword) continue
     next = next.split(rule.keyword).join(rule.replacement)
@@ -331,14 +317,12 @@ function wireDisplayRulesCacheInvalidation() {
 export function redactDisplayText(value: string): string {
   try {
     if (!value) return value
-    // 内置密文占位符遮罩始终生效 (canvas 等非 DOM 文本出口同理)
-    const masked = maskEncryptedPlaceholders(value)
     if (displayRulesCache == null) {
       displayRulesCache = readTextRedactionEnabled() ? activeRules(readTextRedactionRules()) : []
       wireDisplayRulesCacheInvalidation()
     }
-    if (displayRulesCache.length === 0) return masked
-    return redactValue(masked, displayRulesCache)
+    if (displayRulesCache.length === 0) return value
+    return redactValue(value, displayRulesCache)
   } catch (_) {
     return value
   }
@@ -813,4 +797,10 @@ export function startTextRedactionRuntime() {
       .querySelectorAll<HTMLElement>('.' + TEXT_REDACTION_MASK_CLASS)
       .forEach((el) => el.classList.remove(TEXT_REDACTION_MASK_CLASS))
   }
+}
+
+export function maskEncryptedPlaceholders(value: string): string {
+  // 加密层已关闭: 直接返回原值. 保留 if (!value) 早退以兼容历史调用.
+  if (!value) return value
+  return value
 }

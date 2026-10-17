@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { ToastCard } from './components/toast-card'
 import { useStore, api } from './store'
 import { startTextRedactionRuntime } from './services/text-redaction'
+import { startBrandOverridesRuntime, subscribeBrandName } from './services/brand-overrides'
 import { THEME_NAMES } from './theme'
 import { applyCustomThemeToRoot, loadActiveCustomThemeId, loadCustomThemes } from './services/custom-themes'
 import { pollRecursive } from './services/polling'
@@ -12,6 +13,7 @@ import { lazyWithRetry, isStaleChunkError, triggerStaleReload } from './services
 import { useLayoutMode } from './services/layout-mode'
 import { buildEasyModeUrlFromContext } from './services/easy-route-state'
 import { LayoutModeChoiceModal } from './components/layout-mode-choice-modal'
+import { assistantAllowedFor } from './services/assistant-availability'
 
 const Login = lazyWithRetry(() => import('./pages/Login'))
 const Welcome = lazyWithRetry(() => import('./pages/Welcome'))
@@ -340,6 +342,8 @@ function AssistantTaskDoneToast() {
   }, [notifyInBackground])
 
   if (!entry || !user) return null
+  // 小莫助手临时关闭期间, 连同「小莫任务已完成」提醒一起不显示 (见 assistant-availability).
+  if (!assistantAllowedFor(user)) return null
 
   // 深链到该会话: 极简模式下跳极简工作台 (research → research 区带 agent, 其余带 session);
   // 普通模式维持 issue 走 /i/:issue, research 走 /r/:research, 都带 ?session= 选中它。
@@ -486,7 +490,7 @@ function AuthenticatedApp() {
           <TourController />
         </Suspense>
       ) : null}
-      {idleReady && assistantBubbleEnabled ? (
+      {idleReady && assistantBubbleEnabled && assistantAllowedFor(user) ? (
         <Suspense fallback={null}>
           <AssistantChat />
         </Suspense>
@@ -500,6 +504,19 @@ function AuthenticatedApp() {
 
 export default function App() {
   const { token, user, authChecking, theme, backgroundFlowEnabled, logout } = useStore()
+
+  // 浏览器本地品牌覆盖: 自定义 logo 同步到浏览器标签页图标, 自定义系统名称重算 branding
+  // (Tab 标题/登录页等所有读 branding.systemName* 的地方随之更新). 两者都跟随其他标签页改动.
+  useEffect(() => {
+    const refresh = () => useStore.getState().refreshBranding()
+    refresh()
+    const stopFavicon = startBrandOverridesRuntime()
+    const stopBrandName = subscribeBrandName(refresh)
+    return () => {
+      stopFavicon()
+      stopBrandName()
+    }
+  }, [])
 
   useEffect(() => {
     if (token && !user) {
