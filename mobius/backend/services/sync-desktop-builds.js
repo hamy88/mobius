@@ -255,7 +255,7 @@ async function syncDesktopBuilds(options = {}) {
       if (builds.length > 0) {
         const manifest = {
           version,
-          generatedAt: new Date().toISOString(),
+          generatedAt: release.published_at || release.created_at || new Date().toISOString(),
           builds: builds.sort((a, b) => `${a.platform}-${a.arch}`.localeCompare(`${b.platform}-${b.arch}`)),
         };
         fs.writeFileSync(path.join(DESKTOP_BUILDS_DIR, "manifest.json"), JSON.stringify(manifest, null, 2));
@@ -426,7 +426,7 @@ async function syncMobileBuilds(options = {}) {
       if (builds.length > 0) {
         const manifest = {
           version,
-          generatedAt: new Date().toISOString(),
+          generatedAt: release.published_at || release.created_at || new Date().toISOString(),
           builds: builds.sort((a, b) => `${a.platform}-${a.arch}`.localeCompare(`${b.platform}-${b.arch}`)),
         };
         fs.writeFileSync(path.join(MOBILE_BUILDS_DIR, "manifest.json"), JSON.stringify(manifest, null, 2));
