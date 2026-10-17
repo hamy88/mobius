@@ -83,29 +83,82 @@ function saveState(s) {
 
 // ---- 分类轮换（缺口优先级，用户 2026-09-07 长期指令） ----
 // [sort_id, 别名, 方向候选]
+// ──────────── 9 分类均衡轮换（用户 2026-10-17 长期指令："每分类 ≤ 2 天 1 篇"） ────────────
+// [sort_id, 别名, 方向候选（统一 4-5 个，避免某些分类选题范围过宽造成占比悬殊）]
 const ROTATION = [
-  [12, 'miwifi', '小米方向：APP远程管理、红米专项、米家设备连路由器、儿童上网管控、USB接口玩法、192.168.31.1登录类'],
+  [12, 'miwifi', '小米方向：APP远程管理、米家设备连路由器、儿童上网管控、192.168.31.1登录类'],
   [1, '192-168-1-1', '192.168.1.1方向：手机登录教程、改网段、忘记密码重置后重新拨号、进不去但能上网'],
-  [10, 'lybk', '百科方向：OFDMA/MU-MIMO白话、天线增益dBi、内存多大够用、端口转发vs DMZ、NAT类型对游戏影响'],
-  [13, 'nas', 'NAS方向：SSD缓存值不值、万兆内网要不要上、Docker入门玩法、NAS电费、群晖和飞牛怎么选'],
-  [5, 'zhonghe', '综合方向：AC+AP与Mesh对比、租房便携组网、智能设备联网杂谈、测速正确姿势'],
-  [8, '192-168-0-1', '192.168.0.1登录入口长尾：水星/腾达后台打不开、初始密码、手机登录'],
-  [9, '192-168-2-1', '192.168.2.1登录入口长尾：电信光猫后台、管理员密码、桥接设置'],
+  [10, 'lybk', '百科方向：OFDMA/MU-MIMO白话、天线增益dBi、端口转发vs DMZ、NAT类型对游戏影响'],
+  [13, 'nas', 'NAS方向：SSD缓存值不值、Docker入门玩法、NAS电费、群晖和飞牛怎么选'],
+  [5, 'zhonghe', '综合方向：AC+AP与Mesh对比、智能设备联网杂谈、测速正确姿势、租房便携组网'],
+  [8, '192-168-0-1', '192.168.0.1登录入口长尾：水星/腾达后台打不开、初始密码、手机登录、改网段'],
+  [9, '192-168-2-1', '192.168.2.1登录入口长尾：电信光猫后台、管理员密码、桥接设置、IPTV'],
+  [2, 'luyou', '路由器设置方向：上网设置、WiFi密码与加密、MAC克隆、限速与黑名单'],
+  [3, 'Lightcat', '光猫方向：超级密码、破解四台限制、桥接路由模式、LOID注册'],
 ];
-function nextRotation(lastSort) {
-  // 按缺口加权轮换。2026-09-09 修复: 旧版把双权重的分类在数组里相邻放置,
-  // findIndex 永远命中第一份 → "下一个"恒为同一分类 → 从 29 篇起连发 8 篇小米.
-  // 现改为按各分类当前文章数(缺口)加权: 篇数越少权重越高, 归一化到轮换槽位,
-  // 且保证下一轮一定换分类(不与 lastSort 相同).
-  const counts = { 1: 6, 8: 3, 9: 2, 5: 8 }; // 缺口最大的四个分类(2026-09-09 实测)
-  const order = [9, 8, 1, 5, 12, 10, 13];    // 每轮按缺口从大到小依次轮一遍
-  const idx = order.indexOf(lastSort);
-  const start = idx >= 0 ? (idx + 1) % order.length : 0;
-  for (let i = 0; i < order.length; i++) {
-    const cand = order[(start + i) % order.length];
-    if (cand !== lastSort) return ROTATION.find((r) => r[0] === cand);
+const ROTATION_SIDS = ROTATION.map((r) => r[0]);
+const MAX_STALE_DAYS = 2; // 硬下限：任一 sid 距今 > 2 天没文 → 强制下次写它
+
+// 拉每个 sid 距今多少天没发文章。返回 { sid: daysSinceLastPost, ... }，sid 不在结果里表示无文章（视为 Infinity）
+async function fetchLastPostAgeBySid(sids) {
+  // emlog article_list 按 sort_id 分页拉前几篇足够算"最近一篇"
+  const https = require('node:https');
+  const API_KEY = '8d384074c434447ab63ade8bd2db9c8c';
+  const out = {};
+  for (const sid of sids) {
+    const url = `https://www.shunot.com/?rest-api=article_list&sort_id=${sid}&page=1&count=3&api_key=${API_KEY}`;
+    const days = await new Promise((resolve) => {
+      const req = https.request(url, { method: 'GET', timeout: 10000, headers: { 'User-Agent': 'shunot-scheduler/2' } }, (res) => {
+        let buf = '';
+        res.on('data', (c) => (buf += c));
+        res.on('end', () => {
+          try {
+            const d = JSON.parse(buf);
+            const arts = d.data && d.data.articles;
+            if (!arts || !arts.length) return resolve(Infinity);
+            const last = arts[0].date; // 形如 "2026-10-17 09:43:43"
+            const t = new Date(last.replace(' ', 'T') + '+08:00').getTime();
+            resolve((Date.now() - t) / 86400_000);
+          } catch { resolve(Infinity); }
+        });
+      });
+      req.on('timeout', () => { req.destroy(); resolve(Infinity); });
+      req.on('error', () => resolve(Infinity));
+      req.end();
+    });
+    out[sid] = days;
   }
-  return ROTATION[0];
+  return out;
+}
+
+function pickStaleSortId(ages, lastSort) {
+  // 找 > MAX_STALE_DAYS 的 sid 中，距今最久的（最大 daysSinceLastPost），排除 lastSort
+  let candidates = Object.entries(ages)
+    .filter(([sid, d]) => d > MAX_STALE_DAYS && Number(sid) !== lastSort)
+    .sort((a, b) => b[1] - a[1]); // 距今越久越靠前
+  if (!candidates.length) return null;
+  const sid = Number(candidates[0][0]);
+  return ROTATION.find((r) => r[0] === sid) || null;
+}
+
+async function nextRotation(lastSort, _ages) {
+  // _ages: 测试可注入 mock 数据；生产不传则真拉 emlog
+  const ages = _ages || await fetchLastPostAgeBySid(ROTATION_SIDS);
+  // 1) 先扫 stale（>2d 没发）
+  const stale = pickStaleSortId(ages, lastSort);
+  if (stale) {
+    console.log(LOG_PREFIX, `stale-pick sid=${stale[0]} daysSince=${ages[stale[0]].toFixed(1)} lastSort=${lastSort}`);
+    return stale;
+  }
+  // 2) 没有 stale：按"距今最短"加权 → 最近才写过的少写、很久没写的多写
+  //    但因没 stale = 9 个分类都 ≤ 2d 内发过，均匀轮即可
+  const order = ROTATION_SIDS.filter((s) => s !== lastSort);
+  // 简单的"距今最久的优先"
+  const ranked = order.slice().sort((a, b) => (ages[b] || 0) - (ages[a] || 0));
+  const pick = ranked[0];
+  const rot = ROTATION.find((r) => r[0] === pick);
+  console.log(LOG_PREFIX, `fresh-pick sid=${rot[0]} daysSince=${(ages[pick]||0).toFixed(1)} lastSort=${lastSort}`);
+  return rot;
 }
 
 function buildPrompt(seq, rot, latestGid) {
@@ -181,7 +234,12 @@ async function runOnce() {
     scheduleNext();
     return;
   }
-  const rot = nextRotation(state.lastSort);
+  const rot = await nextRotation(state.lastSort);
+  if (!rot) {
+    console.error(LOG_PREFIX, 'nextRotation returned null, skip');
+    scheduleNext();
+    return;
+  }
   const latestGid = await latestArticleGid();
   // session 名显式用北京时间（CST, UTC+8），不依赖系统 TZ (Issue 8f64748a)
   const now = new Date();
@@ -240,6 +298,12 @@ function scheduleNext() {
   }
 }
 
-console.log(LOG_PREFIX, 'scheduler started (system-level, survives restarts)');
-// 启动后 60 秒先跑一轮（若断链期间有欠账），此后随机间隔
-setTimeout(runOnce, 60 * 1000);
+// 仅当直接运行（PM2 启动）才进入常驻循环；require 时不启动
+if (require.main === module) {
+  console.log(LOG_PREFIX, 'scheduler started (system-level, survives restarts)');
+  // 启动后 60 秒先跑一轮（若断链期间有欠账），此后随机间隔
+  setTimeout(runOnce, 60 * 1000);
+}
+
+// 单元测试入口：require 时导出，PM2 直接运行也导出（无副作用）
+module.exports = { ROTATION, ROTATION_SIDS, MAX_STALE_DAYS, fetchLastPostAgeBySid, pickStaleSortId, nextRotation };
