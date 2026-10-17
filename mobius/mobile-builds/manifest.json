@@ -1,7 +1,6 @@
 {
   "version": "0.4.5.4",
-  "platform": "android",
-  "generatedAt": "2026-10-13T04:53:55Z",
+  "generatedAt": "2026-10-17T04:18:44.871Z",
   "builds": [
     {
       "platform": "android",
@@ -11,8 +10,7 @@
       "size": 5185644,
       "version": "0.4.5.4",
       "versionCode": 33,
-      "sha256": "1c74ab872e7b25c199fd64429010594d2358013b5402bf182d4b21474958a3c2",
-      "source": "github-actions run (released_at 2026-10-13T04:53:55Z); 0.4.5.4 restored from ota-manifest.json"
+      "sha256": "1c74ab872e7b25c199fd64429010594d2358013b5402bf182d4b21474958a3c2"
     },
     {
       "platform": "android",
@@ -22,8 +20,7 @@
       "size": 5193612,
       "version": "0.4.5.4",
       "versionCode": 33,
-      "sha256": "f22a287c4c8412ecc5c77e01ae4ab43550060009de56734c23416bb09225b28e",
-      "source": "github-actions run (released_at 2026-10-13T04:53:55Z); 0.4.5.4 restored from ota-manifest.json"
+      "sha256": "f22a287c4c8412ecc5c77e01ae4ab43550060009de56734c23416bb09225b28e"
     }
   ]
 }

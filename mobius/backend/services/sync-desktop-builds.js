@@ -286,7 +286,7 @@ async function syncDesktopBuilds(options = {}) {
  * 按 tag 前缀查最新 Release (releases/latest 只返回全局最新, mobile 与 desktop 各自独立发版).
  * 列出全部 releases (per_page=20), 取 tag_name 以 prefix 开头且非 draft/prerelease 的第一个 (列表按创建时间倒序).
  */
-function fetchLatestReleaseByTagPrefix(prefix, token, repoOverride) {
+function fetchLatestReleaseByTagPrefix(prefix, token, repoOverride, includePrerelease = false) {
   return new Promise((resolve, reject) => {
     const headers = { "User-Agent": "Mobius-Desktop-Sync/1.0", "Accept": "application/vnd.github+json" };
     if (token) headers["Authorization"] = `token ${token}`;
@@ -306,7 +306,7 @@ function fetchLatestReleaseByTagPrefix(prefix, token, repoOverride) {
         try {
           const list = JSON.parse(body);
           const hit = (Array.isArray(list) ? list : []).find(
-            (r) => !r.draft && !r.prerelease && typeof r.tag_name === "string" && r.tag_name.startsWith(prefix)
+            (r) => !r.draft && (includePrerelease || !r.prerelease) && typeof r.tag_name === "string" && r.tag_name.startsWith(prefix)
           );
           if (!hit) return reject(new Error(`No release with tag prefix '${prefix}'`));
           resolve(hit);
@@ -330,16 +330,31 @@ async function syncMobileBuilds(options = {}) {
 
   const startTime = Date.now();
   let release;
-  try {
-    release = await fetchPreferredRelease({
-      fallbackPrefix: "mobile-v",
-      token: ghToken,
-      fallbackRepo: MOBILE_REPO,
-      log,
-    });
-  } catch (e) {
-    log(`[mobile-sync] skip: ${e.message}`);
-    return { ok: true, skipped: true, reason: e.message };
+  const hasDedicatedMobileRepo = !!process.env.MOBIUS_MOBILE_SYNC_REPO && process.env.MOBIUS_MOBILE_SYNC_REPO !== REPO;
+  if (hasDedicatedMobileRepo) {
+    try {
+      release = await fetchLatestReleaseByTagPrefix("mobile-v", ghToken, MOBILE_REPO, true);
+    } catch (e) {
+      log(`[mobile-sync] dedicated repo ${MOBILE_REPO} unavailable (${e.message}); falling back to unified release`);
+      release = await fetchPreferredRelease({
+        fallbackPrefix: "mobile-v",
+        token: ghToken,
+        fallbackRepo: MOBILE_REPO,
+        log,
+      });
+    }
+  } else {
+    try {
+      release = await fetchPreferredRelease({
+        fallbackPrefix: "mobile-v",
+        token: ghToken,
+        fallbackRepo: MOBILE_REPO,
+        log,
+      });
+    } catch (e) {
+      log(`[mobile-sync] skip: ${e.message}`);
+      return { ok: true, skipped: true, reason: e.message };
+    }
   }
   const assets = releaseAssetsFor(release, "mobile");
   log(`[mobile-sync] Latest: ${release.tag_name}, ${assets.length} assets`);
@@ -384,6 +399,12 @@ async function syncMobileBuilds(options = {}) {
   if (!hasMobileManifest) {
     try {
       const version = (release.tag_name || "").replace("mobile-v", "");
+      let versionCode = 0;
+      try {
+        const otaPath = path.join(MOBILE_BUILDS_DIR, "ota-manifest.json");
+        const ota = JSON.parse(fs.readFileSync(otaPath, "utf8"));
+        if (ota && ota.version === version) versionCode = Number(ota.version_code) || 0;
+      } catch (_) { /* 没有可用的 ota-manifest.json 时 versionCode 保持 0 */ }
       const builds = [];
       const currentApkOnly = currentApkNames;
       for (const name of currentApkOnly) {
@@ -399,7 +420,7 @@ async function syncMobileBuilds(options = {}) {
           const sep = rest.indexOf("-");
           const platform = sep > 0 ? rest.slice(0, sep) : rest;
           const arch = sep > 0 ? rest.slice(sep + 1) : "arm64";
-          builds.push({ platform, arch, format: "apk", file: name, size: st.size, sha256 });
+          builds.push({ platform, arch, format: "apk", file: name, size: st.size, version, versionCode, sha256 });
         } catch (_) { /* skip */ }
       }
       if (builds.length > 0) {
