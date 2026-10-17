@@ -2686,16 +2686,17 @@ body:has(.assistant-panel) .assistant-fab .mo-avatar__particle {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  margin-right: 14px;
   padding: .75rem .85rem .85rem;
 }
 .assistant-session-log::-webkit-scrollbar {
-  width: 10px;
+  width: 14px;
 }
 .assistant-session-log::-webkit-scrollbar-track {
   background: transparent;
 }
 .assistant-session-log::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
+  border: 4px solid transparent;
   border-radius: 999px;
   background: color-mix(in srgb, var(--text-secondary) 56%, transparent);
   background-clip: padding-box;
