@@ -19,6 +19,8 @@ import adminSettings from '../services/admin-settings';
 import * as modelAccess from '../services/model-access';
 import * as bestApiIntegration from '../services/bestapi-integration';
 // @ts-ignore — service 仍是 .js
+import * as modelAccessTest from '../services/model-access-test';
+// @ts-ignore — service 仍是 .js
 import modelRegistry from '../services/model-registry';
 // @ts-ignore — service 仍是 .js
 import modelPromptLimits from '../services/model-prompt-limits';
@@ -1737,6 +1739,35 @@ router.delete('/model-access/deepseek-harness/:key', adminAuth, (req: express.Re
     res.json({ ok: true, affected_session_count: usage.count, session_model: sessionModel });
   } catch (e) {
     res.status(400).json({ error: (e as Error).message || String(e) });
+  }
+});
+
+// ── 模型接入连通性测试 (仅管理员) ──
+// 从已保存的 Claude Code / Codex / DeepSeek Harness 配置解析出 baseUrl/apiKey/model,
+// 复用轻模型工具调用测试验证凭证与 function-calling 链路。仅一次性探测, 不接入业务。
+router.post('/model-access/:kind/:key/test', adminAuth, async (req: express.Request, res: express.Response) => {
+  try {
+    const kind = String(req.params.kind || '');
+    const key = String(req.params.key || '').trim();
+    const allowed: string[] = ['claude-code', 'codex', 'deepseek-harness'];
+    if (!allowed.includes(kind)) {
+      res.status(404).json({ ok: false, error: `未知的模型接入类型: ${kind}` });
+      return;
+    }
+    if (!key) {
+      res.status(400).json({ ok: false, error: '缺少模型 Key' });
+      return;
+    }
+    const result = await modelAccessTest.testModelAccess(kind as any, key);
+    AdminAuditLog.record({
+      adminId: adminReqUser(req).id,
+      action: 'test',
+      resourceType: 'model-access',
+      resourceId: `${kind}/${key}`,
+    });
+    res.json(result);
+  } catch (e) {
+    res.json({ ok: false, error: (e as Error)?.message || String(e) });
   }
 });
 

@@ -51,6 +51,7 @@ import {
   Users as UsersIcon,
   WandSparkles,
   Container,
+  Zap,
 } from 'lucide-react'
 import { SERVER_BRAND_NAME, api, friendlyApiError, useStore } from '../store'
 import {
@@ -4913,6 +4914,50 @@ function AdminModelsPanel() {
 
 // 文件配置模式的渲染器. key={wizardRefreshNonce} 使向导创建过模型后切回文件配置时强制重挂载,
 // 子面板 useEffect 会重新 load 列表 (否则显示的还是挂载前的旧列表).
+function ModelTestButton({ kind, modelKey }: { kind: 'claude-code' | 'codex' | 'deepseek-harness'; modelKey: string }) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'fail'>('idle')
+  const [message, setMessage] = useState('')
+
+  const run = async (event: { stopPropagation: () => void; preventDefault: () => void }) => {
+    event.stopPropagation()
+    event.preventDefault()
+    if (status === 'loading') return
+    setStatus('loading')
+    setMessage('')
+    try {
+      const r: any = await api(`/api/admin/model-access/${kind}/${encodeURIComponent(modelKey)}/test`, { method: 'POST' })
+      if (r?.ok) {
+        setStatus('ok')
+        setMessage(r.summary || '连接正常')
+      } else {
+        setStatus('fail')
+        setMessage(r.reason || r.error || '测试失败')
+      }
+    } catch (e: any) {
+      setStatus('fail')
+      setMessage(e?.message || String(e))
+    }
+  }
+
+  const icon = status === 'loading'
+    ? <Loader2 className="h-3 w-3 animate-spin" />
+    : status === 'ok'
+      ? <CircleCheck className="h-3 w-3" />
+      : status === 'fail'
+        ? <AlertTriangle className="h-3 w-3" />
+        : <Zap className="h-3 w-3" />
+  const label = status === 'loading' ? '测试中' : status === 'ok' ? '可用' : status === 'fail' ? '失败' : '测试'
+  const tone = status === 'ok' ? 'text-green-400 border-green-500/30 hover:bg-green-500/10' : status === 'fail' ? 'text-red-400 border-red-500/30 hover:bg-red-500/10' : 'text-[var(--text-secondary)] border-[var(--border-color)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
+
+  return (
+    <button type="button" onClick={run} disabled={status === 'loading'} title={message || '测试模型连通性'}
+      className={`mt-0.5 inline-flex h-7 flex-shrink-0 items-center gap-1 rounded-md border px-2 text-[length:var(--fs-xs)] transition-colors disabled:opacity-60 ${tone}`}>
+      {icon}
+      {label}
+    </button>
+  )
+}
+
 function FileModelsModeRenderer({ backend }: { backend: AdminModelsBackend }) {
   if (backend === 'claude-code') return <ClaudeCodeModelsSubPanel />
   if (backend === 'codex') return <CodexModelsSubPanel />
@@ -5075,12 +5120,15 @@ function ClaudeCodeModelsSubPanel() {
                       </span>
                     </div>
                   </button>
-                  {row.key !== 'mobiusdefault' && (
-                    <button type="button" title="删除" onClick={() => remove(row.key)}
-                      className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] opacity-0 transition-colors hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                  <div className="flex flex-shrink-0 items-start gap-1.5">
+                    <ModelTestButton kind="claude-code" modelKey={row.key} />
+                    {row.key !== 'mobiusdefault' && (
+                      <button type="button" title="删除" onClick={() => remove(row.key)}
+                        className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] opacity-0 transition-colors hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               )
             })}
@@ -5330,12 +5378,15 @@ function CodexModelsSubPanel() {
                       </span>
                     </div>
                   </button>
-                  {row.key !== 'mobiusdefault' && (
-                    <button type="button" title="删除" onClick={() => remove(row.key)}
-                      className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] opacity-0 transition-colors hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
+                  <div className="flex flex-shrink-0 items-start gap-1.5">
+                    <ModelTestButton kind="codex" modelKey={row.key} />
+                    {row.key !== 'mobiusdefault' && (
+                      <button type="button" title="删除" onClick={() => remove(row.key)}
+                        className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] opacity-0 transition-colors hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               )
             })}
@@ -5590,10 +5641,13 @@ function HarnessModelsSubPanel() {
                       </span>
                     </div>
                   </button>
-                  <button type="button" title="删除" onClick={() => remove(row.key)}
-                    className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] opacity-0 transition-colors hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex flex-shrink-0 items-start gap-1.5">
+                    <ModelTestButton kind="deepseek-harness" modelKey={row.key} />
+                    <button type="button" title="删除" onClick={() => remove(row.key)}
+                      className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] opacity-0 transition-colors hover:bg-red-500/10 hover:text-red-400 group-hover:opacity-100">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               )
             })}
