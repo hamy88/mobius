@@ -42,11 +42,27 @@ function downloadFile(url, destPath, expectedSize, token, force = false) {
       } catch (_) { /* 文件不存在, 继续 */ }
     }
 
-    const file = fs.createWriteStream(destPath);
-    const timeout = setTimeout(() => {
-      file.close();
-      fs.unlink(destPath, () => {});
-      reject(new Error("Download timeout"));
+    // 先写临时文件，下载/校验成功后再原子替换目标。
+    // 旧实现直接写 destPath，超时/HTTP 错误/网络错误会把已有 manifest.json 删掉，
+    // 导致下一次同步失败时前端移动端下载菜单失去清单。
+    const tmpPath = `${destPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const file = fs.createWriteStream(tmpPath);
+    let settled = false;
+    let timeout;
+    const cleanupTmp = () => {
+      try { fs.unlinkSync(tmpPath); } catch (_) { /* 临时文件不存在时忽略 */ }
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      file.close(() => {
+        cleanupTmp();
+        reject(err);
+      });
+    };
+    timeout = setTimeout(() => {
+      fail(new Error("Download timeout"));
     }, 180000);
 
     const headers = { "User-Agent": "Mobius-Desktop-Sync/1.0" };
@@ -57,29 +73,42 @@ function downloadFile(url, destPath, expectedSize, token, force = false) {
     }
     https.get(url, { headers }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close();
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
-        return downloadFile(res.headers.location, destPath, expectedSize, null, force).then(resolve, reject);
+        file.close(() => {
+          cleanupTmp();
+          downloadFile(res.headers.location, destPath, expectedSize, null, force).then(resolve, reject);
+        });
+        return;
       }
       if (res.statusCode !== 200) {
-        file.close();
-        clearTimeout(timeout);
-        fs.unlink(destPath, () => {});
-        return reject(new Error(`HTTP ${res.statusCode}`));
+        fail(new Error(`HTTP ${res.statusCode}`));
+        return;
       }
       res.pipe(file);
       file.on("finish", () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
-        file.close();
-        if (Number.isFinite(expectedSize) && file.bytesWritten !== expectedSize) {
-          fs.unlink(destPath, () => {});
-          reject(new Error(`Size mismatch: ${file.bytesWritten} != ${expectedSize}`));
-          return;
-        }
-        resolve({ skipped: false, file: path.basename(destPath), size: file.bytesWritten });
+        file.close(() => {
+          if (Number.isFinite(expectedSize) && file.bytesWritten !== expectedSize) {
+            cleanupTmp();
+            reject(new Error(`Size mismatch: ${file.bytesWritten} != ${expectedSize}`));
+            return;
+          }
+          fs.rename(tmpPath, destPath, (renameErr) => {
+            if (renameErr) {
+              cleanupTmp();
+              reject(renameErr);
+              return;
+            }
+            resolve({ skipped: false, file: path.basename(destPath), size: file.bytesWritten });
+          });
+        });
       });
-      file.on("error", (err) => { clearTimeout(timeout); file.close(); fs.unlink(destPath, () => {}); reject(err); });
-    }).on("error", (err) => { clearTimeout(timeout); file.close(); fs.unlink(destPath, () => {}); reject(err); });
+      file.on("error", (err) => fail(err));
+    }).on("error", (err) => fail(err));
   });
 }
 
