@@ -861,36 +861,54 @@ private suspend fun handleConvSseEvent(
                 )
             }
             "typing" -> onTyping(obj["active"]?.jsonPrimitive?.booleanOrNull == true)
-            "jsonl_entry" -> {
-                val entry = obj["entry"]
-                val processLabel = extractProcessLabel(entry)
-                if (processLabel != null) {
-                    onProcess(processLabel)
-                    // 过程条目也生成 ChatMessage, 携带 processType/processLabel,
-                    // 在 UI 中渲染为可折叠卡片 (不再丢弃).
-                    val processType = extractProcessType(entry)
-                    val processText = extractProcessText(entry) ?: ""
-                    // 跳过无实质内容的过程条目 (空壳)
-                    if (processType != null || processText.isNotBlank()) {
-                        val chunk = StreamTextChunk(
-                            id = (entry as? JsonObject)?.string("id") ?: "process-${nowEpochMillis()}",
-                            author = MessageAuthor.Momo,
-                            text = processText,
-                            time = nowShortTime(),
-                            createdAtMillis = nowEpochMillis(),
-                            processType = processType,
-                            processLabel = processLabel,
-                        )
-                        onChunk(chunk)
-                    }
-                } else {
-                    // 过滤无用条目: tool_result / computer_call_output / 空内容等
-                    if (!isNoiseEntry(entry)) {
-                        parseJsonlChunk(entry)?.let { onChunk(it) }
+            // 新协议: 后端经 agent-history-store 广播增量条目 (group_created/entries/pending_opener),
+            // 不再发旧 jsonl_entry。entries 里的每个 item 都是原样 jsonl entry, 复用同一套解析。
+            "entries" -> {
+                val entries = obj["entries"] as? JsonArray
+                if (entries != null) {
+                    for (entry in entries) {
+                        emitEntry(entry, onChunk, onProcess)
                     }
                 }
             }
+            // 兼容旧协议 (后端已不再发 jsonl_entry, 保留兜底)
+            "jsonl_entry" -> emitEntry(obj["entry"], onChunk, onProcess)
             "server_error" -> onError(obj.string("message") ?: "服务端错误")
+        }
+    }
+
+    /** 把一条原始 jsonl entry 转成过程卡片或文本消息并上抛。jsonl_entry / entries 共用。 */
+    private suspend fun emitEntry(
+        entry: JsonElement?,
+        onChunk: suspend (StreamTextChunk) -> Unit,
+        onProcess: suspend (String?) -> Unit,
+    ) {
+        val processLabel = extractProcessLabel(entry)
+        if (processLabel != null) {
+            onProcess(processLabel)
+            // 过程条目也生成 ChatMessage, 携带 processType/processLabel,
+            // 在 UI 中渲染为可折叠卡片 (不再丢弃).
+            val processType = extractProcessType(entry)
+            val processText = extractProcessText(entry) ?: ""
+            // 跳过无实质内容的过程条目 (空壳)
+            if (processType != null || processText.isNotBlank()) {
+                val obj = entry as? JsonObject
+                val chunk = StreamTextChunk(
+                    id = obj?.string("id") ?: obj?.string("uuid") ?: "process-${nowEpochMillis()}",
+                    author = MessageAuthor.Momo,
+                    text = processText,
+                    time = nowShortTime(),
+                    createdAtMillis = nowEpochMillis(),
+                    processType = processType,
+                    processLabel = processLabel,
+                )
+                onChunk(chunk)
+            }
+        } else {
+            // 过滤无用条目: tool_result / computer_call_output / 空内容等
+            if (!isNoiseEntry(entry)) {
+                parseJsonlChunk(entry)?.let { onChunk(it) }
+            }
         }
     }
 

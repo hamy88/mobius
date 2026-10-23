@@ -82,6 +82,39 @@ class MobiusApiStreamTest {
         }
     }
 
+    /**
+     * 后端已把增量协议从 jsonl_entry 换成 agent-history-store 的 entries 事件
+     * (group_created/entries/pending_opener)。移动端必须同样把 entries 里的每条
+     * 原始 jsonl entry 产出独立 chunk，否则聊天页"看不到助手回复"。此处守护该契约。
+     */
+    @Test
+    fun entriesEventYieldsChunksLikeLegacyJsonlEntry() = runBlocking {
+        val events = buildString {
+            appendSse("entries", """{"event":"entries","session_id":"sess-1","group_id":"1","group_id_version":2,"entries":[{"type":"assistant","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"第一条回复"}]}},{"type":"assistant","id":"a2","message":{"role":"assistant","content":[{"type":"text","text":"第二条回复"}]}}]}""")
+            appendSse("typing", """{"active":false}""")
+        }
+        FakeSseServer(events).use { server ->
+            val api = MobiusApi(baseUrl = server.baseUrl, storage = TestStreamStorage("test-token"), onUnauthorized = {})
+            val chunks = mutableListOf<StreamTextChunk>()
+            api.streamSession(
+                sessionId = "sess-1",
+                onConnected = {},
+                onTyping = {},
+                onHistory = {},
+                onJsonlHistory = { _, _, _ -> },
+                onChunk = { chunks += it },
+                onError = { error("stream error: $it") },
+            )
+            api.close()
+
+            assertEquals(2, chunks.size, "entries 事件里的每条 assistant entry 都应产出独立 chunk: $chunks")
+            assertEquals(listOf("a1", "a2"), chunks.map { it.id })
+            assertEquals("第一条回复", chunks[0].text)
+            assertEquals("第二条回复", chunks[1].text)
+            assertTrue(chunks.all { it.author == MessageAuthor.Momo })
+        }
+    }
+
     private fun StringBuilder.appendSse(event: String, data: String) {
         append("event: ").append(event).append("\n")
         data.split("\n").forEach { append("data: ").append(it).append("\n") }
