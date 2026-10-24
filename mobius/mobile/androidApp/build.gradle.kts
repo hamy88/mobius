@@ -79,8 +79,8 @@ android {
         //       按当前激活代理设置 Ktor HttpClient(Android 用 ProxySelector / SOCKS,Desktop 用
         //       java.net.Proxy + ProxySelector,SOCKS 走 JFrei OFEJ;测试:ProxyConfigTest 覆盖
         //       解析/校验/exportEnv)。
-        versionCode = 34
-        versionName = "0.4.5.5"
+        versionCode = 35
+        versionName = "0.4.5.6"
         // 极光推送 AppKey / 渠道：JPush SDK 经 AndroidManifest meta-data(JPUSH_APPKEY) 读取。
         // 从 gradle.properties(或环境变量)读取；默认空串——未配置时 JPush 不注册，App 仍可正常构建运行。
         val jpushAppKey = providers.gradleProperty("MOMO_JPUSH_APPKEY")

@@ -1,16 +1,11 @@
 package com.mobius.momo.platform.ota
 
 /**
- * OTA 下载 URL 协议白名单的纯函数判定（无平台依赖，跨 commonMain / androidMain / desktopMain 共用）。
+ * 私网段 IP 判定纯函数（无平台依赖，跨 commonMain / desktopTest 共用）。
  *
- * §6 红线：拒绝非 HTTPS URL，但允许私网段 HTTP 走本服务器 OTA 通道。
- * - https:// 任意 host → 通过
- * - http:// + host 落在私网段（10/8、172.16/12、192.168/16、127/8、::1、fe80::/10、fc00::/7）→ 通过
- * - 其它 http:// 公网 → reject
- *
- * 把字节数组的私网段判断抽到 commonMain 是为了能直接在 desktopTest 覆盖；DNS 解析仍由调用方
- * （androidMain OtaDownloader）经 java.net.InetAddress.getByName 完成，避免 commonMain 引入
- * JVM-only API。
+ * 0.4.5.6 起 OTA URL 协议白名单放宽为「http:// 与 https:// 均可」，不再区分公网/私网，
+ * 因此 androidMain OtaDownloader 已不再调用本文件的判定。此文件保留私网段字节数组判定，
+ * 供历史参考与 OtaUrlPolicyTest 覆盖 RFC1918 / IPv6 link-local / ULA 等边界。
  */
 internal object OtaUrlPolicy {
 

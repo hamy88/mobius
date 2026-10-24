@@ -1,28 +1,22 @@
 package com.mobius.momo.ota
 
 import com.mobius.momo.platform.ota.OtaUrlPolicy
-import java.net.InetAddress
-import java.net.URI
 import kotlin.test.Test
-import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * §6 红线 — OTA URL 协议白名单的纯函数测试（v0.4.5.1 放宽私网 HTTP）。
+ * §6 红线 — OTA URL 协议白名单的纯函数测试。
  *
  * 分两层：
  * 1. [OtaUrlPolicy.isPrivateIpv4] / [OtaUrlPolicy.isPrivateIpv6] 字节数组判定（commonMain 纯函数）——
- *    覆盖 RFC1918 私网段 + IPv6 link-local/ULA + 公网 false case。
- * 2. URL 协议白名单的端到端判定：仿照 androidMain OtaDownloader.assertHttpsUrl 的拼接逻辑，
- *    用 java.net.URI 解析 + java.net.InetAddress.getByName 做 DNS（均为 JVM 标准库，desktop 端可跑），
- *    验证 https 任意通过、http + 私网通过、http + 公网 reject、非法 URL reject。
+ *    覆盖 RFC1918 私网段 + IPv6 link-local/ULA + 公网 false case（0.4.5.6 起仅作参考保留）。
+ * 2. URL 协议白名单的端到端判定：仿照 androidMain OtaDownloader.assertHttpsUrl，
+ *    验证 https / http 任意 host 通过、非法 scheme / 无 scheme 的 URL reject。
  *
- * 0.4.5 之前 assertHttpsUrl 直接 require https://，所有 http:// 一律 reject；
- * 0.4.5.1 放宽到私网段（10/8、172.16/12、192.168/16、127/8、::1、fe80::/10、fc00::/7）+ localhost
- * 允许 http://——便于用户自部署本服务器 OTA 通道（AndroidManifest cleartextTrafficPermitted=true
- * 已就绪，仅 App 代码层补一个 allowlist）。
+ * 0.4.5.1 曾放宽到私网段 http://；0.4.5.6 起按用户授权进一步放宽为 http:// 与 https:// 均放行，
+ * 不再区分公网/私网。
  */
 class OtaUrlPolicyTest {
 
@@ -106,30 +100,17 @@ class OtaUrlPolicyTest {
         assertFalse(OtaUrlPolicy.isPrivateIpv6(ff))
     }
 
-    // ---------- 端到端：URL 协议白名单 ----------
+    // ---------- 端到端：URL 协议白名单（0.4.5.6 起 HTTP/HTTPS 均可） ----------
 
     /**
      * 与 androidMain OtaDownloader.assertHttpsUrl 行为一致：
      * - https:// 任意 host 通过
-     * - http:// + host 私网通过
-     * - http:// + host 公网 reject
-     * - 解析失败 reject
+     * - http:// 任意 host 通过（不再区分公网/私网）
+     * - 其它 scheme（ftp:// 等）或非 URL → reject
      */
     private fun assertHttpsUrl(url: String) {
-        if (url.startsWith("https://")) return
-        val host = runCatching { URI(url).host }.getOrNull()
-        val allowed = host != null && url.startsWith("http://") && isPrivateNetworkHost(host)
-        require(allowed) { "OTA 下载仅支持 HTTPS（或私网 HTTP）：$url (host=$host)" }
-    }
-
-    private fun isPrivateNetworkHost(host: String): Boolean {
-        if (host.equals("localhost", ignoreCase = true)) return true
-        val addr = runCatching { InetAddress.getByName(host).address }.getOrNull() ?: return false
-        return when (addr.size) {
-            4 -> OtaUrlPolicy.isPrivateIpv4(addr)
-            16 -> OtaUrlPolicy.isPrivateIpv6(addr)
-            else -> false
-        }
+        if (url.startsWith("https://") || url.startsWith("http://")) return
+        require(false) { "OTA 下载仅支持 HTTP 或 HTTPS：$url" }
     }
 
     @Test
@@ -169,22 +150,22 @@ class OtaUrlPolicyTest {
     }
 
     @Test
-    fun `http public IPv4 URLs are rejected`() {
-        // 8.8.8.8 公网 DNS
-        assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://8.8.8.8/apk") }
+    fun `http public IPv4 URLs are accepted`() {
+        // 8.8.8.8 公网 DNS（0.4.5.6 起 http 任意 host 放行）
+        assertHttpsUrl("http://8.8.8.8/apk")
         // 1.1.1.1 Cloudflare
-        assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://1.1.1.1/apk") }
+        assertHttpsUrl("http://1.1.1.1/apk")
         // 172.15/172.32 公网边界
-        assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://172.15.255.255/apk") }
-        assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://172.32.0.0/apk") }
+        assertHttpsUrl("http://172.15.255.255/apk")
+        assertHttpsUrl("http://172.32.0.0/apk")
     }
 
     @Test
-    fun `http public IPv6 and domain URLs are rejected`() {
+    fun `http public IPv6 and domain URLs are accepted`() {
         // 2001:4860:4860::8888 — Google DNS
-        assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://[2001:4860:4860::8888]/apk") }
-        // 公网域名（InetAddress.getByName 在 desktopTest 容器里能否解析取决于 DNS；用不存在的 .invalid TLD 保证抛 UnknownHostException → false）
-        assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://example.invalid/apk") }
+        assertHttpsUrl("http://[2001:4860:4860::8888]/apk")
+        // 公网域名
+        assertHttpsUrl("http://example.com/apk")
     }
 
     @Test
@@ -198,11 +179,10 @@ class OtaUrlPolicyTest {
     }
 
     @Test
-    fun `rejection message contains url and host for debugging`() {
-        val ex = assertFailsWith<IllegalArgumentException> { assertHttpsUrl("http://8.8.8.8/apk") }
+    fun `rejection message contains url and supported schemes for debugging`() {
+        val ex = assertFailsWith<IllegalArgumentException> { assertHttpsUrl("ftp://example.com/apk") }
         val msg = ex.message ?: ""
-        assertTrue(msg.contains("http://8.8.8.8/apk"), "error should include URL: $msg")
-        assertTrue(msg.contains("host="), "error should include host= label: $msg")
-        assertTrue(msg.contains("8.8.8.8"), "error should include host value: $msg")
+        assertTrue(msg.contains("ftp://example.com/apk"), "error should include URL: $msg")
+        assertTrue(msg.contains("HTTP 或 HTTPS"), "error should mention supported schemes: $msg")
     }
 }
