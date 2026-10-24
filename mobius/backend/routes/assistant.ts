@@ -792,8 +792,12 @@ function unavailableAssistantSnapshot(session: any, reason: string): any {
 
 function readAssistantSnapshot(user: any, sessionId: string): any {
   const session = Sessions.findByIdForUser(sessionId, user.id);
-  if (!isAssistantVisibleSession(session, user)) {
-    const err = new Error('未找到当前用户的小莫 Session') as Error & { status: number };
+  // 放宽: 移动端项目钻取会对任意(用户自有) session 调本接口拿对话快照。
+  // 原来只放行"主小莫/分身"会话, 普通项目 session 在此 404 → 移动端回退 SSE, 而 SSE history
+  // 只含 messages_v2(用户消息), assistant 回复在 agent-history-store 里拿不到 → 看不到回复。
+  // 故这里只做所有权校验, 不再限 assistant 会话类型。
+  if (!session) {
+    const err = new Error('未找到会话') as Error & { status: number };
     err.status = 404;
     throw err;
   }
