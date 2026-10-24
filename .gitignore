@@ -59,6 +59,7 @@ logs/
 
 # Secrets
 .env
+mobius/.mobile-sync.env
 .trash
 mobius/public/index.html
 mobius/public/assets
