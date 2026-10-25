@@ -115,6 +115,43 @@ class MobiusApiStreamTest {
         }
     }
 
+    /**
+     * assistant 条目的 message.content 常是混合块: [thinking, tool_use, text]。
+     * 移动端要像网页版一样把 thinking / tool_use 拆成过程卡片(思考过程 / 调用工具),
+     * 而不能只保留 text 正文 —— 否则用户看不到「全部过程」。
+     */
+    @Test
+    fun assistantEntryWithThinkingAndToolUseBlocksYieldsProcessCards() = runBlocking {
+        val entry = """{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"让我思考一下"},{"type":"tool_use","id":"tool_1","name":"Bash","input":{"command":"ls -la"}},{"type":"text","text":"完成了"}]}}"""
+        val events = buildString {
+            appendSse("entries", """{"event":"entries","session_id":"sess-1","group_id":"1","group_id_version":1,"entries":[$entry]}""")
+            appendSse("typing", """{"active":false}""")
+        }
+        FakeSseServer(events).use { server ->
+            val api = MobiusApi(baseUrl = server.baseUrl, storage = TestStreamStorage("test-token"), onUnauthorized = {})
+            val chunks = mutableListOf<StreamTextChunk>()
+            api.streamSession(
+                sessionId = "sess-1",
+                onConnected = {},
+                onTyping = {},
+                onHistory = {},
+                onJsonlHistory = { _, _, _ -> },
+                onChunk = { chunks += it },
+                onError = { error("stream error: $it") },
+            )
+            api.close()
+
+            val thinking = chunks.filter { it.processType == "thinking" }
+            val tool = chunks.filter { it.processType == "tool_call" }
+            val text = chunks.filter { it.processType == null && it.text.isNotBlank() }
+            assertEquals(1, thinking.size, "应产出 1 张思考过程卡片: $chunks")
+            assertTrue(thinking.first().text.contains("思考"), "思考内容: ${thinking.first().text}")
+            assertEquals(1, tool.size, "应产出 1 张工具调用卡片: $chunks")
+            assertTrue(tool.first().text.contains("ls -la"), "工具命令: ${tool.first().text}")
+            assertTrue(text.any { it.text.contains("完成了") }, "应产出正文气泡: $chunks")
+        }
+    }
+
     private fun StringBuilder.appendSse(event: String, data: String) {
         append("event: ").append(event).append("\n")
         data.split("\n").forEach { append("data: ").append(it).append("\n") }

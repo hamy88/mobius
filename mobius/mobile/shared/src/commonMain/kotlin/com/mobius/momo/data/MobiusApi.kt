@@ -905,9 +905,68 @@ private suspend fun handleConvSseEvent(
                 onChunk(chunk)
             }
         } else {
+            // 从 assistant 条目的 content blocks 提取 thinking / tool_use 作为过程卡片,
+            // 让移动端像网页版一样显示思考过程与命令。此前 contentBlocksText 只取 text 块,
+            // 思考内容与工具命令被丢弃, 用户看不到「全部过程」。
+            emitContentBlockProcesses(entry, onChunk)
             // 过滤无用条目: tool_result / computer_call_output / 空内容等
             if (!isNoiseEntry(entry)) {
                 parseJsonlChunk(entry)?.let { onChunk(it) }
+            }
+        }
+    }
+
+    /**
+     * 把一个 assistant 条目 message.content 里的 thinking / tool_use 块, 各自拆成一条过程卡片
+     * (processType=thinking / tool_call)。text 块仍由 parseJsonlChunk 走正文气泡。
+     */
+    private suspend fun emitContentBlockProcesses(
+        entry: JsonElement?,
+        onChunk: suspend (StreamTextChunk) -> Unit,
+    ) {
+        val entryObj = entry as? JsonObject ?: return
+        val message = entryObj["message"] as? JsonObject ?: return
+        val content = message["content"] as? JsonArray ?: return
+        val messageId = message.string("id") ?: entryObj.string("uuid") ?: "msg"
+        val createdAt = nowEpochMillis()
+        content.forEachIndexed { index, block ->
+            val b = block as? JsonObject ?: return@forEachIndexed
+            when (b.string("type")) {
+                "thinking" -> {
+                    val thinking = b.string("thinking") ?: return@forEachIndexed
+                    if (thinking.isBlank()) return@forEachIndexed
+                    onChunk(
+                        StreamTextChunk(
+                            id = "$messageId-thinking-$index",
+                            author = MessageAuthor.Momo,
+                            text = thinking,
+                            time = nowShortTime(),
+                            createdAtMillis = createdAt,
+                            processType = "thinking",
+                            processLabel = "思考过程",
+                        )
+                    )
+                }
+                "tool_use" -> {
+                    val name = b.string("name") ?: "工具"
+                    val input = b["input"]
+                    val inputText = when (input) {
+                        is JsonObject -> input.string("command") ?: input.toString()
+                        is JsonPrimitive -> input.contentOrNull ?: ""
+                        else -> input?.toString().orEmpty()
+                    }
+                    onChunk(
+                        StreamTextChunk(
+                            id = b.string("id") ?: "$messageId-tool-$index",
+                            author = MessageAuthor.Momo,
+                            text = if (inputText.isNotBlank()) "$name: $inputText" else name,
+                            time = nowShortTime(),
+                            createdAtMillis = createdAt,
+                            processType = "tool_call",
+                            processLabel = "调用工具：$name",
+                        )
+                    )
+                }
             }
         }
     }
