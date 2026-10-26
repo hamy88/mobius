@@ -719,9 +719,17 @@ class MomoAppViewModel(
                 return
             }
         val asset = OtaAsset.fromBuild(build)
+        // 本服务器 channel 的 build.url 是相对路径(/mobile-builds/<file>), 而 DownloadManager 需要绝对 URL。
+        // 若不解析, assertHttpsUrl 对无 scheme/host 的相对路径会直接拒绝, 表现为「加入下载队列失败」。
+        // 故把相对路径补到 currentBaseUrl(当前登录服务器) 下, 再交给 enqueue。
+        val resolvedAsset = if (asset.browserDownloadUrl.startsWith("/")) {
+            asset.copy(browserDownloadUrl = currentBaseUrl.trimEnd('/') + asset.browserDownloadUrl)
+        } else {
+            asset
+        }
         // Android 13+ 首次下载需要 POST_NOTIFICATIONS,iOS/desktop 占位 no-op
         runCatching { otaDownloader.requestPostNotificationsIfNeeded() }
-        val downloadId = runCatching { otaDownloader.enqueue(asset) }.getOrElse { e ->
+        val downloadId = runCatching { otaDownloader.enqueue(resolvedAsset) }.getOrElse { e ->
             showToast("加入下载队列失败：${e.message ?: "未知错误"}")
             return
         }
