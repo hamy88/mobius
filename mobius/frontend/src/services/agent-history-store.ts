@@ -18,6 +18,12 @@ import { useEffect, useMemo, useSyncExternalStore } from 'react'
 // 同源部署: 与 EventSource 一样走相对路径.
 const API = ''
 
+// 自动预热的组条目上限: 超过该规模的组视为"大组", 协商时不再整组拉取,
+// 只保留折叠头; 用户手动展开时才按需加载, 避免打开会话时被超大组拖慢.
+// Groups with more entries than this are treated as large and skipped during
+// automatic preload; they stay collapsed until the user expands them on demand.
+export const AUTO_PRELOAD_GROUP_ENTRY_LIMIT = 250
+
 export interface HistoryGroupMeta {
   id: string
   seq: number
@@ -437,7 +443,7 @@ export class SessionHistoryStore {
         this.emit()
       }
       // 视口轮: 自动加载末尾几组 (新消息/继续对话的主场; 兼顾简易视图的轮次列表).
-      this.ensureLastGroups(5)
+      this.ensureLastGroups(2)
       // ① 完成 → 释放缓冲事件, 按水位线对账.
       const buffered = this.pendingEvents
       this.pendingEvents = []
@@ -517,7 +523,10 @@ export class SessionHistoryStore {
 
   ensureLastGroups(count: number): void {
     const tail = this.groups.slice(-count)
-    for (const g of tail) this.ensureGroupEntries(g.id)
+    for (const g of tail) {
+      if ((g.entry_count || 0) > AUTO_PRELOAD_GROUP_ENTRY_LIMIT) continue
+      this.ensureGroupEntries(g.id)
+    }
   }
 
   /** uuid 去重合并 (保险丝: ② 与 SSE 双路到达同一条时只留一份). */

@@ -4,7 +4,7 @@
  * 从 jsonl-view.tsx 拆出.
  *  - EntryCardWithImages: 在普通 entry 卡片后追加 display_images / 附件图片派生的图像卡片.
  *  - ContinuationGroup: "上文续接"折叠组 (尾部窗口截掉的头部条目); 只有一组时强制展开.
- *  - RoundGroup: 一个对话轮次 (1 条 user 问题 + N 条 agent 回复); 简易模式最后五组始终展开,
+ *  - RoundGroup: 一个对话轮次 (1 条 user 问题 + N 条 agent 回复); 简易模式末尾两组始终展开,
  *    普通模式最新两轮默认展开, 更早的轮在跌出范围时自动折叠, 用户手动操作过的轮尊重用户.
  */
 import { Fragment, memo, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
@@ -283,9 +283,9 @@ function EasyMicroStepGroup({ items, showMeta, toolStatusMap, collapseLineNos, f
 // 自动规则: 用户没插手过 (sticky=false) 时跟随"末两轮展开"自动开合;
 // 用户点过一次后 sticky=true, 自动规则永不再接管. 展开即加载由 store 状态机保证.
 // memo: 未收数据的组全部 prop 身份稳定 (round 缓存 + 回调缓存 + map 缓存), 整组跳过重渲染.
-function RoundGroupInner({ round, isLast, isSecondLast, isRecentTail = false, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, searchActive = false, searchHighlighted = false, showMeta = true, easyMode = false, showGroupDivider = false, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; isRecentTail?: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; searchActive?: boolean; searchHighlighted?: boolean; showMeta?: boolean; easyMode?: boolean; showGroupDivider?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
-  const alwaysOpen = easyMode && isRecentTail
-  const autoOpen = isLast || isSecondLast || alwaysOpen
+function RoundGroupInner({ round, isLast, isSecondLast, isRecentTail = false, largeGroup = false, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, searchActive = false, searchHighlighted = false, showMeta = true, easyMode = false, showGroupDivider = false, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; isRecentTail?: boolean; largeGroup?: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; searchActive?: boolean; searchHighlighted?: boolean; showMeta?: boolean; easyMode?: boolean; showGroupDivider?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
+  const alwaysOpen = !largeGroup && easyMode && isRecentTail
+  const autoOpen = !largeGroup && (isLast || isSecondLast || alwaysOpen)
   // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
     // 搜索命中是显式导航，必须压过此前把该轮锁定为 sticky/closed 的状态。
@@ -293,15 +293,15 @@ function RoundGroupInner({ round, isLast, isSecondLast, isRecentTail = false, on
     // 自动定位结束后只保留红色标记与当前开合状态；用户可以自行折叠，
     // 也不会被“旧轮次自动关闭”规则立刻收回去。
     if (searchActive) return
-    // 简易模式最后五组不受历史 sticky 折叠状态影响，始终保持展开。
-    // The final five easy-mode groups stay open even when an older sticky state says closed.
+    // 简易模式末尾两组不受历史 sticky 折叠状态影响，始终保持展开。
+    // The final two easy-mode groups stay open even when an older sticky state says closed.
     if (alwaysOpen) { if (!open) onAutoOpen(); return }
     if (sticky) return
-    if (onlyGroup || autoOpen) { if (!open) onAutoOpen(); return }
+    if (!largeGroup && (onlyGroup || autoOpen)) { if (!open) onAutoOpen(); return }
     if (open) onAutoClose()
-  }, [sticky, autoOpen, alwaysOpen, onlyGroup, forceOpen, searchActive, open, onAutoOpen, onAutoClose])
+  }, [sticky, autoOpen, alwaysOpen, largeGroup, onlyGroup, forceOpen, searchActive, open, onAutoOpen, onAutoClose])
   // 首帧防闪: store 还没来得及转移时, 按"应展开"先行绘制 (视觉态), effect 随后对齐真实态.
-  const openVisual = open || forceOpen || alwaysOpen || (!sticky && (onlyGroup || autoOpen))
+  const openVisual = open || forceOpen || alwaysOpen || (!sticky && !largeGroup && (onlyGroup || autoOpen))
   const [easyThreadMounted, setEasyThreadMounted] = useState(openVisual)
   const [easyThreadOpen, setEasyThreadOpen] = useState(openVisual)
   useEffect(() => {
