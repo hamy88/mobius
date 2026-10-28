@@ -283,9 +283,9 @@ function EasyMicroStepGroup({ items, showMeta, toolStatusMap, collapseLineNos, f
 // 自动规则: 用户没插手过 (sticky=false) 时跟随"末两轮展开"自动开合;
 // 用户点过一次后 sticky=true, 自动规则永不再接管. 展开即加载由 store 状态机保证.
 // memo: 未收数据的组全部 prop 身份稳定 (round 缓存 + 回调缓存 + map 缓存), 整组跳过重渲染.
-function RoundGroupInner({ round, isLast, isSecondLast, isRecentTail = false, largeGroup = false, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, searchActive = false, searchHighlighted = false, showMeta = true, easyMode = false, showGroupDivider = false, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; isRecentTail?: boolean; largeGroup?: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; searchActive?: boolean; searchHighlighted?: boolean; showMeta?: boolean; easyMode?: boolean; showGroupDivider?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
-  const alwaysOpen = !largeGroup && easyMode && isRecentTail
-  const autoOpen = !largeGroup && (isLast || isSecondLast || alwaysOpen)
+function RoundGroupInner({ round, isLast, isSecondLast, isRecentTail = false, onlyGroup, open, sticky = false, loading = false, failed = false, resident = false, onUserToggle, onAutoOpen, onAutoClose, onRetry, forceOpen = false, searchActive = false, searchHighlighted = false, showMeta = true, easyMode = false, showGroupDivider = false, toolStatusMap, collapseLineNos, focusLineNo, headerPalette, taskPlans, headerTitle, headerSummary }: { round: Round; isLast: boolean; isSecondLast: boolean; isRecentTail?: boolean; onlyGroup: boolean; open: boolean; sticky?: boolean; loading?: boolean; failed?: boolean; resident?: boolean; onUserToggle: () => void; onAutoOpen: () => void; onAutoClose: () => void; onRetry: () => void; forceOpen?: boolean; searchActive?: boolean; searchHighlighted?: boolean; showMeta?: boolean; easyMode?: boolean; showGroupDivider?: boolean; toolStatusMap?: ToolStatusMap | null; collapseLineNos?: Set<number>; focusLineNo?: number | null; headerPalette: RoundHeaderPalette; taskPlans?: TaskPlanByUuid | null; headerTitle?: string; headerSummary?: string }) {
+  const alwaysOpen = easyMode && isRecentTail
+  const autoOpen = isLast || isSecondLast || alwaysOpen
   // 自动开合同步: store 状态落后于期望态时推一把 (首次挂载/轮次升跌时).
   useEffect(() => {
     // 搜索命中是显式导航，必须压过此前把该轮锁定为 sticky/closed 的状态。
@@ -297,11 +297,11 @@ function RoundGroupInner({ round, isLast, isSecondLast, isRecentTail = false, la
     // The final two easy-mode groups stay open even when an older sticky state says closed.
     if (alwaysOpen) { if (!open) onAutoOpen(); return }
     if (sticky) return
-    if (!largeGroup && (onlyGroup || autoOpen)) { if (!open) onAutoOpen(); return }
+    if (onlyGroup || autoOpen) { if (!open) onAutoOpen(); return }
     if (open) onAutoClose()
-  }, [sticky, autoOpen, alwaysOpen, largeGroup, onlyGroup, forceOpen, searchActive, open, onAutoOpen, onAutoClose])
+  }, [sticky, autoOpen, alwaysOpen, onlyGroup, forceOpen, searchActive, open, onAutoOpen, onAutoClose])
   // 首帧防闪: store 还没来得及转移时, 按"应展开"先行绘制 (视觉态), effect 随后对齐真实态.
-  const openVisual = open || forceOpen || alwaysOpen || (!sticky && !largeGroup && (onlyGroup || autoOpen))
+  const openVisual = open || forceOpen || alwaysOpen || (!sticky && (onlyGroup || autoOpen))
   const [easyThreadMounted, setEasyThreadMounted] = useState(openVisual)
   const [easyThreadOpen, setEasyThreadOpen] = useState(openVisual)
   useEffect(() => {

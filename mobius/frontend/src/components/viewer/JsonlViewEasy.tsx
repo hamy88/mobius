@@ -21,7 +21,6 @@ import { computeCollapsedByForgottenFlag } from './fold-rules'
 import { hideRepeatedEncryptedReasoning, initialContextIndex } from './visibility-rules'
 import { buildTaskPlans } from './task-progress'
 import { PendingQueueCard } from './PendingQueueCard'
-import { AUTO_PRELOAD_GROUP_ENTRY_LIMIT } from '../../services/agent-history-store'
 import type { HistorySnapshot, SessionHistoryStore } from '../../services/agent-history-store'
 
 // 逐组状态机转移回调 (身份稳定, 供 RoundGroup memo 判等).
@@ -511,14 +510,12 @@ export default function JsonlViewEasy({
     const entries = r.entries.length > 0 ? r.entries : null
     const rt = snapshot.groupRuntime.get(r.meta.id)
     const cb = groupCallbacksOf(r.meta.id)
-    const largeGroup = (r.meta.entry_count || 0) > AUTO_PRELOAD_GROUP_ENTRY_LIMIT
     return (
       <RoundGroup
         round={r.round}
         isLast={block.index === rounds.length - 1}
         isSecondLast={block.index === rounds.length - 2}
         isRecentTail={block.index >= rounds.length - 2}
-        largeGroup={largeGroup}
         onlyGroup={onlyGroup}
         open={r.state !== 'closed'}
         sticky={!!rt?.sticky}
