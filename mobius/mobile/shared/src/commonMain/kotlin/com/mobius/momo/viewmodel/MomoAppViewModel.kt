@@ -806,14 +806,14 @@ class MomoAppViewModel(
         )
         _state.update { it.copy(otaDownload = newUi) }
         if (phase == OtaDownloadPhase.Verifying && ui.phase != OtaDownloadPhase.Verifying) {
-            kickOtaInstall(newUi)
+            val uri = runCatching { otaDownloader.localUri(p.downloadId) }.getOrNull()
+            kickOtaInstall(newUi, p.downloadId, uri)
         }
     }
 
     /** 0.4.4: 调 OtaInstaller 安装 localUri 指向的 APK。 */
-    private fun kickOtaInstall(ui: OtaDownloadUi) {
-        val downloadId = otaDownloader.openDownloadId()
-        if (downloadId == null) {
+    private fun kickOtaInstall(ui: OtaDownloadUi, downloadId: Long, uri: String?) {
+        if (downloadId <= 0L) {
             _state.update {
                 it.copy(
                     otaDownload = ui.copy(
@@ -824,9 +824,11 @@ class MomoAppViewModel(
             }
             return
         }
-        // 通过 OtaDownloader 拿本地 URI(file://...);失败兜底 Failed。
-        val uri = runCatching { otaDownloader.localUri(downloadId) }.getOrNull()
-        if (uri.isNullOrBlank()) {
+        // uri 由调用方从 Success 事件 / localUri 传入; 不再 openDownloadId 重读——download 完成后
+        // ACTION_DOWNLOAD_COMPLETE 已把 currentDownloadId 清空, openDownloadId 会拿不到。
+        val resolvedUri = uri?.takeIf { it.isNotBlank() }
+            ?: runCatching { otaDownloader.localUri(downloadId) }.getOrNull()
+        if (resolvedUri.isNullOrBlank()) {
             _state.update {
                 it.copy(
                     otaDownload = ui.copy(
@@ -838,7 +840,7 @@ class MomoAppViewModel(
             return
         }
         // COLUMN_LOCAL_URI 是 file:// URI; OtaInstaller 内部用 java.io.File(path) 解析
-        val apkPath = if (uri.startsWith("file://")) uri.removePrefix("file://") else uri
+        val apkPath = if (resolvedUri.startsWith("file://")) resolvedUri.removePrefix("file://") else resolvedUri
         // manifest.android.packageName 为空时,用当前 app 的(升级场景应相同);install 内部不强校验
         val packageName = ui.manifest.android.packageName.ifBlank { ui.manifest.version }
         _state.update { it.copy(otaDownload = ui.copy(phase = OtaDownloadPhase.Installing)) }
@@ -889,13 +891,14 @@ class MomoAppViewModel(
         when (event) {
             is OtaCompletionEvent.Success -> {
                 if (ui.phase != OtaDownloadPhase.Verifying && ui.phase != OtaDownloadPhase.Installing) {
-                    // lastProgress 路径还没切到 Verifying,这里兜底触发 install
+                    // lastProgress 路径还没切到 Verifying,这里兜底触发 install。
+                    // 直接透传 Success 事件携带的 downloadId + localUri, 不依赖 openDownloadId(已被清空)。
                     _state.update {
                         it.copy(
                             otaDownload = ui.copy(phase = OtaDownloadPhase.Verifying),
                         )
                     }
-                    kickOtaInstall(ui.copy(phase = OtaDownloadPhase.Verifying))
+                    kickOtaInstall(ui.copy(phase = OtaDownloadPhase.Verifying), event.downloadId, event.localUri)
                 }
             }
             is OtaCompletionEvent.Failure -> {
