@@ -2439,8 +2439,9 @@ private fun MessageRow(
     }
 }
 
-// 过程条目卡片: 可折叠的 thinking / tool_call / search 等过程信息。
-// 在轮次内 agent 文本回复之间穿插显示, 初始折叠, 点击展开查看详情。
+// 过程条目卡片: thinking / tool_call 等过程信息。
+// 参考 WorkBuddy 的 thought-balloon 交互: 初始只显示一行摘要, 点击弹出 ModalBottomSheet
+// 窗口展示完整思考/推理/命令内容。
 @Composable
 private fun ProcessEntryCard(message: ChatMessage, theme: MomoTheme) {
     var expanded by remember(message.id) { mutableStateOf(false) }
@@ -2466,7 +2467,7 @@ private fun ProcessEntryCard(message: ChatMessage, theme: MomoTheme) {
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(MomoCorners.chip))
                 .background(theme.bgSecondary)
-                .clickable { expanded = !expanded }
+                .clickable { expanded = true }
                 .padding(horizontal = MomoSpacing.md, vertical = MomoSpacing.xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2485,23 +2486,38 @@ private fun ProcessEntryCard(message: ChatMessage, theme: MomoTheme) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                if (expanded) "▲" else "▼",   // up/down triangle
+                "›",   // 表示点击弹出窗口
                 color = theme.textMuted,
                 style = momoTextStyle(MomoTypography.caption),
             )
         }
+    }
 
-        AnimatedVisibility(visible = expanded) {
-            if (message.text.isNotBlank()) {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = MomoSpacing.xl, top = MomoSpacing.xs)
-                        .clip(RoundedCornerShape(MomoCorners.chip))
-                        .background(theme.bgSecondary.copy(alpha = 0.5f))
-                        .padding(MomoSpacing.sm)
-                ) {
-                    MarkdownMessageBody(content = message.text, theme = theme)
+    if (expanded) {
+        ModalBottomSheet(onDismissRequest = { expanded = false }, containerColor = theme.bgSecondary) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = MomoSpacing.xl)
+            ) {
+                Text(
+                    label,
+                    color = theme.textPrimary,
+                    style = momoTextStyle(MomoTypography.headline.copy(fontWeight = FontWeight.Bold)),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = MomoSpacing.xl, vertical = MomoSpacing.sm),
+                )
+                if (message.text.isNotBlank()) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = MomoSpacing.xl)
+                            .clip(RoundedCornerShape(MomoCorners.chip))
+                            .background(theme.bgSecondary.copy(alpha = 0.5f))
+                            .padding(MomoSpacing.sm)
+                    ) {
+                        MarkdownMessageBody(content = message.text, theme = theme)
+                    }
                 }
             }
         }
