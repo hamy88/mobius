@@ -1,26 +1,26 @@
 {
-  "version": "0.4.5.8",
-  "generatedAt": "2026-10-26T00:16:14Z",
+  "version": "0.4.5.10",
+  "generatedAt": "2026-10-30T04:33:49Z",
   "builds": [
     {
       "platform": "android",
       "arch": "arm64",
       "format": "apk",
-      "file": "mobius-mobile-0.4.5.8-android-arm64.apk",
+      "file": "mobius-mobile-0.4.5.10-android-arm64.apk",
       "size": 5185644,
-      "version": "0.4.5.8",
-      "versionCode": 37,
-      "sha256": "4bbdd8f83ab39f8ae247c1135f77c5aa9595e76e6d9005bcd33cf34f5e038491"
+      "version": "0.4.5.10",
+      "versionCode": 39,
+      "sha256": "4b589606bd6f029e68e4df25f0b8e3648164f630348c5b5577dda1b634ffc714"
     },
     {
       "platform": "android",
       "arch": "armeabi-v7a",
       "format": "apk",
-      "file": "mobius-mobile-0.4.5.8-android-armeabi-v7a.apk",
+      "file": "mobius-mobile-0.4.5.10-android-armeabi-v7a.apk",
       "size": 5193612,
-      "version": "0.4.5.8",
-      "versionCode": 37,
-      "sha256": "eb7e1af50242a79ba7ac76ca1c7a27d1e31221cfe79e9bb9c6af2e36453dbed5"
+      "version": "0.4.5.10",
+      "versionCode": 39,
+      "sha256": "9614cfff706e43c61c4490b3e7e0da5bcac1c42b3c2130489b8e409b1db4c933"
     }
   ]
 }
