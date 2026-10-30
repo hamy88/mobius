@@ -1076,6 +1076,20 @@ private suspend fun handleConvSseEvent(
                 role.contains("system", ignoreCase = true) -> MessageAuthor.System
                 else -> MessageAuthor.Momo
             }
+            // 后端快照已把 thinking / tool 过程拆成独立消息(role=thinking|tool), 这里映射成过程卡片。
+            val isThinking = role.contains("thinking", ignoreCase = true) || role.contains("reasoning", ignoreCase = true)
+            val isTool = role.contains("tool", ignoreCase = true)
+            val processType = when {
+                isThinking -> "thinking"
+                isTool -> "tool_call"
+                else -> null
+            }
+            val toolName = obj.string("tool_summary")?.takeIf { it.isNotBlank() }
+            val processLabel = when {
+                isThinking -> "思考过程"
+                isTool -> if (toolName != null) "调用工具：$toolName" else "调用工具"
+                else -> null
+            }
             if (isAssistantInternalUserMessage(author, content)) return@mapIndexedNotNull null
             // 运维通知及其 agent 转述("又来了 xxx 第N次")对用户无价值, 不进聊天流。
             // 注意: 不限 System — agent 常把提醒内容当普通回复转述(author=assistant)。
@@ -1087,6 +1101,8 @@ private suspend fun handleConvSseEvent(
                 text = content,
                 time = formatBackendTime(createdAt).ifBlank { nowShortTime() },
                 createdAtMillis = parseBackendTimeMillis(createdAt),
+                processType = processType,
+                processLabel = processLabel,
             )
         }
     }

@@ -672,6 +672,50 @@ function assistantResponsesFromEntries(entries: any[]): any[] {
   return responses;
 }
 
+/**
+ * 从 store 条目里提取 thinking / tool_use 过程(思考/推理 + 工具命令), 供移动端像网页版一样
+ * 在正文之外展示「思考过程 / 调用工具」折叠卡片。此前快照只吐 assistant 正文文本, 思考与推理被丢。
+ * 返回 [{ id, role:'thinking'|'tool', content, tool_summary, created_at, seq }], seq 用于同时间戳排序。
+ */
+function assistantProcessesFromEntries(entries: any[]): any[] {
+  const processes: any[] = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (entry?.type !== 'assistant') continue;
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (let j = 0; j < content.length; j += 1) {
+      const block = content[j];
+      if (!block || typeof block !== 'object') continue;
+      const createdAt = entry.timestamp || entry.created_at || entry.payload?.timestamp || null;
+      if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
+        processes.push({
+          id: `${i}:thinking:${j}`,
+          role: 'thinking',
+          content: block.thinking.trim(),
+          created_at: createdAt,
+          seq: i * 1000 + j,
+        });
+      } else if (block.type === 'tool_use') {
+        const name = block.name || '工具';
+        const input = block.input;
+        const inputText = input && typeof input === 'object' && input.command
+          ? String(input.command)
+          : (input ? JSON.stringify(input) : '');
+        processes.push({
+          id: `${i}:tool:${j}`,
+          role: 'tool',
+          content: inputText ? `${name}: ${inputText}` : name,
+          tool_summary: name,
+          created_at: createdAt,
+          seq: i * 1000 + j,
+        });
+      }
+    }
+  }
+  return processes;
+}
+
 function sessionStatus(session: any): { alive: boolean; working: boolean; failed: boolean; agent_status: string } {
   const backend = backendForSession(session);
   let alive = false;
@@ -717,7 +761,7 @@ function readUserMessages(sessionId: string): any[] {
   }));
 }
 
-function conversationMessages(sessionId: string, responses: any[]): any[] {
+function conversationMessages(sessionId: string, responses: any[], processes: any[] = []): any[] {
   const users = readUserMessages(sessionId);
   const assistant = responses.map((response, index) => ({
     id: `assistant:${response.id}`,
@@ -725,12 +769,26 @@ function conversationMessages(sessionId: string, responses: any[]): any[] {
     content: response.content,
     created_at: response.created_at || null,
     response_index: index,
+    seq: 0,
   }));
-  return users.concat(assistant).sort((a, b) => {
+  const processMessages = (processes || []).map((p) => ({
+    id: p.id,
+    role: p.role, // 'thinking' | 'tool'
+    content: p.content,
+    tool_summary: p.tool_summary,
+    created_at: p.created_at || null,
+    seq: p.seq ?? 0,
+  }));
+  // 同时间戳时按 role 优先级排序: user < thinking < tool < assistant, 让思考/工具命令排在正文之前。
+  const roleOrder: Record<string, number> = { user: 0, thinking: 1, tool: 2, assistant: 3 };
+  return users.concat(assistant).concat(processMessages).sort((a, b) => {
     const at = a.created_at ? Date.parse(a.created_at) : NaN;
     const bt = b.created_at ? Date.parse(b.created_at) : NaN;
     if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return at - bt;
-    if (a.role !== b.role) return a.role === 'user' ? -1 : 1;
+    const ao = roleOrder[a.role] ?? 4;
+    const bo = roleOrder[b.role] ?? 4;
+    if (ao !== bo) return ao - bo;
+    if (a.seq !== b.seq) return (a.seq ?? 0) - (b.seq ?? 0);
     return String(a.id).localeCompare(String(b.id));
   });
 }
@@ -806,8 +864,9 @@ function readAssistantSnapshot(user: any, sessionId: string): any {
   const history = backend.getHistory(sessionId);
   const entries = Array.isArray(history?.entries) ? history.entries : [];
   const responses = assistantResponsesFromEntries(entries);
+  const processes = assistantProcessesFromEntries(entries);
   const question = readQuestion(sessionId);
-  const messages = conversationMessages(sessionId, responses);
+  const messages = conversationMessages(sessionId, responses, processes);
   const status = sessionStatus(session);
   const modelUnavailableReason = assistantSessionModelUnavailableReason(session);
   // 与 /api/sessions/:id/status 一致:优先看项目 bind_path 仓库根下的 flag 目录。
